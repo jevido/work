@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"dev.jevido/work/internal/agents"
+	"dev.jevido/work/internal/board"
 )
 
 // PlanMode is Anton's decision about how to approach a task.
@@ -22,13 +23,27 @@ const (
 type PlanStep struct {
 	AgentID string `json:"agentId"`
 	Task    string `json:"task"`
+	// TaskID names an existing board card to run instead of opening a new one,
+	// so "get Jeff onto T4" continues that task rather than duplicating it.
+	TaskID string `json:"taskId,omitempty"`
 }
 
-// Plan is Anton's answer to "who should do this?".
+// BoardUpdate is Anton editing a card without running anything: closing a task
+// you say is finished, renaming one, moving it to someone else.
+type BoardUpdate struct {
+	TaskID  string       `json:"taskId"`
+	Status  board.Status `json:"status,omitempty"`
+	Title   string       `json:"title,omitempty"`
+	AgentID string       `json:"agentId,omitempty"`
+}
+
+// Plan is Anton's answer to "who should do this?", plus any bookkeeping he
+// wants to do on the board while he is there.
 type Plan struct {
-	Mode   PlanMode   `json:"mode"`
-	Reason string     `json:"reason"`
-	Steps  []PlanStep `json:"steps"`
+	Mode    PlanMode      `json:"mode"`
+	Reason  string        `json:"reason"`
+	Steps   []PlanStep    `json:"steps"`
+	Updates []BoardUpdate `json:"updates"`
 }
 
 // maxSteps caps how many specialists one task can occupy. Every step is a
@@ -40,7 +55,7 @@ const maxSteps = 4
 // repeated agents, drops empty tasks, caps the step count, and falls back to
 // ModeSelf when nothing usable is left. The frontend and the runner can then
 // trust the plan without re-checking it.
-func (p *Plan) normalise(reg Registry) {
+func (p *Plan) normalise(reg Registry, known func(taskID string) bool) {
 	seen := make(map[string]bool, len(p.Steps))
 	kept := p.Steps[:0]
 
@@ -54,13 +69,43 @@ func (p *Plan) normalise(reg Registry) {
 		if !ok || agent.Role == agents.RoleCoordinator {
 			continue
 		}
+		taskID := strings.TrimSpace(step.TaskID)
+		// A card Anton invented does not exist, so drop the reference and let
+		// the step open a fresh card instead of silently writing nowhere.
+		if taskID != "" && (known == nil || !known(taskID)) {
+			taskID = ""
+		}
 		seen[id] = true
-		kept = append(kept, PlanStep{AgentID: id, Task: task})
+		kept = append(kept, PlanStep{AgentID: id, Task: task, TaskID: taskID})
 		if len(kept) == maxSteps {
 			break
 		}
 	}
 	p.Steps = kept
+
+	updates := p.Updates[:0]
+	for _, u := range p.Updates {
+		u.TaskID = strings.TrimSpace(u.TaskID)
+		u.Title = strings.TrimSpace(u.Title)
+		u.AgentID = strings.TrimSpace(u.AgentID)
+		if u.TaskID == "" || known == nil || !known(u.TaskID) {
+			continue
+		}
+		if u.AgentID != "" {
+			if _, ok := reg.Get(u.AgentID); !ok {
+				u.AgentID = ""
+			}
+		}
+		if u.Status != "" && !u.Status.Valid() {
+			u.Status = ""
+		}
+		// An update that changes nothing is not worth carrying.
+		if u.Status == "" && u.Title == "" && u.AgentID == "" {
+			continue
+		}
+		updates = append(updates, u)
+	}
+	p.Updates = updates
 
 	if len(p.Steps) == 0 {
 		p.Mode = ModeSelf
@@ -107,12 +152,41 @@ func planSchema(reg Registry) (string, error) {
 							"type":        "string",
 							"description": "The self-contained task for this specialist.",
 						},
+						"taskId": map[string]any{
+							"type": "string",
+							"description": "An existing board task this continues, " +
+								"e.g. T3. Omit to open a new task.",
+						},
 					},
 					"required": []string{"agentId", "task"},
 				},
 			},
+			"updates": map[string]any{
+				"type": "array",
+				"description": "Edits to existing board tasks that need no work " +
+					"run: closing one, renaming one, reassigning one.",
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"taskId": map[string]any{
+							"type":        "string",
+							"description": "The task to change, e.g. T3.",
+						},
+						"status": map[string]any{
+							"type": "string",
+							"enum": []string{
+								string(board.StatusTodo), string(board.StatusDoing),
+								string(board.StatusDone), string(board.StatusBlocked),
+							},
+						},
+						"title":   map[string]any{"type": "string"},
+						"agentId": map[string]any{"type": "string", "enum": ids},
+					},
+					"required": []string{"taskId"},
+				},
+			},
 		},
-		"required": []string{"mode", "reason", "steps"},
+		"required": []string{"mode", "reason", "steps", "updates"},
 	}
 
 	out, err := json.Marshal(schema)
@@ -129,7 +203,7 @@ func planSchema(reg Registry) (string, error) {
 // followUp marks a request that arrives mid-conversation. The routing turn
 // itself is stateless, so it is told this much rather than being handed the
 // history: it changes how a terse "and now the other half" should be read.
-func planPrompt(reg Registry, task string, followUp bool) string {
+func planPrompt(reg Registry, task string, followUp bool, cards []board.Card) string {
 	var b strings.Builder
 	b.WriteString("Route this task.\n\nYour specialists:\n")
 	for _, a := range reg.All() {
@@ -144,6 +218,22 @@ func planPrompt(reg Registry, task string, followUp bool) string {
 	b.WriteString("and give each one a self-contained task that does not depend on ")
 	b.WriteString("another specialist's answer, since they work at the same time. ")
 	b.WriteString("Do not delegate for the sake of it.\n")
+
+	b.WriteString("\nYou own the task board. It is the user's window into what ")
+	b.WriteString("you have assigned, and they refer to tasks by ID.\n")
+	if len(cards) == 0 {
+		b.WriteString("The board is empty.\n")
+	} else {
+		b.WriteString("The board:\n")
+		for _, c := range cards {
+			fmt.Fprintf(&b, "- %s [%s] %s: %s\n", c.ID, c.Status, c.AgentID, c.Title)
+		}
+		b.WriteString("\nUse \"updates\" to close, rename or reassign a task the ")
+		b.WriteString("user mentions, and give a step a \"taskId\" when it ")
+		b.WriteString("continues one of these rather than starting something new. ")
+		b.WriteString("Only touch a task that already exists above.\n")
+	}
+
 	if followUp {
 		b.WriteString("\nThis is a follow-up in an ongoing conversation, so the ")
 		b.WriteString("task may lean on what was already discussed. The agent who ")

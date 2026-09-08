@@ -11,6 +11,8 @@ export type {
     AgentEvent,
     AgentStatus,
     BoardEvent,
+    BoardUpdate,
+    ChangesEvent,
     ClaudeEvent,
     PlanStep,
     RunEvent,

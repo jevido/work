@@ -1,5 +1,6 @@
 import { Events } from "@wailsio/runtime";
 import * as Workbench from "../../../bindings/dev.jevido/work/services/workbenchservice.js";
+import { describeTool, type ToolCall } from "../diff/tools";
 import {
   CLAUDE_CANCELLED,
   CLAUDE_ERROR,
@@ -8,6 +9,7 @@ import {
   CLAUDE_TEXT,
   CLAUDE_THINKING,
   CLAUDE_TOOL,
+  CLAUDE_TOOL_RESULT,
   RUN_FINISHED,
   RUN_PLAN,
   RUN_STARTED,
@@ -26,11 +28,39 @@ export type Phase = "plan" | "work" | "synthesis";
 
 export type TurnStatus = "streaming" | "done" | "error" | "cancelled";
 
+/** A run of prose inside a turn. */
+export interface TextPart {
+  kind: "text";
+  id: string;
+  text: string;
+}
+
+/** A tool call inside a turn, with its arguments, result and any diff. */
+export interface ToolPart {
+  kind: "tool";
+  id: string;
+  call: ToolCall;
+}
+
+/**
+ * A turn's output in order. Prose and tool calls interleave as they happened,
+ * because "he read this file, then said that" is the part worth seeing.
+ */
+export type TurnPart = TextPart | ToolPart;
+
 /** Something you said. */
 export interface UserEntry {
   kind: "user";
   id: string;
   text: string;
+}
+
+/** One edit Anton made to the board while routing. */
+export interface PlanUpdate {
+  taskId: string;
+  status: string;
+  title: string;
+  agentName: string;
 }
 
 /** Anton's routing decision, in his own voice. */
@@ -41,7 +71,14 @@ export interface PlanEntry {
   colour: string;
   mode: "self" | "team";
   reason: string;
-  steps: { agentId: string; agentName: string; colour: string; task: string }[];
+  steps: {
+    agentId: string;
+    agentName: string;
+    colour: string;
+    task: string;
+    taskId: string;
+  }[];
+  updates: PlanUpdate[];
 }
 
 /** One agent's turn. */
@@ -52,8 +89,7 @@ export interface AgentEntry {
   agentName: string;
   colour: string;
   phase: Phase;
-  text: string;
-  tools: string[];
+  parts: TurnPart[];
   status: TurnStatus;
   error: string | null;
   model: string;
@@ -141,8 +177,15 @@ export class ClaudeSession {
               agentName: agent.name,
               colour: agent.colour,
               task: s.task,
+              taskId: s.taskId ?? "",
             };
           }),
+          updates: (e.data.updates ?? []).map((u) => ({
+            taskId: u.taskId,
+            status: u.status ?? "",
+            title: u.title ?? "",
+            agentName: u.agentId ? this.identify(u.agentId).name : "",
+          })),
         });
         this.status = "working";
       }),
@@ -184,13 +227,24 @@ export class ClaudeSession {
         const turn = this.turnFor(e.data);
         if (!name || !turn) return;
 
-        // Text before and after a tool call arrives as separate content blocks
-        // with no separator of their own, so the two runs of prose would
-        // otherwise be glued together mid-sentence.
-        this.separate(turn.id);
+        // Flush prose first, so the tool row lands after the sentence that
+        // introduced it rather than before it.
+        this.flush();
+        turn.parts.push({
+          kind: "tool",
+          id: `${turn.id}:${e.data.toolId || this.mintId("tool")}`,
+          call: describeTool(e.data.toolId ?? "", name, e.data.toolInput ?? ""),
+        });
+      }),
 
-        if (turn.tools[turn.tools.length - 1] === name) return;
-        turn.tools.push(name);
+      Events.On(CLAUDE_TOOL_RESULT, (e) => {
+        const toolId = e.data.toolId ?? "";
+        if (!toolId) return;
+        const part = this.findToolPart(toolId);
+        if (!part) return;
+        part.call.result = e.data.toolResult ?? "";
+        part.call.failed = e.data.toolFailed ?? false;
+        part.call.done = true;
       }),
 
       Events.On(CLAUDE_RESULT, (e) => {
@@ -323,8 +377,7 @@ export class ClaudeSession {
       agentName: who.name,
       colour: who.colour,
       phase: data.phase === "synthesis" ? "synthesis" : "work",
-      text: "",
-      tools: [],
+      parts: [],
       status: "streaming",
       error: null,
       model: "",
@@ -359,20 +412,29 @@ export class ClaudeSession {
       const turn = this.entries.find(
         (e): e is AgentEntry => e.kind === "agent" && e.id === id,
       );
-      if (turn) turn.text += text;
+      if (!turn) continue;
+
+      // Append to the trailing run of prose, or start a new one if the last
+      // thing that happened was a tool call.
+      const last = turn.parts[turn.parts.length - 1];
+      if (last && last.kind === "text") {
+        last.text += text;
+      } else {
+        turn.parts.push({ kind: "text", id: this.mintId("text"), text });
+      }
     }
     this.pending.clear();
   }
 
-  /** Ensures the next text for a turn starts on a new paragraph. */
-  private separate(id: string): void {
-    const pending = this.pending.get(id);
-    const turn = this.entries.find(
-      (e): e is AgentEntry => e.kind === "agent" && e.id === id,
-    );
-    const tail = pending ?? turn?.text ?? "";
-    if (!tail || tail.endsWith("\n\n")) return;
-    this.pending.set(id, (pending ?? "") + (tail.endsWith("\n") ? "\n" : "\n\n"));
+  /** Finds a tool part by the tool-use ID the backend gave it. */
+  private findToolPart(toolId: string): ToolPart | null {
+    for (const entry of this.entries) {
+      if (entry.kind !== "agent") continue;
+      for (const part of entry.parts) {
+        if (part.kind === "tool" && part.call.id === toolId) return part;
+      }
+    }
+    return null;
   }
 
   /** Closes out any turn still marked streaming when the run ends. */

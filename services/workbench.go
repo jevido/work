@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"dev.jevido/work/internal/board"
+	"dev.jevido/work/internal/changes"
 	"dev.jevido/work/internal/workbench"
 )
 
@@ -45,6 +46,21 @@ func (s *WorkbenchService) Submit(agentID, prompt string) (workbench.Task, error
 		return workbench.Task{}, errors.New("prompt is too large")
 	}
 	return s.wb.Submit(strings.TrimSpace(agentID), prompt)
+}
+
+// Changes lists the files the last run touched, with their diffs.
+func (s *WorkbenchService) Changes() []changes.Change {
+	return s.wb.Changes()
+}
+
+// Revert undoes one of those file changes, restoring the content the run
+// started with rather than the last commit.
+func (s *WorkbenchService) Revert(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return errors.New("path is empty")
+	}
+	return s.wb.Revert(path)
 }
 
 // Board returns the task board: what Anton has assigned and how far along it is.

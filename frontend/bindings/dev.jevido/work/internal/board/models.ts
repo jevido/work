@@ -3,6 +3,10 @@
 
 /**
  * Card is one task on the board.
+ * 
+ * The ID is short and human-typable on purpose: it is how you refer to a task
+ * when talking to Anton ("close T3", "give T4 to Chris"), so it has to be
+ * something you can read off the screen and say out loud.
  */
 export interface Card {
     "id": string;

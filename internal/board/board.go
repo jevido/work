@@ -23,6 +23,10 @@ const (
 )
 
 // Card is one task on the board.
+//
+// The ID is short and human-typable on purpose: it is how you refer to a task
+// when talking to Anton ("close T3", "give T4 to Chris"), so it has to be
+// something you can read off the screen and say out loud.
 type Card struct {
 	ID string `json:"id"`
 	// RunID ties the card to the request that created it.
@@ -34,6 +38,16 @@ type Card struct {
 	// Note carries a failure reason for a blocked card.
 	Note   string `json:"note,omitempty"`
 	Status Status `json:"status"`
+}
+
+// Valid reports whether a status is one the board recognises. Anton's plans are
+// model-authored, so a status arriving from one has to be checked.
+func (s Status) Valid() bool {
+	switch s {
+	case StatusTodo, StatusDoing, StatusDone, StatusBlocked:
+		return true
+	}
+	return false
 }
 
 // Board is an ordered set of cards, safe for concurrent use.
@@ -60,7 +74,7 @@ func (b *Board) Add(runID, agentID, title string) string {
 	defer b.mu.Unlock()
 
 	b.seq++
-	id := runID + "-c" + itoa(b.seq)
+	id := "T" + itoa(b.seq)
 	b.cards = append(b.cards, Card{
 		ID:      id,
 		RunID:   runID,
@@ -69,6 +83,47 @@ func (b *Board) Add(runID, agentID, title string) string {
 		Status:  StatusTodo,
 	})
 	return id
+}
+
+// Update applies an edit to an existing card. Empty fields are left alone, so
+// a caller can change a title without touching the status. Reports whether the
+// card existed.
+func (b *Board) Update(id, title, agentID string, status Status) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	for i := range b.cards {
+		if b.cards[i].ID != id {
+			continue
+		}
+		if title != "" {
+			b.cards[i].Title = title
+		}
+		if agentID != "" {
+			b.cards[i].AgentID = agentID
+		}
+		if status.Valid() {
+			b.cards[i].Status = status
+			if status != StatusBlocked {
+				b.cards[i].Note = ""
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// Has reports whether a card with this ID is on the board.
+func (b *Board) Has(id string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	for i := range b.cards {
+		if b.cards[i].ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // SetStatus moves a card to another column. A note is kept only for a blocked

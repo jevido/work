@@ -1,7 +1,13 @@
 <script lang="ts">
   import type { ClaudeSession, Phase, RunStatus } from "../lib/claude/session.svelte";
+  import type { ChangeReview as ChangeReviewState } from "../lib/changes/changes.svelte";
+  import ChangeReview from "./ChangeReview.svelte";
+  import ToolRow from "./ToolRow.svelte";
 
-  let { session }: { session: ClaudeSession } = $props();
+  let {
+    session,
+    review,
+  }: { session: ClaudeSession; review: ChangeReviewState } = $props();
 
   let prompt = $state("");
   let scroller: HTMLDivElement | undefined = $state();
@@ -90,7 +96,12 @@
     // Touch what grows so this reruns as the conversation extends.
     void session.entries.length;
     for (const entry of session.entries) {
-      if (entry.kind === "agent") void entry.text.length;
+      if (entry.kind !== "agent") continue;
+      void entry.parts.length;
+      for (const part of entry.parts) {
+        if (part.kind === "text") void part.text.length;
+        else void part.call.done;
+      }
     }
     const el = scroller;
     if (!el || !pinned) return;
@@ -130,7 +141,18 @@
               <div class="step">
                 <span class="dot" style:background={step.colour}></span>
                 <span class="who">{step.agentName}</span>
-                <span class="what">{step.task}</span>
+                <span class="what">
+                  {step.task}
+                  {#if step.taskId}<span class="ref">{step.taskId}</span>{/if}
+                </span>
+              </div>
+            {/each}
+            {#each entry.updates as update (update.taskId)}
+              <div class="update">
+                <span class="ref">{update.taskId}</span>
+                {#if update.status}<span class="badge">{update.status}</span>{/if}
+                {#if update.agentName}<span>→ {update.agentName}</span>{/if}
+                {#if update.title}<span class="what">“{update.title}”</span>{/if}
               </div>
             {/each}
           </div>
@@ -146,12 +168,15 @@
             {#if entry.status === "streaming"}
               <span class="pulse" style:background={entry.colour}></span>
             {/if}
-            {#each entry.tools as tool, i (`${tool}-${i}`)}
-              <span class="chip">{tool}</span>
-            {/each}
           </div>
 
-          {#if entry.text}<pre>{entry.text}</pre>{/if}
+          {#each entry.parts as part (part.id)}
+            {#if part.kind === "text"}
+              {#if part.text.trim()}<pre>{part.text}</pre>{/if}
+            {:else}
+              <div class="tools"><ToolRow call={part.call} /></div>
+            {/if}
+          {/each}
 
           {#if entry.error}
             <div class="error" role="alert">{entry.error}</div>
@@ -170,6 +195,8 @@
         </div>
       {/if}
     {/each}
+
+    <ChangeReview {review} />
   </div>
 
   <div class="composer">
@@ -310,16 +337,6 @@
     }
   }
 
-  .chip {
-    padding: 1px 7px;
-    border: 1px solid var(--line);
-    border-radius: 999px;
-    background: var(--panel-2);
-    color: var(--muted);
-    font-size: 10.5px;
-    white-space: nowrap;
-  }
-
   /* Your own words sit in a block of their own, so the conversation reads as
      an exchange rather than a log of replies. */
   .you .name {
@@ -369,6 +386,41 @@
 
   .step .what {
     color: var(--muted);
+  }
+
+  /* Board bookkeeping Anton did on the way past: closing a task you named,
+     renaming one, handing one over. */
+  .update {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 3px 0;
+    color: var(--muted);
+    font-size: 11.5px;
+    user-select: text;
+  }
+
+  .ref {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 10.5px;
+    color: var(--text);
+  }
+
+  .badge {
+    padding: 1px 6px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  /* Tool rows sit in the same left-hand channel as the prose, so a turn reads
+     as one column of activity. */
+  .tools {
+    padding-left: 14px;
+    border-left: 1px solid var(--line);
   }
 
   pre {

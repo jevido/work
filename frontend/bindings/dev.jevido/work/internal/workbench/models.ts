@@ -7,6 +7,9 @@ import * as agents$0 from "../agents/models.js";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
 import * as board$0 from "../board/models.js";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
+import * as changes$0 from "../changes/models.js";
 
 /**
  * AgentEvent is the payload for every agent:* event.
@@ -61,6 +64,15 @@ export interface AgentStatus {
      * agent's main model. Empty falls back to Model.
      */
     "planModel"?: string;
+
+    /**
+     * PermissionMode is the Claude permission mode this agent runs under.
+     * Empty inherits the user's own configuration, so Work never grants an
+     * agent more than the user has already allowed. Setting it to
+     * "acceptEdits" lets the agent write files, with Work's change review as
+     * the safety net.
+     */
+    "permissionMode"?: string;
     "state": AgentState;
     "taskId"?: string;
 }
@@ -70,6 +82,36 @@ export interface AgentStatus {
  */
 export interface BoardEvent {
     "cards": board$0.Card[] | null;
+}
+
+/**
+ * BoardUpdate is Anton editing a card without running anything: closing a task
+ * you say is finished, renaming one, moving it to someone else.
+ */
+export interface BoardUpdate {
+    "taskId": string;
+    "status"?: board$0.Status;
+    "title"?: string;
+    "agentId"?: string;
+}
+
+/**
+ * ChangesEvent is the payload for run:changes.
+ */
+export interface ChangesEvent {
+    "runId": string;
+
+    /**
+     * Changes is empty when the run touched nothing, or when the working
+     * directory is not a git repository.
+     */
+    "changes": changes$0.Change[] | null;
+
+    /**
+     * Tracked is false when Work cannot tell what changed, because the working
+     * directory is not a git working tree.
+     */
+    "tracked": boolean;
 }
 
 /**
@@ -84,6 +126,27 @@ export interface ClaudeEvent {
     "sessionId"?: string;
     "model"?: string;
     "toolName"?: string;
+
+    /**
+     * ToolID pairs a tool call with its result.
+     */
+    "toolId"?: string;
+
+    /**
+     * ToolInput is the tool's arguments as JSON text, so the frontend can show
+     * what an agent actually asked for -- which file, which command.
+     */
+    "toolInput"?: string;
+
+    /**
+     * ToolResult is the tool's output, already truncated.
+     */
+    "toolResult"?: string;
+
+    /**
+     * ToolFailed marks a rejected or failed tool call.
+     */
+    "toolFailed"?: boolean;
     "message"?: string;
     "costUsd"?: number;
 
@@ -146,6 +209,12 @@ export enum PlanMode {
 export interface PlanStep {
     "agentId": string;
     "task": string;
+
+    /**
+     * TaskID names an existing board card to run instead of opening a new one,
+     * so "get Jeff onto T4" continues that task rather than duplicating it.
+     */
+    "taskId"?: string;
 }
 
 /**
@@ -172,11 +241,12 @@ export interface RunEvent {
     "cancelled"?: boolean;
 
     /**
-     * Mode, Reason and Steps are set on EventRunPlan.
+     * Mode, Reason, Steps and Updates are set on EventRunPlan.
      */
     "mode"?: PlanMode;
     "reason"?: string;
     "steps"?: PlanStep[] | null;
+    "updates"?: BoardUpdate[] | null;
 }
 
 /**

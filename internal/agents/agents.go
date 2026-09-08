@@ -57,6 +57,12 @@ type Agent struct {
 	// AllowedTools restricts which tools the agent may use. Empty means the
 	// local Claude defaults apply.
 	AllowedTools []string `json:"-"`
+	// PermissionMode is the Claude permission mode this agent runs under.
+	// Empty inherits the user's own configuration, so Work never grants an
+	// agent more than the user has already allowed. Setting it to
+	// "acceptEdits" lets the agent write files, with Work's change review as
+	// the safety net.
+	PermissionMode string `json:"permissionMode,omitempty"`
 }
 
 // Registry is an ordered, immutable set of agents.

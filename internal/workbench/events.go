@@ -7,7 +7,10 @@
 // from here; it only receives the semantic events below and animates locally.
 package workbench
 
-import "dev.jevido/work/internal/board"
+import (
+	"dev.jevido/work/internal/board"
+	"dev.jevido/work/internal/changes"
+)
 
 // Event names emitted to the frontend. Keep these in sync with
 // frontend/src/lib/bridge/events.ts.
@@ -28,8 +31,10 @@ const (
 	EventClaudeText = "claude:text"
 	// EventClaudeThinking carries a chunk of streamed thinking text.
 	EventClaudeThinking = "claude:thinking"
-	// EventClaudeTool announces a tool call.
+	// EventClaudeTool announces a tool call, with the arguments the agent chose.
 	EventClaudeTool = "claude:tool"
+	// EventClaudeToolResult carries what a tool call returned.
+	EventClaudeToolResult = "claude:tool-result"
 	// EventClaudeResult carries the final result of a task.
 	EventClaudeResult = "claude:result"
 	// EventClaudeError carries a failure message.
@@ -44,6 +49,9 @@ const (
 	EventRunPlan = "run:plan"
 	// EventRunFinished closes a run, successfully or not.
 	EventRunFinished = "run:finished"
+	// EventRunChanges lists the files a run touched, with their diffs, so the
+	// work can be reviewed and reverted.
+	EventRunChanges = "run:changes"
 
 	// EventBoardUpdated carries the whole task board after any change. The
 	// board is small and changes a handful of times per run, so publishing a
@@ -89,16 +97,25 @@ type AgentEvent struct {
 
 // ClaudeEvent is the payload for every claude:* event.
 type ClaudeEvent struct {
-	TaskID    string  `json:"taskId"`
-	RunID     string  `json:"runId"`
-	Phase     Phase   `json:"phase"`
-	AgentID   string  `json:"agentId"`
-	Text      string  `json:"text,omitempty"`
-	SessionID string  `json:"sessionId,omitempty"`
-	Model     string  `json:"model,omitempty"`
-	ToolName  string  `json:"toolName,omitempty"`
-	Message   string  `json:"message,omitempty"`
-	CostUSD   float64 `json:"costUsd,omitempty"`
+	TaskID    string `json:"taskId"`
+	RunID     string `json:"runId"`
+	Phase     Phase  `json:"phase"`
+	AgentID   string `json:"agentId"`
+	Text      string `json:"text,omitempty"`
+	SessionID string `json:"sessionId,omitempty"`
+	Model     string `json:"model,omitempty"`
+	ToolName  string `json:"toolName,omitempty"`
+	// ToolID pairs a tool call with its result.
+	ToolID string `json:"toolId,omitempty"`
+	// ToolInput is the tool's arguments as JSON text, so the frontend can show
+	// what an agent actually asked for -- which file, which command.
+	ToolInput string `json:"toolInput,omitempty"`
+	// ToolResult is the tool's output, already truncated.
+	ToolResult string `json:"toolResult,omitempty"`
+	// ToolFailed marks a rejected or failed tool call.
+	ToolFailed bool    `json:"toolFailed,omitempty"`
+	Message    string  `json:"message,omitempty"`
+	CostUSD    float64 `json:"costUsd,omitempty"`
 	// DurationMS is the wall-clock duration reported by the Claude CLI.
 	DurationMS int64 `json:"durationMs,omitempty"`
 }
@@ -114,13 +131,25 @@ type RunEvent struct {
 	Message string `json:"message,omitempty"`
 	// Cancelled marks a run the user stopped.
 	Cancelled bool `json:"cancelled,omitempty"`
-	// Mode, Reason and Steps are set on EventRunPlan.
-	Mode   PlanMode   `json:"mode,omitempty"`
-	Reason string     `json:"reason,omitempty"`
-	Steps  []PlanStep `json:"steps,omitempty"`
+	// Mode, Reason, Steps and Updates are set on EventRunPlan.
+	Mode    PlanMode      `json:"mode,omitempty"`
+	Reason  string        `json:"reason,omitempty"`
+	Steps   []PlanStep    `json:"steps,omitempty"`
+	Updates []BoardUpdate `json:"updates,omitempty"`
 }
 
 // BoardEvent is the payload for board:updated.
 type BoardEvent struct {
 	Cards []board.Card `json:"cards"`
+}
+
+// ChangesEvent is the payload for run:changes.
+type ChangesEvent struct {
+	RunID string `json:"runId"`
+	// Changes is empty when the run touched nothing, or when the working
+	// directory is not a git repository.
+	Changes []changes.Change `json:"changes"`
+	// Tracked is false when Work cannot tell what changed, because the working
+	// directory is not a git working tree.
+	Tracked bool `json:"tracked"`
 }

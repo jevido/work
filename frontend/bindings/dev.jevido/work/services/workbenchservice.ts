@@ -15,6 +15,9 @@ import { Call as $Call, CancellablePromise as $CancellablePromise } from "@wails
 import * as board$0 from "../internal/board/models.js";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
+import * as changes$0 from "../internal/changes/models.js";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
 import * as workbench$0 from "../internal/workbench/models.js";
 
 /**
@@ -39,11 +42,26 @@ export function Cancel(runID: string): $CancellablePromise<void> {
 }
 
 /**
+ * Changes lists the files the last run touched, with their diffs.
+ */
+export function Changes(): $CancellablePromise<changes$0.Change[] | null> {
+    return $Call.ByID(2330002051);
+}
+
+/**
  * ClearConversation starts a new conversation: the agents forget the previous
  * exchange, and the next request opens a fresh session for each of them.
  */
 export function ClearConversation(): $CancellablePromise<void> {
     return $Call.ByID(1913763400);
+}
+
+/**
+ * Revert undoes one of those file changes, restoring the content the run
+ * started with rather than the last commit.
+ */
+export function Revert(path: string): $CancellablePromise<void> {
+    return $Call.ByID(261357752, path);
 }
 
 /**

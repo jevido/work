@@ -4,12 +4,14 @@
   import KanbanBoard from "./components/KanbanBoard.svelte";
   import OfficeCanvas from "./components/OfficeCanvas.svelte";
   import { TaskBoard } from "./lib/board/board.svelte";
+  import { ChangeReview } from "./lib/changes/changes.svelte";
   import { ClaudeSession } from "./lib/claude/session.svelte";
   import type { AgentIdentity } from "./lib/claude/session.svelte";
   import type { AgentSpec } from "./lib/office/renderer";
 
   const session = new ClaudeSession();
   const board = new TaskBoard();
+  const review = new ChangeReview();
 
   let agents = $state<AgentSpec[]>([]);
   let identities = $state<AgentIdentity[]>([]);
@@ -19,6 +21,7 @@
   // Backend events are wired once for the lifetime of the app.
   $effect(() => session.listen());
   $effect(() => board.listen());
+  $effect(() => review.listen());
 
   $effect(() => {
     let cancelled = false;
@@ -72,7 +75,7 @@
     </div>
   </div>
   <aside>
-    <ClaudeConsole {session} />
+    <ClaudeConsole {session} {review} />
   </aside>
 </main>
 

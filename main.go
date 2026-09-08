@@ -40,6 +40,7 @@ func init() {
 	application.RegisterEvent[workbench.ClaudeEvent](workbench.EventClaudeText)
 	application.RegisterEvent[workbench.ClaudeEvent](workbench.EventClaudeThinking)
 	application.RegisterEvent[workbench.ClaudeEvent](workbench.EventClaudeTool)
+	application.RegisterEvent[workbench.ClaudeEvent](workbench.EventClaudeToolResult)
 	application.RegisterEvent[workbench.ClaudeEvent](workbench.EventClaudeResult)
 	application.RegisterEvent[workbench.ClaudeEvent](workbench.EventClaudeError)
 	application.RegisterEvent[workbench.ClaudeEvent](workbench.EventClaudeCancelled)
@@ -49,6 +50,7 @@ func init() {
 	application.RegisterEvent[workbench.RunEvent](workbench.EventRunFinished)
 
 	application.RegisterEvent[workbench.BoardEvent](workbench.EventBoardUpdated)
+	application.RegisterEvent[workbench.ChangesEvent](workbench.EventRunChanges)
 }
 
 func main() {

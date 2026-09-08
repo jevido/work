@@ -27,6 +27,7 @@
             <div class="assignee">
               <span class="dot"></span>
               <span class="name">{who(card.agentId).name}</span>
+              <span class="ref">{card.id}</span>
             </div>
             <p class="title">{card.title}</p>
             {#if card.note}
@@ -122,6 +123,16 @@
     font-size: 10.5px;
     font-weight: 600;
     color: var(--muted);
+  }
+
+  /* The ID is how you refer to a task when talking to Anton, so it has to be
+     readable at a glance and selectable to copy. */
+  .ref {
+    margin-left: auto;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 10px;
+    color: var(--muted);
+    user-select: text;
   }
 
   .title {

@@ -12,6 +12,7 @@ import (
 
 	"dev.jevido/work/internal/agents"
 	"dev.jevido/work/internal/board"
+	"dev.jevido/work/internal/changes"
 	"dev.jevido/work/internal/claude"
 )
 
@@ -71,6 +72,9 @@ type Workbench struct {
 	// turns counts user requests in this conversation. Anton is told when he
 	// is answering a follow-up rather than an opening question.
 	turns int
+	// review holds the working tree as it was before the last run, so its file
+	// changes can be listed and reverted afterwards.
+	review *changes.Snapshot
 }
 
 // run is one top-level request, from prompt to final answer.
@@ -172,6 +176,18 @@ func (w *Workbench) Submit(agentID, prompt string) (Task, error) {
 	w.mu.Unlock()
 	r.followUp = followUp
 
+	// Record the working tree so the run's file changes can be reviewed. A
+	// non-repository is not an error; there is simply nothing to compare.
+	var review *changes.Snapshot
+	if changes.IsRepo(ctx, w.workDir) {
+		if snap, snapErr := changes.Take(ctx, w.workDir); snapErr == nil {
+			review = snap
+		}
+	}
+	w.mu.Lock()
+	w.review = review
+	w.mu.Unlock()
+
 	w.emit(EventRunStarted, RunEvent{RunID: r.id, Prompt: prompt})
 
 	go func() {
@@ -203,6 +219,18 @@ func (w *Workbench) ClearConversation() {
 	w.mu.Unlock()
 
 	w.board.Clear()
+	w.publishBoard()
+}
+
+// applyUpdates performs Anton's board edits. The plan has already been
+// normalised, so every update names a card that exists and carries a change.
+func (w *Workbench) applyUpdates(updates []BoardUpdate) {
+	if len(updates) == 0 {
+		return
+	}
+	for _, u := range updates {
+		w.board.Update(u.TaskID, u.Title, u.AgentID, u.Status)
+	}
 	w.publishBoard()
 }
 
@@ -245,12 +273,17 @@ func (w *Workbench) executeRouted(ctx context.Context, r *run, lead agents.Agent
 	if err != nil {
 		return err
 	}
+	// Anton's bookkeeping lands before any work starts, so the board already
+	// reflects what he decided by the time you read his reasoning.
+	w.applyUpdates(plan.Updates)
+
 	w.emit(EventRunPlan, RunEvent{
 		RunID:   r.id,
 		AgentID: lead.ID,
 		Mode:    plan.Mode,
 		Reason:  plan.Reason,
 		Steps:   plan.Steps,
+		Updates: plan.Updates,
 	})
 
 	// Anton kept it: one ordinary turn on the user's own words.
@@ -292,7 +325,7 @@ func (w *Workbench) plan(ctx context.Context, r *run, lead agents.Agent) (Plan, 
 
 	var structured json.RawMessage
 	err = w.runner.Run(ctx, claude.Request{
-		Prompt:             planPrompt(w.registry, r.prompt, r.followUp),
+		Prompt:             planPrompt(w.registry, r.prompt, r.followUp, w.board.Snapshot()),
 		Model:              model,
 		AppendSystemPrompt: lead.SystemPrompt,
 		WorkDir:            w.workDir,
@@ -334,7 +367,7 @@ func (w *Workbench) plan(ctx context.Context, r *run, lead agents.Agent) (Plan, 
 	if err := json.Unmarshal(structured, &plan); err != nil {
 		return Plan{}, fmt.Errorf("workbench: parse plan: %w", err)
 	}
-	plan.normalise(w.registry)
+	plan.normalise(w.registry, w.board.Has)
 	return plan, nil
 }
 
@@ -351,6 +384,14 @@ func (w *Workbench) delegate(ctx context.Context, r *run, plan Plan) ([]stepResu
 	cards := make([]string, len(plan.Steps))
 	for i, step := range plan.Steps {
 		if _, ok := w.registry.Get(step.AgentID); !ok {
+			continue
+		}
+		if step.TaskID != "" && w.board.Has(step.TaskID) {
+			// Continuing a task already on the board rather than opening a
+			// duplicate. normalise has already dropped invented IDs.
+			w.board.Update(step.TaskID, "", step.AgentID, "")
+			w.publishBoard()
+			cards[i] = step.TaskID
 			continue
 		}
 		cards[i] = w.addCard(r.id, step.AgentID, step.Task)
@@ -447,6 +488,7 @@ func (w *Workbench) streamStep(
 		AppendSystemPrompt: agent.SystemPrompt,
 		WorkDir:            w.workDir,
 		AllowedTools:       agent.AllowedTools,
+		PermissionMode:     agent.PermissionMode,
 		Resume:             resume,
 	}, func(e claude.Event) {
 		// The first sign of real output promotes the agent from assigned to
@@ -470,7 +512,18 @@ func (w *Workbench) streamStep(
 			w.emitClaude(EventClaudeThinking, r, agent.ID, taskID, phase, ClaudeEvent{Text: e.Text})
 		case claude.KindToolUse:
 			produced = true
-			w.emitClaude(EventClaudeTool, r, agent.ID, taskID, phase, ClaudeEvent{ToolName: e.ToolName})
+			w.emitClaude(EventClaudeTool, r, agent.ID, taskID, phase, ClaudeEvent{
+				ToolID:    e.ToolID,
+				ToolName:  e.ToolName,
+				ToolInput: string(e.ToolInput),
+			})
+		case claude.KindToolResult:
+			produced = true
+			w.emitClaude(EventClaudeToolResult, r, agent.ID, taskID, phase, ClaudeEvent{
+				ToolID:     e.ToolID,
+				ToolResult: e.ToolResult,
+				ToolFailed: e.ToolFailed,
+			})
 		case claude.KindResult:
 			produced = true
 			text.WriteString(e.Result)
@@ -521,7 +574,10 @@ func (w *Workbench) finishRun(ctx context.Context, r *run, err error) {
 	if w.active == r {
 		w.active = nil
 	}
+	review := w.review
 	w.mu.Unlock()
+
+	w.publishChanges(r.id, review)
 
 	cancelled := errors.Is(err, context.Canceled) || ctx.Err() != nil
 	switch {
@@ -559,6 +615,61 @@ func (w *Workbench) forgetSession(agentID string) {
 	w.mu.Lock()
 	delete(w.sessions, agentID)
 	w.mu.Unlock()
+}
+
+// publishChanges lists what the run did to the working tree.
+//
+// It runs on a fresh context: the run's own context is cancelled by the time a
+// cancelled run reaches here, and a stopped run is exactly when you most want
+// to see what it managed to change first.
+func (w *Workbench) publishChanges(runID string, review *changes.Snapshot) {
+	if review == nil {
+		w.emit(EventRunChanges, ChangesEvent{RunID: runID, Tracked: false})
+		return
+	}
+	list, err := review.Diff(context.Background())
+	if err != nil {
+		w.emit(EventRunChanges, ChangesEvent{RunID: runID, Tracked: false})
+		return
+	}
+	w.emit(EventRunChanges, ChangesEvent{RunID: runID, Changes: list, Tracked: true})
+}
+
+// Revert undoes one file change from the last run, restoring the content the
+// run started with.
+func (w *Workbench) Revert(path string) error {
+	w.mu.Lock()
+	review := w.review
+	active := w.active
+	w.mu.Unlock()
+
+	if active != nil {
+		return errors.New("workbench: stop the run before reverting its changes")
+	}
+	if review == nil {
+		return errors.New("workbench: no reviewable run")
+	}
+	if err := review.Revert(context.Background(), path); err != nil {
+		return err
+	}
+	w.publishChanges("", review)
+	return nil
+}
+
+// Changes lists what the last run did to the working tree.
+func (w *Workbench) Changes() []changes.Change {
+	w.mu.Lock()
+	review := w.review
+	w.mu.Unlock()
+
+	if review == nil {
+		return nil
+	}
+	list, err := review.Diff(context.Background())
+	if err != nil {
+		return nil
+	}
+	return list
 }
 
 func (w *Workbench) setState(agentID string, s AgentState) {

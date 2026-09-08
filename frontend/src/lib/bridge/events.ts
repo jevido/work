@@ -14,6 +14,7 @@ export const CLAUDE_SESSION = "claude:session";
 export const CLAUDE_TEXT = "claude:text";
 export const CLAUDE_THINKING = "claude:thinking";
 export const CLAUDE_TOOL = "claude:tool";
+export const CLAUDE_TOOL_RESULT = "claude:tool-result";
 export const CLAUDE_RESULT = "claude:result";
 export const CLAUDE_ERROR = "claude:error";
 export const CLAUDE_CANCELLED = "claude:cancelled";
@@ -21,5 +22,6 @@ export const CLAUDE_CANCELLED = "claude:cancelled";
 export const RUN_STARTED = "run:started";
 export const RUN_PLAN = "run:plan";
 export const RUN_FINISHED = "run:finished";
+export const RUN_CHANGES = "run:changes";
 
 export const BOARD_UPDATED = "board:updated";
