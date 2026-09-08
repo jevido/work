@@ -12,6 +12,9 @@ import { Call as $Call, CancellablePromise as $CancellablePromise } from "@wails
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
+import * as board$0 from "../internal/board/models.js";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
 import * as workbench$0 from "../internal/workbench/models.js";
 
 /**
@@ -22,10 +25,25 @@ export function Agents(): $CancellablePromise<workbench$0.AgentStatus[] | null> 
 }
 
 /**
+ * Board returns the task board: what Anton has assigned and how far along it is.
+ */
+export function Board(): $CancellablePromise<board$0.Card[] | null> {
+    return $Call.ByID(105432782);
+}
+
+/**
  * Cancel stops a run, including any specialists working inside it.
  */
 export function Cancel(runID: string): $CancellablePromise<void> {
     return $Call.ByID(1254614124, runID);
+}
+
+/**
+ * ClearConversation starts a new conversation: the agents forget the previous
+ * exchange, and the next request opens a fresh session for each of them.
+ */
+export function ClearConversation(): $CancellablePromise<void> {
+    return $Call.ByID(1913763400);
 }
 
 /**

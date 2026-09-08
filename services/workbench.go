@@ -8,6 +8,7 @@ import (
 	"errors"
 	"strings"
 
+	"dev.jevido/work/internal/board"
 	"dev.jevido/work/internal/workbench"
 )
 
@@ -44,6 +45,17 @@ func (s *WorkbenchService) Submit(agentID, prompt string) (workbench.Task, error
 		return workbench.Task{}, errors.New("prompt is too large")
 	}
 	return s.wb.Submit(strings.TrimSpace(agentID), prompt)
+}
+
+// Board returns the task board: what Anton has assigned and how far along it is.
+func (s *WorkbenchService) Board() []board.Card {
+	return s.wb.Board()
+}
+
+// ClearConversation starts a new conversation: the agents forget the previous
+// exchange, and the next request opens a fresh session for each of them.
+func (s *WorkbenchService) ClearConversation() {
+	s.wb.ClearConversation()
 }
 
 // Cancel stops a run, including any specialists working inside it.

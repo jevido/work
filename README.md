@@ -45,11 +45,13 @@ go test ./...
 ```
 main.go                       Wails app: window, services, event registration
 internal/agents/              Static agent definitions: role, desk, prompt, model
+internal/board/               The task board: cards, columns, assignment
 internal/claude/              Runs the local Claude CLI, parses its JSON stream
 internal/workbench/           Runtime state, task lifecycle, semantic events
 services/                     Thin adapters the frontend can call
 frontend/src/lib/office/      Canvas 2D renderer, agent state machine, frame stats
-frontend/src/lib/claude/      Console state, batched streaming
+frontend/src/lib/claude/      Conversation state, batched streaming
+frontend/src/lib/board/       Task board state
 frontend/src/lib/bridge/      Event names, backend-to-renderer wiring
 frontend/src/components/      Svelte UI
 ```
@@ -69,6 +71,23 @@ Performance is treated as a feature: one `requestAnimationFrame` loop, a
 device-pixel-ratio aware canvas, delta-time animation, a frame cap, no
 per-frame allocation, and drawing stops entirely while the window is hidden.
 
+## The window
+
+The left side is the work: a task board across the top, the office below it. The
+right side is the conversation.
+
+The board is not a second planning system. Anton already creates and assigns
+tasks when he routes a request, so the board shows those assignments and tracks
+them as they run — Assigned, In progress, Done, Blocked. Nothing on it costs an
+extra Claude call.
+
+The conversation keeps everything: what you asked, Anton's routing decision and
+his reason for it, each agent's reply labelled with who said it, and what the
+run cost. Agents remember it too — each one continues its own Claude session
+across turns, so a follow-up can lean on what was already said. "New chat"
+clears the screen, the board and the agents' memory in one gesture, because
+those three drifting apart would be worse than any of them being stale.
+
 ## How a run works
 
 You type a task. Anton takes a short, schema-constrained routing turn on a
@@ -84,10 +103,19 @@ the run: its error goes to synthesis with everyone else's answers, so a partial
 result still reaches you. Anton then takes a final turn and gives you one
 answer.
 
-One run is active at a time. Cancelling the run stops every agent inside it.
+One run is active at a time. Cancelling the run stops every agent inside it and
+puts their unfinished cards back in Assigned.
+
+Follow-up turns resume each agent's session. If resuming fails before producing
+anything — a session the CLI no longer has — the turn is retried once from
+scratch, so a stale session degrades into a fresh answer rather than a failed
+run. The routing turn is deliberately excluded: it is schema-constrained and
+stateless, and is simply told when it is looking at a follow-up.
 
 ## Status
 
-Delegation works end to end. Still missing: thinking output is streamed but not
-displayed, tool calls show as name chips without arguments or results, there is
-no task history or session resume, and no approval step before an agent acts.
+Delegation, the conversation and the board work end to end. Still missing:
+thinking output is streamed but not displayed, tool calls show as name chips
+without arguments or results, no diff review or approval step before an agent
+acts, nothing is persisted across restarts, and the board is read-only — you
+cannot move a card or add one yourself.

@@ -13,7 +13,7 @@ import {
   RUN_STARTED,
 } from "../bridge/events";
 
-/** Where a run currently is. Drives the console's status line. */
+/** Where the current run is. Drives the console's status line. */
 export type RunStatus =
   | "idle"
   | "planning"
@@ -24,30 +24,52 @@ export type RunStatus =
 
 export type Phase = "plan" | "work" | "synthesis";
 
-export type BlockStatus = "streaming" | "done" | "error" | "cancelled";
+export type TurnStatus = "streaming" | "done" | "error" | "cancelled";
 
-/** One agent's turn, as shown in the console. */
-export interface ConsoleBlock {
-  taskId: string;
+/** Something you said. */
+export interface UserEntry {
+  kind: "user";
+  id: string;
+  text: string;
+}
+
+/** Anton's routing decision, in his own voice. */
+export interface PlanEntry {
+  kind: "plan";
+  id: string;
+  agentName: string;
+  colour: string;
+  mode: "self" | "team";
+  reason: string;
+  steps: { agentId: string; agentName: string; colour: string; task: string }[];
+}
+
+/** One agent's turn. */
+export interface AgentEntry {
+  kind: "agent";
+  id: string;
   agentId: string;
   agentName: string;
   colour: string;
   phase: Phase;
   text: string;
   tools: string[];
-  status: BlockStatus;
+  status: TurnStatus;
   error: string | null;
   model: string;
   costUsd: number;
   durationMs: number;
 }
 
-/** Anton's routing decision, shown above the work it produced. */
-export interface PlanCard {
-  mode: "self" | "team";
-  reason: string;
-  steps: { agentId: string; agentName: string; colour: string; task: string }[];
+/** A line from Work itself: what a run cost, why it stopped. */
+export interface NoticeEntry {
+  kind: "notice";
+  id: string;
+  text: string;
+  tone: "info" | "error";
 }
+
+export type Entry = UserEntry | PlanEntry | AgentEntry | NoticeEntry;
 
 /** The minimum the console needs to label an agent. */
 export interface AgentIdentity {
@@ -59,34 +81,33 @@ export interface AgentIdentity {
 /**
  * The state behind the Claude console.
  *
- * A run can involve several agents at once, so output is grouped into blocks
- * keyed by task rather than concatenated into one transcript. Text arrives one
- * token at a time, which is far too often to drive Svelte directly, so chunks
- * accumulate per task and flush once per animation frame: a fast stream costs
- * one update per frame instead of one per token.
+ * The console is a conversation: your requests and every agent's reply stay on
+ * screen, in order, until you clear it. Entries are appended, never replaced,
+ * and a run adds several of them because several agents can answer one request.
+ *
+ * Text arrives one token at a time, which is far too often to drive Svelte
+ * directly, so chunks accumulate per turn and flush once per animation frame: a
+ * fast stream costs one update per frame instead of one per token.
  */
 export class ClaudeSession {
-  blocks = $state<ConsoleBlock[]>([]);
-  plan = $state<PlanCard | null>(null);
+  entries = $state<Entry[]>([]);
   status = $state<RunStatus>("idle");
-  error = $state<string | null>(null);
   runId = $state<string | null>(null);
 
   /** True while the run can still be cancelled. */
   busy = $derived(this.status === "planning" || this.status === "working");
 
-  /** The planning turn's cost, which has no block of its own. */
-  private planCostUsd = $state(0);
+  /** True when there is nothing on screen to clear. */
+  isEmpty = $derived(this.entries.length === 0);
 
-  /** What the whole run has cost so far, planning turn included. */
-  totalCostUsd = $derived(
-    this.blocks.reduce((sum, b) => sum + b.costUsd, 0) + this.planCostUsd,
-  );
+  /** What the run in progress has cost, planning turn included. */
+  private runCostUsd = 0;
+  private nextId = 0;
 
-  /** Agent identities, for labelling blocks and plan steps. */
+  /** Agent identities, for labelling turns and plan steps. */
   private roster = new Map<string, AgentIdentity>();
 
-  /** Text waiting to be flushed, by task ID. */
+  /** Text waiting to be flushed, by entry ID. */
   private pending = new Map<string, string>();
   private flushHandle = 0;
 
@@ -99,98 +120,109 @@ export class ClaudeSession {
   listen(): () => void {
     const offs = [
       Events.On(RUN_STARTED, (e) => {
-        this.reset();
         this.runId = e.data.runId;
+        this.runCostUsd = 0;
         this.status = "planning";
       }),
 
       Events.On(RUN_PLAN, (e) => {
-        const steps = (e.data.steps ?? []).map((s) => {
-          const who = this.identify(s.agentId);
-          return { agentId: s.agentId, agentName: who.name, colour: who.colour, task: s.task };
-        });
-        this.plan = {
+        const who = this.identify(e.data.agentId ?? "");
+        this.entries.push({
+          kind: "plan",
+          id: this.mintId("plan"),
+          agentName: who.name,
+          colour: who.colour,
           mode: e.data.mode === "team" ? "team" : "self",
           reason: e.data.reason ?? "",
-          steps,
-        };
+          steps: (e.data.steps ?? []).map((s) => {
+            const agent = this.identify(s.agentId);
+            return {
+              agentId: s.agentId,
+              agentName: agent.name,
+              colour: agent.colour,
+              task: s.task,
+            };
+          }),
+        });
         this.status = "working";
       }),
 
       Events.On(RUN_FINISHED, (e) => {
         this.flush();
         if (e.data.cancelled) {
-          this.markOpenBlocks("cancelled");
+          this.closeOpenTurns("cancelled");
+          this.notice("Stopped.", "info");
           this.status = "cancelled";
-          return;
-        }
-        if (e.data.message) {
-          this.error = e.data.message;
-          this.markOpenBlocks("error");
+        } else if (e.data.message) {
+          this.closeOpenTurns("error");
+          this.notice(e.data.message, "error");
           this.status = "error";
-          return;
+        } else {
+          this.closeOpenTurns("done");
+          if (this.runCostUsd > 0) {
+            this.notice(`Run cost $${this.runCostUsd.toFixed(4)}`, "info");
+          }
+          this.status = "done";
         }
-        this.markOpenBlocks("done");
-        this.status = "done";
+        this.runId = null;
       }),
 
       Events.On(CLAUDE_SESSION, (e) => {
-        const block = this.blockFor(e.data);
-        if (block) block.model = e.data.model ?? "";
+        const turn = this.turnFor(e.data);
+        if (turn) turn.model = e.data.model ?? "";
       }),
 
       Events.On(CLAUDE_TEXT, (e) => this.appendText(e.data, e.data.text ?? "")),
 
       Events.On(CLAUDE_THINKING, () => {
         // Thinking is streamed but not shown yet: a dedicated, collapsible
-        // panel is the right home for it, not the main output.
+        // panel is the right home for it, not the conversation.
       }),
 
       Events.On(CLAUDE_TOOL, (e) => {
         const name = e.data.toolName ?? "";
-        const block = this.blockFor(e.data);
-        if (!name || !block) return;
+        const turn = this.turnFor(e.data);
+        if (!name || !turn) return;
 
-        // Text before and after a tool call arrives as separate content
-        // blocks with no separator of their own, so the two runs of prose
-        // would otherwise be glued together mid-sentence.
-        this.separate(block.taskId);
+        // Text before and after a tool call arrives as separate content blocks
+        // with no separator of their own, so the two runs of prose would
+        // otherwise be glued together mid-sentence.
+        this.separate(turn.id);
 
-        if (block.tools[block.tools.length - 1] === name) return;
-        block.tools.push(name);
+        if (turn.tools[turn.tools.length - 1] === name) return;
+        turn.tools.push(name);
       }),
 
       Events.On(CLAUDE_RESULT, (e) => {
         this.flush();
-        // The planning turn has no block of its own -- the plan card stands in
-        // for it -- but its cost still belongs to the run.
-        if (e.data.phase === "plan") {
-          this.planCostUsd += e.data.costUsd ?? 0;
-          return;
-        }
-        const block = this.blockFor(e.data);
-        if (!block) return;
-        block.costUsd = e.data.costUsd ?? 0;
-        block.durationMs = e.data.durationMs ?? 0;
-        if (block.status === "streaming") block.status = "done";
+        this.runCostUsd += e.data.costUsd ?? 0;
+        // The routing turn has no entry of its own -- the plan stands in for it
+        // -- but its cost still belongs to the run.
+        if (e.data.phase === "plan") return;
+
+        const turn = this.turnFor(e.data);
+        if (!turn) return;
+        turn.costUsd = e.data.costUsd ?? 0;
+        turn.durationMs = e.data.durationMs ?? 0;
+        if (turn.status === "streaming") turn.status = "done";
       }),
 
       Events.On(CLAUDE_ERROR, (e) => {
         this.flush();
         const message = e.data.message || "Claude failed";
-        const block = this.blockFor(e.data);
-        if (block) {
-          block.error = message;
-          block.status = "error";
+        const turn = this.turnFor(e.data);
+        if (turn) {
+          turn.error = message;
+          turn.status = "error";
           return;
         }
-        this.error = message;
+        this.notice(message, "error");
       }),
 
       // A run-wide cancellation, distinct from a failure: nothing went wrong.
       Events.On(CLAUDE_CANCELLED, () => {
         this.flush();
-        this.markOpenBlocks("cancelled");
+        this.closeOpenTurns("cancelled");
       }),
     ];
 
@@ -200,19 +232,22 @@ export class ClaudeSession {
     };
   }
 
-  /** Starts a run. A backend refusal surfaces as an error, not a rejection. */
+  /**
+   * Sends a request. Your words appear immediately, before the backend has
+   * confirmed anything, because waiting to see what you typed reads as lag.
+   */
   async submit(prompt: string, agentId = ""): Promise<void> {
-    const trimmed = prompt.trim();
-    if (!trimmed || this.busy) return;
+    const text = prompt.trim();
+    if (!text || this.busy) return;
 
-    this.reset();
+    this.entries.push({ kind: "user", id: this.mintId("you"), text });
     this.status = "planning";
 
     try {
-      const task = await Workbench.Submit(agentId, trimmed);
+      const task = await Workbench.Submit(agentId, text);
       this.runId = task.id;
     } catch (err) {
-      this.error = messageOf(err);
+      this.notice(messageOf(err), "error");
       this.status = "error";
       this.runId = null;
     }
@@ -225,25 +260,38 @@ export class ClaudeSession {
     try {
       await Workbench.Cancel(id);
     } catch (err) {
-      this.error = messageOf(err);
+      this.notice(messageOf(err), "error");
       this.status = "error";
     }
   }
 
-  reset(): void {
+  /**
+   * Empties the console and starts a new conversation. The agents forget the
+   * exchange too, so clearing the screen and clearing their memory are the same
+   * gesture rather than two that can disagree.
+   */
+  async clear(): Promise<void> {
     this.cancelFlush();
     this.pending.clear();
-    this.blocks = [];
-    this.plan = null;
-    this.error = null;
+    this.entries = [];
     this.status = "idle";
     this.runId = null;
-    this.planCostUsd = 0;
+    this.runCostUsd = 0;
+    try {
+      await Workbench.ClearConversation();
+    } catch {
+      // Nothing useful to say: the screen is clear either way, and the next
+      // request will simply continue the old session.
+    }
   }
 
-  /** True when there is nothing to clear. */
-  get isEmpty(): boolean {
-    return this.blocks.length === 0 && !this.plan && !this.error;
+  private mintId(prefix: string): string {
+    this.nextId += 1;
+    return `${prefix}-${this.nextId}`;
+  }
+
+  private notice(text: string, tone: "info" | "error"): void {
+    this.entries.push({ kind: "notice", id: this.mintId("note"), text, tone });
   }
 
   private identify(agentId: string): AgentIdentity {
@@ -251,23 +299,26 @@ export class ClaudeSession {
   }
 
   /**
-   * Finds the block for an event, creating it on first sight. Returns null for
-   * the planning phase, which the plan card represents instead.
+   * Finds the entry for an agent's turn, creating it on first sight. Returns
+   * null for the routing phase, which the plan entry represents instead.
    */
-  private blockFor(data: {
+  private turnFor(data: {
     taskId?: string;
     agentId?: string;
     phase?: string;
-  }): ConsoleBlock | null {
+  }): AgentEntry | null {
     const taskId = data.taskId ?? "";
     if (!taskId || data.phase === "plan") return null;
 
-    const existing = this.blocks.find((b) => b.taskId === taskId);
+    const existing = this.entries.find(
+      (e): e is AgentEntry => e.kind === "agent" && e.id === taskId,
+    );
     if (existing) return existing;
 
     const who = this.identify(data.agentId ?? "");
-    const block: ConsoleBlock = {
-      taskId,
+    const turn: AgentEntry = {
+      kind: "agent",
+      id: taskId,
       agentId: who.id,
       agentName: who.name,
       colour: who.colour,
@@ -280,8 +331,8 @@ export class ClaudeSession {
       costUsd: 0,
       durationMs: 0,
     };
-    this.blocks.push(block);
-    return block;
+    this.entries.push(turn);
+    return turn;
   }
 
   private appendText(
@@ -289,12 +340,11 @@ export class ClaudeSession {
     text: string,
   ): void {
     if (!text) return;
-    const block = this.blockFor(data);
-    if (!block) return;
+    const turn = this.turnFor(data);
+    if (!turn) return;
     if (this.status === "planning") this.status = "working";
 
-    const taskId = block.taskId;
-    this.pending.set(taskId, (this.pending.get(taskId) ?? "") + text);
+    this.pending.set(turn.id, (this.pending.get(turn.id) ?? "") + text);
 
     if (this.flushHandle) return;
     this.flushHandle = requestAnimationFrame(() => {
@@ -303,27 +353,32 @@ export class ClaudeSession {
     });
   }
 
-  /** Ensures the next text for a task starts on a new paragraph. */
-  private separate(taskId: string): void {
-    const pending = this.pending.get(taskId);
-    const tail = pending ?? this.blocks.find((b) => b.taskId === taskId)?.text ?? "";
-    if (!tail || tail.endsWith("\n\n")) return;
-    this.pending.set(taskId, (pending ?? "") + (tail.endsWith("\n") ? "\n" : "\n\n"));
-  }
-
   private flush(): void {
     if (this.pending.size === 0) return;
-    for (const [taskId, text] of this.pending) {
-      const block = this.blocks.find((b) => b.taskId === taskId);
-      if (block) block.text += text;
+    for (const [id, text] of this.pending) {
+      const turn = this.entries.find(
+        (e): e is AgentEntry => e.kind === "agent" && e.id === id,
+      );
+      if (turn) turn.text += text;
     }
     this.pending.clear();
   }
 
-  /** Closes out any block still marked streaming when the run ends. */
-  private markOpenBlocks(status: BlockStatus): void {
-    for (const block of this.blocks) {
-      if (block.status === "streaming") block.status = status;
+  /** Ensures the next text for a turn starts on a new paragraph. */
+  private separate(id: string): void {
+    const pending = this.pending.get(id);
+    const turn = this.entries.find(
+      (e): e is AgentEntry => e.kind === "agent" && e.id === id,
+    );
+    const tail = pending ?? turn?.text ?? "";
+    if (!tail || tail.endsWith("\n\n")) return;
+    this.pending.set(id, (pending ?? "") + (tail.endsWith("\n") ? "\n" : "\n\n"));
+  }
+
+  /** Closes out any turn still marked streaming when the run ends. */
+  private closeOpenTurns(status: TurnStatus): void {
+    for (const entry of this.entries) {
+      if (entry.kind === "agent" && entry.status === "streaming") entry.status = status;
     }
   }
 

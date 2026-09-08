@@ -1,18 +1,24 @@
 <script lang="ts">
   import * as Workbench from "../bindings/dev.jevido/work/services/workbenchservice.js";
   import ClaudeConsole from "./components/ClaudeConsole.svelte";
+  import KanbanBoard from "./components/KanbanBoard.svelte";
   import OfficeCanvas from "./components/OfficeCanvas.svelte";
+  import { TaskBoard } from "./lib/board/board.svelte";
   import { ClaudeSession } from "./lib/claude/session.svelte";
+  import type { AgentIdentity } from "./lib/claude/session.svelte";
   import type { AgentSpec } from "./lib/office/renderer";
 
   const session = new ClaudeSession();
+  const board = new TaskBoard();
 
   let agents = $state<AgentSpec[]>([]);
+  let identities = $state<AgentIdentity[]>([]);
   let loadError = $state<string | null>(null);
   let showPerf = $state(false);
 
   // Backend events are wired once for the lifetime of the app.
   $effect(() => session.listen());
+  $effect(() => board.listen());
 
   $effect(() => {
     let cancelled = false;
@@ -21,10 +27,10 @@
         if (cancelled) return;
         // A Go nil slice arrives as null, so an empty team is not an error.
         const roster = list ?? [];
-        // The console labels output by agent, so it needs the roster too.
-        session.setAgents(
-          roster.map((a) => ({ id: a.id, name: a.name, colour: a.colour })),
-        );
+        // The console and the board label things by agent, so they need the
+        // roster too.
+        identities = roster.map((a) => ({ id: a.id, name: a.name, colour: a.colour }));
+        session.setAgents(identities);
         agents = roster.map((a) => ({
           id: a.id,
           name: a.name,
@@ -56,11 +62,14 @@
 <svelte:window onkeydown={onKeydown} />
 
 <main>
-  <div class="office">
-    {#if loadError}
-      <div class="load-error">{loadError}</div>
-    {/if}
-    <OfficeCanvas {agents} {showPerf} />
+  <div class="work">
+    <KanbanBoard {board} agents={identities} />
+    <div class="office">
+      {#if loadError}
+        <div class="load-error">{loadError}</div>
+      {/if}
+      <OfficeCanvas {agents} {showPerf} />
+    </div>
   </div>
   <aside>
     <ClaudeConsole {session} />
@@ -78,6 +87,14 @@
     grid-template-rows: minmax(0, 100%);
     height: 100%;
     overflow: hidden;
+  }
+
+  .work {
+    display: grid;
+    /* The board takes a fixed slice off the top; the office gets the rest. */
+    grid-template-rows: clamp(150px, 24%, 240px) minmax(0, 1fr);
+    min-width: 0;
+    min-height: 0;
   }
 
   .office {

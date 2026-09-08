@@ -16,6 +16,7 @@ declare module "@wailsio/runtime" {
             "agent:error": workbench$0.AgentEvent;
             "agent:finished": workbench$0.AgentEvent;
             "agent:working": workbench$0.AgentEvent;
+            "board:updated": workbench$0.BoardEvent;
             "claude:cancelled": workbench$0.ClaudeEvent;
             "claude:error": workbench$0.ClaudeEvent;
             "claude:result": workbench$0.ClaudeEvent;

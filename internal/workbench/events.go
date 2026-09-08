@@ -1,11 +1,13 @@
 // Package workbench owns runtime state: which agents exist, what they are
 // doing, and which Claude processes are alive.
 //
-// It is the only place that knows about both agents and Claude, and it is the
-// seam where multi-agent delegation will land. The frontend never learns
-// positions or animation state from here; it only receives the semantic events
-// below and animates locally.
+// It is the only place that knows about both agents and Claude, and it owns
+// delegation: routing a request, running the specialists, and bringing their
+// answers back together. The frontend never learns positions or animation state
+// from here; it only receives the semantic events below and animates locally.
 package workbench
+
+import "dev.jevido/work/internal/board"
 
 // Event names emitted to the frontend. Keep these in sync with
 // frontend/src/lib/bridge/events.ts.
@@ -42,6 +44,11 @@ const (
 	EventRunPlan = "run:plan"
 	// EventRunFinished closes a run, successfully or not.
 	EventRunFinished = "run:finished"
+
+	// EventBoardUpdated carries the whole task board after any change. The
+	// board is small and changes a handful of times per run, so publishing a
+	// snapshot is cheaper than reconciling deltas and cannot drift.
+	EventBoardUpdated = "board:updated"
 )
 
 // Phase says which part of a run a task belongs to. The console groups output
@@ -98,8 +105,10 @@ type ClaudeEvent struct {
 
 // RunEvent is the payload for every run:* event.
 type RunEvent struct {
-	RunID  string `json:"runId"`
-	Prompt string `json:"prompt,omitempty"`
+	RunID string `json:"runId"`
+	// AgentID is the coordinator whose decision EventRunPlan carries.
+	AgentID string `json:"agentId,omitempty"`
+	Prompt  string `json:"prompt,omitempty"`
 	// Message carries a failure reason on EventRunFinished, or is empty on a
 	// clean finish.
 	Message string `json:"message,omitempty"`
@@ -109,4 +118,9 @@ type RunEvent struct {
 	Mode   PlanMode   `json:"mode,omitempty"`
 	Reason string     `json:"reason,omitempty"`
 	Steps  []PlanStep `json:"steps,omitempty"`
+}
+
+// BoardEvent is the payload for board:updated.
+type BoardEvent struct {
+	Cards []board.Card `json:"cards"`
 }

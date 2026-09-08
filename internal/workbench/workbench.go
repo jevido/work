@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 
 	"dev.jevido/work/internal/agents"
+	"dev.jevido/work/internal/board"
 	"dev.jevido/work/internal/claude"
 )
 
@@ -53,6 +54,7 @@ type Workbench struct {
 	runner   *claude.Runner
 	emit     Emitter
 	workDir  string
+	board    *board.Board
 
 	nextRun atomic.Uint64
 
@@ -61,6 +63,14 @@ type Workbench struct {
 	current map[string]string // agentID -> taskID
 	// active is the running run, or nil. Guarded by mu.
 	active *run
+
+	// sessions is each agent's Claude session for the current conversation,
+	// so a follow-up turn continues where the last one left off instead of
+	// starting from nothing. Keyed by agent ID.
+	sessions map[string]string
+	// turns counts user requests in this conversation. Anton is told when he
+	// is answering a follow-up rather than an opening question.
+	turns int
 }
 
 // run is one top-level request, from prompt to final answer.
@@ -69,6 +79,8 @@ type run struct {
 	prompt string
 	cancel context.CancelFunc
 	nextID atomic.Uint64
+	// followUp is true when this is not the first request of the conversation.
+	followUp bool
 }
 
 // taskID mints a stable, readable ID for one Claude call inside the run.
@@ -83,8 +95,10 @@ func New(reg *agents.Registry, runner *claude.Runner, emit Emitter, workDir stri
 		runner:   runner,
 		emit:     emit,
 		workDir:  workDir,
+		board:    board.New(),
 		state:    make(map[string]AgentState),
 		current:  make(map[string]string),
+		sessions: make(map[string]string),
 	}
 	for _, a := range reg.All() {
 		w.state[a.ID] = StateIdle
@@ -153,7 +167,10 @@ func (w *Workbench) Submit(agentID, prompt string) (Task, error) {
 		return Task{}, errors.New("workbench: a task is already running")
 	}
 	w.active = r
+	w.turns++
+	followUp := w.turns > 1
 	w.mu.Unlock()
+	r.followUp = followUp
 
 	w.emit(EventRunStarted, RunEvent{RunID: r.id, Prompt: prompt})
 
@@ -163,12 +180,51 @@ func (w *Workbench) Submit(agentID, prompt string) (Task, error) {
 		if routed {
 			err = w.executeRouted(ctx, r, lead)
 		} else {
-			_, err = w.executeStep(ctx, r, lead, PhaseWork, prompt)
+			card := w.addCard(r.id, lead.ID, prompt)
+			_, err = w.executeStep(ctx, r, lead, PhaseWork, prompt, card)
 		}
 		w.finishRun(ctx, r, err)
 	}()
 
 	return Task{ID: r.id, Prompt: prompt, AgentID: lead.ID, Routed: routed}, nil
+}
+
+// Board returns the current task board.
+func (w *Workbench) Board() []board.Card {
+	return w.board.Snapshot()
+}
+
+// ClearConversation forgets every agent's session and empties the board, so the
+// next request starts a new conversation rather than continuing this one.
+func (w *Workbench) ClearConversation() {
+	w.mu.Lock()
+	w.sessions = make(map[string]string)
+	w.turns = 0
+	w.mu.Unlock()
+
+	w.board.Clear()
+	w.publishBoard()
+}
+
+// addCard puts a task on the board and publishes the change.
+func (w *Workbench) addCard(runID, agentID, title string) string {
+	id := w.board.Add(runID, agentID, title)
+	w.publishBoard()
+	return id
+}
+
+// moveCard changes a card's column and publishes the change. An empty cardID is
+// ignored, so callers need not special-case work that has no card.
+func (w *Workbench) moveCard(cardID string, status board.Status, note string) {
+	if cardID == "" {
+		return
+	}
+	w.board.SetStatus(cardID, status, note)
+	w.publishBoard()
+}
+
+func (w *Workbench) publishBoard() {
+	w.emit(EventBoardUpdated, BoardEvent{Cards: w.board.Snapshot()})
 }
 
 // Cancel stops the run with the given ID. Cancelling an unknown or already
@@ -190,15 +246,17 @@ func (w *Workbench) executeRouted(ctx context.Context, r *run, lead agents.Agent
 		return err
 	}
 	w.emit(EventRunPlan, RunEvent{
-		RunID:  r.id,
-		Mode:   plan.Mode,
-		Reason: plan.Reason,
-		Steps:  plan.Steps,
+		RunID:   r.id,
+		AgentID: lead.ID,
+		Mode:    plan.Mode,
+		Reason:  plan.Reason,
+		Steps:   plan.Steps,
 	})
 
 	// Anton kept it: one ordinary turn on the user's own words.
 	if plan.Mode == ModeSelf {
-		_, err = w.executeStep(ctx, r, lead, PhaseWork, r.prompt)
+		card := w.addCard(r.id, lead.ID, r.prompt)
+		_, err = w.executeStep(ctx, r, lead, PhaseWork, r.prompt, card)
 		return err
 	}
 
@@ -207,8 +265,9 @@ func (w *Workbench) executeRouted(ctx context.Context, r *run, lead agents.Agent
 		return err
 	}
 
+	card := w.addCard(r.id, lead.ID, "Bring the answers together")
 	_, err = w.executeStep(
-		ctx, r, lead, PhaseSynthesis, synthesisPrompt(r.prompt, results))
+		ctx, r, lead, PhaseSynthesis, synthesisPrompt(r.prompt, results), card)
 	return err
 }
 
@@ -233,7 +292,7 @@ func (w *Workbench) plan(ctx context.Context, r *run, lead agents.Agent) (Plan, 
 
 	var structured json.RawMessage
 	err = w.runner.Run(ctx, claude.Request{
-		Prompt:             planPrompt(w.registry, r.prompt),
+		Prompt:             planPrompt(w.registry, r.prompt, r.followUp),
 		Model:              model,
 		AppendSystemPrompt: lead.SystemPrompt,
 		WorkDir:            w.workDir,
@@ -245,6 +304,9 @@ func (w *Workbench) plan(ctx context.Context, r *run, lead agents.Agent) (Plan, 
 	}, func(e claude.Event) {
 		switch e.Kind {
 		case claude.KindSession:
+			// Deliberately not remembered: the routing turn is
+			// schema-constrained and stateless, and adopting its session would
+			// contaminate the conversation Anton actually answers in.
 			w.emitClaude(EventClaudeSession, r, lead.ID, taskID, PhasePlan, ClaudeEvent{
 				SessionID: e.SessionID, Model: e.Model,
 			})
@@ -284,6 +346,16 @@ func (w *Workbench) plan(ctx context.Context, r *run, lead agents.Agent) (Plan, 
 func (w *Workbench) delegate(ctx context.Context, r *run, plan Plan) ([]stepResult, error) {
 	results := make([]stepResult, len(plan.Steps))
 
+	// Every card goes up before any work starts, so the board shows the whole
+	// assignment at once rather than appearing a task at a time.
+	cards := make([]string, len(plan.Steps))
+	for i, step := range plan.Steps {
+		if _, ok := w.registry.Get(step.AgentID); !ok {
+			continue
+		}
+		cards[i] = w.addCard(r.id, step.AgentID, step.Task)
+	}
+
 	var wg sync.WaitGroup
 	for i, step := range plan.Steps {
 		agent, ok := w.registry.Get(step.AgentID)
@@ -293,14 +365,14 @@ func (w *Workbench) delegate(ctx context.Context, r *run, plan Plan) ([]stepResu
 		results[i] = stepResult{AgentID: agent.ID, AgentName: agent.Name, Task: step.Task}
 
 		wg.Add(1)
-		go func(i int, agent agents.Agent, task string) {
+		go func(i int, agent agents.Agent, task, card string) {
 			defer wg.Done()
-			output, err := w.executeStep(ctx, r, agent, PhaseWork, task)
+			output, err := w.executeStep(ctx, r, agent, PhaseWork, task, card)
 			results[i].Output = output
 			if err != nil && !errors.Is(err, context.Canceled) {
 				results[i].Err = err.Error()
 			}
-		}(i, agent, step.Task)
+		}(i, agent, step.Task, cards[i])
 	}
 	wg.Wait()
 
@@ -315,25 +387,67 @@ func (w *Workbench) delegate(ctx context.Context, r *run, plan Plan) ([]stepResu
 // Text streams to the console as it arrives, including for specialists, so a
 // delegated run can be watched rather than waited for. Only the planning turn
 // stays quiet, and it does not come through here.
+//
+// The turn continues the agent's session from earlier in the conversation when
+// there is one. If resuming fails before producing anything -- a session the
+// CLI no longer has, most likely -- the turn is retried once from scratch, so a
+// stale session degrades into a fresh answer rather than a failed run.
 func (w *Workbench) executeStep(
 	ctx context.Context,
 	r *run,
 	agent agents.Agent,
 	phase Phase,
 	prompt string,
+	cardID string,
 ) (string, error) {
 	taskID := r.taskID(agent.ID)
 	w.beginTask(r, agent.ID, taskID, phase)
+	w.moveCard(cardID, board.StatusDoing, "")
 
-	var out strings.Builder
+	resume := w.sessionFor(agent.ID)
+	out, produced, err := w.streamStep(ctx, r, agent, phase, taskID, prompt, resume)
+
+	if err != nil && resume != "" && !produced && ctx.Err() == nil {
+		w.forgetSession(agent.ID)
+		out, _, err = w.streamStep(ctx, r, agent, phase, taskID, prompt, "")
+	}
+
+	w.endTask(r, agent.ID, taskID, phase, err)
+
+	switch {
+	case errors.Is(err, context.Canceled):
+		// Stopped, not failed: the task is simply not done.
+		w.moveCard(cardID, board.StatusTodo, "")
+	case err != nil:
+		w.moveCard(cardID, board.StatusBlocked, err.Error())
+	default:
+		w.moveCard(cardID, board.StatusDone, "")
+	}
+
+	return out, err
+}
+
+// streamStep is one attempt at one turn. produced reports whether anything
+// reached the frontend, which decides whether a retry is safe.
+func (w *Workbench) streamStep(
+	ctx context.Context,
+	r *run,
+	agent agents.Agent,
+	phase Phase,
+	taskID string,
+	prompt string,
+	resume string,
+) (out string, produced bool, err error) {
+	var text strings.Builder
 	working := false
 
-	err := w.runner.Run(ctx, claude.Request{
+	err = w.runner.Run(ctx, claude.Request{
 		Prompt:             prompt,
 		Model:              agent.Model,
 		AppendSystemPrompt: agent.SystemPrompt,
 		WorkDir:            w.workDir,
 		AllowedTools:       agent.AllowedTools,
+		Resume:             resume,
 	}, func(e claude.Event) {
 		// The first sign of real output promotes the agent from assigned to
 		// working. The frontend uses this to seat them at their desk.
@@ -345,27 +459,31 @@ func (w *Workbench) executeStep(
 
 		switch e.Kind {
 		case claude.KindSession:
+			w.rememberSession(agent.ID, e.SessionID)
 			w.emitClaude(EventClaudeSession, r, agent.ID, taskID, phase, ClaudeEvent{
 				SessionID: e.SessionID, Model: e.Model,
 			})
 		case claude.KindText:
+			produced = true
 			w.emitClaude(EventClaudeText, r, agent.ID, taskID, phase, ClaudeEvent{Text: e.Text})
 		case claude.KindThinking:
 			w.emitClaude(EventClaudeThinking, r, agent.ID, taskID, phase, ClaudeEvent{Text: e.Text})
 		case claude.KindToolUse:
+			produced = true
 			w.emitClaude(EventClaudeTool, r, agent.ID, taskID, phase, ClaudeEvent{ToolName: e.ToolName})
 		case claude.KindResult:
-			out.WriteString(e.Result)
+			produced = true
+			text.WriteString(e.Result)
 			w.emitClaude(EventClaudeResult, r, agent.ID, taskID, phase, ClaudeEvent{
 				Text: e.Result, CostUSD: e.CostUSD, DurationMS: e.DurationMS,
 			})
 		case claude.KindError:
+			produced = true
 			w.emitClaude(EventClaudeError, r, agent.ID, taskID, phase, ClaudeEvent{Message: e.Message})
 		}
 	})
 
-	w.endTask(r, agent.ID, taskID, phase, err)
-	return out.String(), err
+	return text.String(), produced, err
 }
 
 // beginTask marks an agent as assigned and tells the office to walk them over.
@@ -415,6 +533,32 @@ func (w *Workbench) finishRun(ctx context.Context, r *run, err error) {
 	default:
 		w.emit(EventRunFinished, RunEvent{RunID: r.id})
 	}
+}
+
+// sessionFor returns the agent's session in this conversation, if any.
+func (w *Workbench) sessionFor(agentID string) string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.sessions[agentID]
+}
+
+// rememberSession records the session an agent's turn ran in, so the next turn
+// can continue it.
+func (w *Workbench) rememberSession(agentID, sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	w.mu.Lock()
+	w.sessions[agentID] = sessionID
+	w.mu.Unlock()
+}
+
+// forgetSession drops an agent's session after it proves unusable, so the next
+// attempt starts clean.
+func (w *Workbench) forgetSession(agentID string) {
+	w.mu.Lock()
+	delete(w.sessions, agentID)
+	w.mu.Unlock()
 }
 
 func (w *Workbench) setState(agentID string, s AgentState) {

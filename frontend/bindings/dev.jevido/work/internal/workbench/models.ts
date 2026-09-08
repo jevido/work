@@ -4,6 +4,9 @@
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
 import * as agents$0 from "../agents/models.js";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
+import * as board$0 from "../board/models.js";
 
 /**
  * AgentEvent is the payload for every agent:* event.
@@ -60,6 +63,13 @@ export interface AgentStatus {
     "planModel"?: string;
     "state": AgentState;
     "taskId"?: string;
+}
+
+/**
+ * BoardEvent is the payload for board:updated.
+ */
+export interface BoardEvent {
+    "cards": board$0.Card[] | null;
 }
 
 /**
@@ -143,6 +153,11 @@ export interface PlanStep {
  */
 export interface RunEvent {
     "runId": string;
+
+    /**
+     * AgentID is the coordinator whose decision EventRunPlan carries.
+     */
+    "agentId"?: string;
     "prompt"?: string;
 
     /**

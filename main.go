@@ -47,6 +47,8 @@ func init() {
 	application.RegisterEvent[workbench.RunEvent](workbench.EventRunStarted)
 	application.RegisterEvent[workbench.RunEvent](workbench.EventRunPlan)
 	application.RegisterEvent[workbench.RunEvent](workbench.EventRunFinished)
+
+	application.RegisterEvent[workbench.BoardEvent](workbench.EventBoardUpdated)
 }
 
 func main() {

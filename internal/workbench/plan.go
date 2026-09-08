@@ -125,7 +125,11 @@ func planSchema(reg Registry) (string, error) {
 // planPrompt describes the team to Anton and asks him to route the task. The
 // roster is generated from the registry, so adding an agent changes the prompt
 // without anyone editing prose.
-func planPrompt(reg Registry, task string) string {
+//
+// followUp marks a request that arrives mid-conversation. The routing turn
+// itself is stateless, so it is told this much rather than being handed the
+// history: it changes how a terse "and now the other half" should be read.
+func planPrompt(reg Registry, task string, followUp bool) string {
 	var b strings.Builder
 	b.WriteString("Route this task.\n\nYour specialists:\n")
 	for _, a := range reg.All() {
@@ -139,7 +143,13 @@ func planPrompt(reg Registry, task string) string {
 	b.WriteString("Choose \"team\" when the task genuinely splits along their specialties, ")
 	b.WriteString("and give each one a self-contained task that does not depend on ")
 	b.WriteString("another specialist's answer, since they work at the same time. ")
-	b.WriteString("Do not delegate for the sake of it.\n\nThe task:\n")
+	b.WriteString("Do not delegate for the sake of it.\n")
+	if followUp {
+		b.WriteString("\nThis is a follow-up in an ongoing conversation, so the ")
+		b.WriteString("task may lean on what was already discussed. The agent who ")
+		b.WriteString("answers it can see that history; you cannot.\n")
+	}
+	b.WriteString("\nThe task:\n")
 	b.WriteString(task)
 	return b.String()
 }

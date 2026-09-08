@@ -145,7 +145,7 @@ func TestPlanSchemaNeedsSpecialists(t *testing.T) {
 // TestPlanPromptDescribesTheTeam checks the roster comes from the registry
 // rather than from hand-written prose that can drift.
 func TestPlanPromptDescribesTheTeam(t *testing.T) {
-	got := planPrompt(testRegistry(), "make it faster")
+	got := planPrompt(testRegistry(), "make it faster", false)
 
 	for _, want := range []string{"Jeff", "id: jeff", "performance", "Chris", "id: chris", "make it faster"} {
 		if !strings.Contains(got, want) {
@@ -154,6 +154,19 @@ func TestPlanPromptDescribesTheTeam(t *testing.T) {
 	}
 	if strings.Contains(got, "id: anton") {
 		t.Error("prompt offers the coordinator as a delegate")
+	}
+	if strings.Contains(got, "follow-up") {
+		t.Error("an opening request is described as a follow-up")
+	}
+}
+
+// TestPlanPromptFlagsFollowUps checks the routing turn is told when the task
+// arrives mid-conversation, since the turn itself has no history.
+func TestPlanPromptFlagsFollowUps(t *testing.T) {
+	got := planPrompt(testRegistry(), "now the other half", true)
+
+	if !strings.Contains(got, "follow-up") {
+		t.Errorf("prompt does not mention the conversation:\n%s", got)
 	}
 }
 

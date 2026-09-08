@@ -21,3 +21,5 @@ export const CLAUDE_CANCELLED = "claude:cancelled";
 export const RUN_STARTED = "run:started";
 export const RUN_PLAN = "run:plan";
 export const RUN_FINISHED = "run:finished";
+
+export const BOARD_UPDATED = "board:updated";

@@ -17,8 +17,8 @@
     error: "Error",
   };
 
-  // Only the synthesis turn is worth labelling: a plain work block is obvious
-  // from the agent's name, and planning has no block at all.
+  // Only the synthesis turn is worth labelling: a plain work turn is obvious
+  // from the agent's name, and routing has an entry of its own.
   const phaseLabel: Record<Phase, string> = {
     plan: "",
     work: "",
@@ -62,9 +62,11 @@
 
   // Follow the stream, but stop fighting the user once they scroll up.
   $effect(() => {
-    // Touch what grows so this reruns as output arrives.
-    void session.blocks.map((b) => b.text.length).join();
-    void session.plan;
+    // Touch what grows so this reruns as the conversation extends.
+    void session.entries.length;
+    for (const entry of session.entries) {
+      if (entry.kind === "agent") void entry.text.length;
+    }
     const el = scroller;
     if (!el || !pinned) return;
     el.scrollTop = el.scrollHeight;
@@ -78,72 +80,71 @@
   </header>
 
   <div class="scroller" bind:this={scroller} onscroll={onScroll}>
-    {#if session.isEmpty && !session.busy}
+    {#if session.isEmpty}
       <p class="hint">Give Anton work. He decides whether to bring in Jeff or Chris.</p>
     {/if}
 
-    {#if session.status === "planning" && !session.plan}
-      <div class="routing">Anton is deciding who should take this…</div>
-    {/if}
-
-    {#if session.plan}
-      <div class="plan">
-        <div class="plan-head">
-          {session.plan.mode === "team" ? "Anton split the work" : "Anton kept this one"}
-        </div>
-        {#if session.plan.reason}
-          <p class="plan-reason">{session.plan.reason}</p>
-        {/if}
-        {#each session.plan.steps as step (step.agentId)}
-          <div class="plan-step">
-            <span class="dot" style:background={step.colour}></span>
-            <span class="who">{step.agentName}</span>
-            <span class="what">{step.task}</span>
+    {#each session.entries as entry (entry.id)}
+      {#if entry.kind === "user"}
+        <article class="turn you">
+          <div class="speaker"><span class="name">You</span></div>
+          <div class="said">{entry.text}</div>
+        </article>
+      {:else if entry.kind === "plan"}
+        <article class="turn">
+          <div class="speaker">
+            <span class="dot" style:background={entry.colour}></span>
+            <span class="name">{entry.agentName}</span>
+            <span class="aside">
+              {entry.mode === "team" ? "split the work" : "kept this one"}
+            </span>
           </div>
-        {/each}
-      </div>
-    {/if}
-
-    {#each session.blocks as block (block.taskId)}
-      <article class="block" data-status={block.status}>
-        <div class="block-head">
-          <span class="dot" style:background={block.colour}></span>
-          <span class="who">{block.agentName}</span>
-          {#if phaseLabel[block.phase]}
-            <span class="phase">{phaseLabel[block.phase]}</span>
-          {/if}
-          {#if block.status === "streaming"}
-            <span class="pulse" style:background={block.colour}></span>
-          {/if}
-          {#each block.tools as tool, i (`${tool}-${i}`)}
-            <span class="chip">{tool}</span>
-          {/each}
-        </div>
-
-        {#if block.text}
-          <pre>{block.text}</pre>
-        {/if}
-
-        {#if block.error}
-          <div class="error" role="alert">{block.error}</div>
-        {/if}
-
-        {#if block.status !== "streaming" && block.durationMs > 0}
-          <div class="footnote">
-            {(block.durationMs / 1000).toFixed(1)}s
-            {#if block.costUsd > 0}· ${block.costUsd.toFixed(4)}{/if}
+          <div class="plan">
+            {#if entry.reason}<p class="reason">{entry.reason}</p>{/if}
+            {#each entry.steps as step (step.agentId)}
+              <div class="step">
+                <span class="dot" style:background={step.colour}></span>
+                <span class="who">{step.agentName}</span>
+                <span class="what">{step.task}</span>
+              </div>
+            {/each}
           </div>
-        {/if}
-      </article>
+        </article>
+      {:else if entry.kind === "agent"}
+        <article class="turn" data-status={entry.status}>
+          <div class="speaker">
+            <span class="dot" style:background={entry.colour}></span>
+            <span class="name">{entry.agentName}</span>
+            {#if phaseLabel[entry.phase]}
+              <span class="aside">{phaseLabel[entry.phase]}</span>
+            {/if}
+            {#if entry.status === "streaming"}
+              <span class="pulse" style:background={entry.colour}></span>
+            {/if}
+            {#each entry.tools as tool, i (`${tool}-${i}`)}
+              <span class="chip">{tool}</span>
+            {/each}
+          </div>
+
+          {#if entry.text}<pre>{entry.text}</pre>{/if}
+
+          {#if entry.error}
+            <div class="error" role="alert">{entry.error}</div>
+          {/if}
+
+          {#if entry.status !== "streaming" && entry.durationMs > 0}
+            <div class="footnote">
+              {(entry.durationMs / 1000).toFixed(1)}s
+              {#if entry.costUsd > 0}· ${entry.costUsd.toFixed(4)}{/if}
+            </div>
+          {/if}
+        </article>
+      {:else}
+        <div class="notice" class:bad={entry.tone === "error"} role={entry.tone === "error" ? "alert" : undefined}>
+          {entry.text}
+        </div>
+      {/if}
     {/each}
-
-    {#if session.error}
-      <div class="error run-error" role="alert">{session.error}</div>
-    {/if}
-
-    {#if session.status === "done" && session.totalCostUsd > 0}
-      <div class="total">run total ${session.totalCostUsd.toFixed(4)}</div>
-    {/if}
   </div>
 
   <div class="composer">
@@ -159,8 +160,13 @@
       {#if session.busy}
         <button class="ghost" onclick={() => session.cancel()}>Cancel</button>
       {:else}
-        <button class="ghost" onclick={() => session.reset()} disabled={session.isEmpty}>
-          Clear
+        <button
+          class="ghost"
+          onclick={() => session.clear()}
+          disabled={session.isEmpty}
+          title="Clears the conversation and the agents' memory of it"
+        >
+          New chat
         </button>
       {/if}
       <button class="primary" onclick={submit} disabled={session.busy || !prompt.trim()}>
@@ -224,66 +230,16 @@
     padding: 12px;
   }
 
-  .hint,
-  .routing {
+  .hint {
     margin: 0;
     color: var(--muted);
   }
 
-  .routing {
-    padding: 2px 0 10px;
-  }
-
-  .plan {
-    margin-bottom: 14px;
-    padding: 10px;
-    border: 1px solid var(--line);
-    border-radius: 7px;
-    background: var(--panel-2);
-  }
-
-  .plan-head {
-    font-weight: 600;
-    font-size: 12px;
-  }
-
-  .plan-reason {
-    margin: 5px 0 8px;
-    color: var(--muted);
-    font-size: 12px;
-    user-select: text;
-  }
-
-  .plan-step {
-    display: grid;
-    grid-template-columns: auto auto 1fr;
-    align-items: baseline;
-    gap: 6px;
-    padding: 3px 0;
-    font-size: 12px;
-    user-select: text;
-  }
-
-  .plan-step .who,
-  .plan-step .dot {
-    /* Align to the step's first line, not the middle of a tall task. */
-    justify-self: start;
-    align-self: start;
-  }
-
-  .plan-step .dot {
-    margin-top: 5px;
-  }
-
-  .plan-step .what {
-    color: var(--muted);
-  }
-
-  .block {
+  .turn {
     margin-bottom: 16px;
   }
 
-  .block-head {
+  .speaker {
     display: flex;
     align-items: center;
     flex-wrap: wrap;
@@ -291,22 +247,21 @@
     margin-bottom: 5px;
   }
 
-  .dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    /* Baseline-aligned inside the plan grid, centred in the flex header. */
-    align-self: center;
-  }
-
-  .who {
+  .name {
     font-weight: 600;
     font-size: 12px;
   }
 
-  .phase {
+  .aside {
     color: var(--muted);
     font-size: 11px;
+  }
+
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex: none;
   }
 
   .pulse {
@@ -339,6 +294,57 @@
     white-space: nowrap;
   }
 
+  /* Your own words sit in a block of their own, so the conversation reads as
+     an exchange rather than a log of replies. */
+  .you .name {
+    color: var(--muted);
+  }
+
+  .said {
+    padding: 8px 10px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    background: var(--panel-2);
+    white-space: pre-wrap;
+    word-break: break-word;
+    user-select: text;
+  }
+
+  .plan {
+    padding-left: 14px;
+    border-left: 1px solid var(--line);
+  }
+
+  .reason {
+    margin: 0 0 8px;
+    color: var(--muted);
+    font-size: 12px;
+    user-select: text;
+  }
+
+  .step {
+    display: grid;
+    grid-template-columns: auto auto 1fr;
+    align-items: start;
+    gap: 6px;
+    padding: 3px 0;
+    font-size: 12px;
+    user-select: text;
+  }
+
+  .step .dot {
+    margin-top: 5px;
+  }
+
+  .step .who {
+    justify-self: start;
+    font-weight: 600;
+  }
+
+  .step .what {
+    color: var(--muted);
+  }
+
   pre {
     margin: 0;
     padding-left: 14px;
@@ -362,20 +368,26 @@
     user-select: text;
   }
 
-  .run-error {
-    margin-left: 0;
-  }
-
-  .footnote,
-  .total {
-    padding-top: 5px;
-    padding-left: 14px;
+  .footnote {
+    padding: 5px 0 0 14px;
     color: var(--muted);
     font-size: 11px;
   }
 
-  .total {
-    padding-left: 0;
+  .notice {
+    margin-bottom: 16px;
+    color: var(--muted);
+    font-size: 11px;
+    user-select: text;
+  }
+
+  .notice.bad {
+    padding: 7px 9px;
+    border: 1px solid #4a2b2b;
+    border-radius: 6px;
+    background: #241a1a;
+    color: var(--err);
+    font-size: 12px;
   }
 
   .composer {
