@@ -1,0 +1,59 @@
+/* Global shell only. Everything else is scoped inside components. */
+
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("/Inter-Medium.ttf") format("truetype");
+}
+
+:root {
+  --bg: #0e1014;
+  --panel: #14171d;
+  --panel-2: #191d25;
+  --line: #262b35;
+  --text: #e6e9ef;
+  --muted: #8b93a3;
+  --accent: #f2b544;
+  --ok: #5bc8a0;
+  --err: #ef6f6c;
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Inter", ui-sans-serif, system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+#app {
+  height: 100%;
+}
+
+/* The webview is a fixed app frame, not a document: no text selection drag,
+   no rubber-banding, no accidental zoom. */
+body,
+#app {
+  user-select: none;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}

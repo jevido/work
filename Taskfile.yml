@@ -1,0 +1,47 @@
+version: '3'
+
+vars:
+  APP_NAME: "work"
+  BIN_DIR: "bin"
+  PACKAGE_MANAGER: '{{.PACKAGE_MANAGER | default "npm"}}'
+  VITE_PORT: '{{.WAILS_VITE_PORT | default 9245}}'
+  GOOS: '{{.GOOS | default OS}}'
+
+includes:
+  common: ./build/Taskfile.yml
+  linux: ./build/linux/Taskfile.yml
+
+tasks:
+  build:
+    summary: Builds the application
+    cmds:
+      - task: "{{.GOOS}}:build"
+
+  package:
+    summary: Packages a production build of the application
+    cmds:
+      - task: "{{.GOOS}}:package"
+
+  run:
+    summary: Runs the application
+    cmds:
+      - task: "{{.GOOS}}:run"
+
+  dev:
+    summary: Runs the application in development mode
+    cmds:
+      - wails3 dev -config ./build/config.yml -port {{.VITE_PORT}}
+
+  check:
+    summary: Typechecks the frontend and vets the Go code
+    deps:
+      - task: common:generate:bindings
+      - task: common:install:frontend:deps
+    cmds:
+      - go vet ./...
+      - "{{.PACKAGE_MANAGER}} --prefix frontend run check"
+
+  test:
+    summary: Runs the Go test suite
+    cmds:
+      - go test ./...

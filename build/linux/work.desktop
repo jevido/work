@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=work
+Exec=work
+Icon=work
+Categories=Development;
+Terminal=false
+Keywords=wails
+Version=1.0
+StartupNotify=false
