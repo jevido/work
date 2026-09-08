@@ -22,14 +22,15 @@ export function Agents(): $CancellablePromise<workbench$0.AgentStatus[] | null> 
 }
 
 /**
- * Cancel stops a running task.
+ * Cancel stops a run, including any specialists working inside it.
  */
-export function Cancel(taskID: string): $CancellablePromise<void> {
-    return $Call.ByID(1254614124, taskID);
+export function Cancel(runID: string): $CancellablePromise<void> {
+    return $Call.ByID(1254614124, runID);
 }
 
 /**
- * Submit hands a prompt to an agent. An empty agentID goes to the coordinator.
+ * Submit starts a run. An empty agentID gives the task to the coordinator, who
+ * decides whether to answer it himself or split it between specialists.
  */
 export function Submit(agentID: string, prompt: string): $CancellablePromise<workbench$0.Task> {
     return $Call.ByID(3576145318, agentID, prompt);

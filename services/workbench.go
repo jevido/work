@@ -33,7 +33,8 @@ func (s *WorkbenchService) Agents() []workbench.AgentStatus {
 	return s.wb.Agents()
 }
 
-// Submit hands a prompt to an agent. An empty agentID goes to the coordinator.
+// Submit starts a run. An empty agentID gives the task to the coordinator, who
+// decides whether to answer it himself or split it between specialists.
 func (s *WorkbenchService) Submit(agentID, prompt string) (workbench.Task, error) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
@@ -45,11 +46,11 @@ func (s *WorkbenchService) Submit(agentID, prompt string) (workbench.Task, error
 	return s.wb.Submit(strings.TrimSpace(agentID), prompt)
 }
 
-// Cancel stops a running task.
-func (s *WorkbenchService) Cancel(taskID string) error {
-	taskID = strings.TrimSpace(taskID)
-	if taskID == "" {
-		return errors.New("taskId is empty")
+// Cancel stops a run, including any specialists working inside it.
+func (s *WorkbenchService) Cancel(runID string) error {
+	runID = strings.TrimSpace(runID)
+	if runID == "" {
+		return errors.New("runId is empty")
 	}
-	return s.wb.Cancel(taskID)
+	return s.wb.Cancel(runID)
 }

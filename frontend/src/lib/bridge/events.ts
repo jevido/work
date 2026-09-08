@@ -17,3 +17,7 @@ export const CLAUDE_TOOL = "claude:tool";
 export const CLAUDE_RESULT = "claude:result";
 export const CLAUDE_ERROR = "claude:error";
 export const CLAUDE_CANCELLED = "claude:cancelled";
+
+export const RUN_STARTED = "run:started";
+export const RUN_PLAN = "run:plan";
+export const RUN_FINISHED = "run:finished";

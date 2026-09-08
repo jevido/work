@@ -48,10 +48,13 @@ type Event struct {
 	Model     string `json:"model,omitempty"`
 	// ToolName is set for KindToolUse.
 	ToolName string `json:"toolName,omitempty"`
-	// Result, CostUSD and DurationMS are set for KindResult.
-	Result     string  `json:"result,omitempty"`
-	CostUSD    float64 `json:"costUsd,omitempty"`
-	DurationMS int64   `json:"durationMs,omitempty"`
+	// Result, Structured, CostUSD and DurationMS are set for KindResult.
+	Result string `json:"result,omitempty"`
+	// Structured is the schema-validated object, present only when the request
+	// carried a JSONSchema.
+	Structured json.RawMessage `json:"structured,omitempty"`
+	CostUSD    float64         `json:"costUsd,omitempty"`
+	DurationMS int64           `json:"durationMs,omitempty"`
 	// Message is set for KindError.
 	Message string `json:"message,omitempty"`
 }
@@ -71,6 +74,9 @@ type Request struct {
 	WorkDir string
 	// AllowedTools restricts tool access. Empty means the CLI default.
 	AllowedTools []string
+	// JSONSchema constrains the reply to a schema-validated object, returned on
+	// the result event as Event.Structured. Empty means a normal prose reply.
+	JSONSchema string
 }
 
 // Runner executes prompts against the local Claude CLI.
@@ -125,6 +131,9 @@ func (r *Runner) Run(ctx context.Context, req Request, sink func(Event)) error {
 	}
 	if len(req.AllowedTools) > 0 {
 		args = append(args, "--allowed-tools", strings.Join(req.AllowedTools, ","))
+	}
+	if req.JSONSchema != "" {
+		args = append(args, "--json-schema", req.JSONSchema)
 	}
 
 	cmd := exec.CommandContext(ctx, r.Bin, args...)
@@ -185,11 +194,12 @@ type envelope struct {
 	Message json.RawMessage `json:"message"`
 
 	// result
-	Result         string  `json:"result"`
-	IsError        bool    `json:"is_error"`
-	TotalCostUSD   float64 `json:"total_cost_usd"`
-	DurationMS     int64   `json:"duration_ms"`
-	APIErrorStatus any     `json:"api_error_status"`
+	Result           string          `json:"result"`
+	StructuredOutput json.RawMessage `json:"structured_output"`
+	IsError          bool            `json:"is_error"`
+	TotalCostUSD     float64         `json:"total_cost_usd"`
+	DurationMS       int64           `json:"duration_ms"`
+	APIErrorStatus   any             `json:"api_error_status"`
 }
 
 type streamEvent struct {
@@ -263,6 +273,7 @@ func scanStream(rd io.Reader, emit func(Event)) error {
 			emit(Event{
 				Kind:       KindResult,
 				Result:     env.Result,
+				Structured: env.StructuredOutput,
 				CostUSD:    env.TotalCostUSD,
 				DurationMS: env.DurationMS,
 			})

@@ -43,6 +43,10 @@ func init() {
 	application.RegisterEvent[workbench.ClaudeEvent](workbench.EventClaudeResult)
 	application.RegisterEvent[workbench.ClaudeEvent](workbench.EventClaudeError)
 	application.RegisterEvent[workbench.ClaudeEvent](workbench.EventClaudeCancelled)
+
+	application.RegisterEvent[workbench.RunEvent](workbench.EventRunStarted)
+	application.RegisterEvent[workbench.RunEvent](workbench.EventRunPlan)
+	application.RegisterEvent[workbench.RunEvent](workbench.EventRunFinished)
 }
 
 func main() {

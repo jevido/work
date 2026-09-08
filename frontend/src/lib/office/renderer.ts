@@ -30,6 +30,9 @@ const FRAME_INTERVAL_MS = 1000 / TARGET_FPS;
 /** World y where the back wall meets the floor. */
 const WALL_Y = 56;
 
+/** Highest device pixel ratio the canvas will render at. */
+const MAX_DPR = 2;
+
 /** Longest delta we integrate. Protects the sim after the tab is unhidden. */
 const MAX_DT = 0.1;
 
@@ -107,7 +110,9 @@ export class OfficeRenderer {
 
   /** Recomputes the world-to-device transform. Call on size changes. */
   resize(cssWidth: number, cssHeight: number): void {
-    const dpr = window.devicePixelRatio || 1;
+    // Fill cost scales with the square of the ratio, and a 3x panel buys
+    // nothing visible on flat shapes, so the office pays for 2x at most.
+    const dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
     const w = Math.max(1, Math.floor(cssWidth));
     const h = Math.max(1, Math.floor(cssHeight));
     if (w === this.cssWidth && h === this.cssHeight && dpr === this.dpr) return;

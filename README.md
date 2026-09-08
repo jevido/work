@@ -23,6 +23,12 @@ output.
 Work talks to your local `claude` binary, so it never handles credentials of its
 own. Point it at a specific installation with `CLAUDE_BIN=/path/to/claude`.
 
+Agents run in Work's working directory and inherit your local Claude
+installation's own permission configuration — Work passes no permission flags of
+its own. Whatever your `claude` setup already allows without asking, an agent can
+do here, and there is no approval prompt in the UI yet. Start Work from a
+directory you are happy for it to work in.
+
 ## Running
 
 ```sh
@@ -63,9 +69,25 @@ Performance is treated as a feature: one `requestAnimationFrame` loop, a
 device-pixel-ratio aware canvas, delta-time animation, a frame cap, no
 per-frame allocation, and drawing stops entirely while the window is hidden.
 
+## How a run works
+
+You type a task. Anton takes a short, schema-constrained routing turn on a
+cheaper model (`PlanModel`) and answers one question: keep it, or split it. The
+schema enumerates the real specialist IDs, so he cannot invent a colleague, and
+the plan is normalised before it runs — unknown agents, repeats, blank tasks and
+anything over the step cap are dropped.
+
+If he keeps it, he answers it himself. If he splits it, the specialists run at
+the same time, each with their own prompt, model and tool access, and each
+streaming into its own block in the console. A specialist failing does not fail
+the run: its error goes to synthesis with everyone else's answers, so a partial
+result still reaches you. Anton then takes a final turn and gives you one
+answer.
+
+One run is active at a time. Cancelling the run stops every agent inside it.
+
 ## Status
 
-The first milestone: one agent (Anton) runs the task you type, and the office
-reflects it. Jeff and Chris exist with their own prompts, desks and colours, but
-Anton does not delegate to them yet. Their definitions already carry the fields
-delegation will need — per-agent prompts, models and tool access.
+Delegation works end to end. Still missing: thinking output is streamed but not
+displayed, tool calls show as name chips without arguments or results, there is
+no task history or session resume, and no approval step before an agent acts.

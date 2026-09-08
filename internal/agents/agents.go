@@ -43,6 +43,10 @@ type Agent struct {
 	// Model is the Claude model alias this agent runs on. Empty means "let the
 	// local Claude installation decide".
 	Model string `json:"model"`
+	// PlanModel is the model used for a coordinator's routing turn. Routing is
+	// a short, schema-constrained judgement call, so it does not need the
+	// agent's main model. Empty falls back to Model.
+	PlanModel string `json:"planModel,omitempty"`
 	// SystemPrompt is appended to Claude's own system prompt when this agent
 	// runs. Not wired into delegation yet; Anton's is used for direct tasks.
 	SystemPrompt string `json:"-"`
@@ -103,6 +107,9 @@ func Default() *Registry {
 			Title:  "Lead",
 			Colour: "#f2b544",
 			Desk:   Desk{X: 300, Y: 200, SeatX: 300, SeatY: 268},
+			// Every routed task pays for a planning turn, so it runs on a
+			// cheaper, faster model than the work itself.
+			PlanModel: "sonnet",
 			Specialties: []string{
 				"task intake", "planning", "delegation", "synthesis",
 			},

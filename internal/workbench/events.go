@@ -35,6 +35,27 @@ const (
 	// EventClaudeCancelled reports that the user stopped the task. It is
 	// deliberately not an error: nothing went wrong.
 	EventClaudeCancelled = "claude:cancelled"
+
+	// EventRunStarted announces a new top-level request from the user.
+	EventRunStarted = "run:started"
+	// EventRunPlan carries Anton's routing decision for a run.
+	EventRunPlan = "run:plan"
+	// EventRunFinished closes a run, successfully or not.
+	EventRunFinished = "run:finished"
+)
+
+// Phase says which part of a run a task belongs to. The console groups output
+// by phase so a delegated run reads as a sequence rather than an interleaved
+// mess.
+type Phase string
+
+const (
+	// PhasePlan is Anton deciding who should do the work.
+	PhasePlan Phase = "plan"
+	// PhaseWork is an agent doing its share.
+	PhaseWork Phase = "work"
+	// PhaseSynthesis is Anton turning the specialists' answers into one.
+	PhaseSynthesis Phase = "synthesis"
 )
 
 // AgentState is the coarse-grained lifecycle state of an agent. The renderer
@@ -53,6 +74,8 @@ const (
 type AgentEvent struct {
 	AgentID string     `json:"agentId"`
 	TaskID  string     `json:"taskId"`
+	RunID   string     `json:"runId"`
+	Phase   Phase      `json:"phase"`
 	State   AgentState `json:"state"`
 	Message string     `json:"message,omitempty"`
 }
@@ -60,6 +83,8 @@ type AgentEvent struct {
 // ClaudeEvent is the payload for every claude:* event.
 type ClaudeEvent struct {
 	TaskID    string  `json:"taskId"`
+	RunID     string  `json:"runId"`
+	Phase     Phase   `json:"phase"`
 	AgentID   string  `json:"agentId"`
 	Text      string  `json:"text,omitempty"`
 	SessionID string  `json:"sessionId,omitempty"`
@@ -69,4 +94,19 @@ type ClaudeEvent struct {
 	CostUSD   float64 `json:"costUsd,omitempty"`
 	// DurationMS is the wall-clock duration reported by the Claude CLI.
 	DurationMS int64 `json:"durationMs,omitempty"`
+}
+
+// RunEvent is the payload for every run:* event.
+type RunEvent struct {
+	RunID  string `json:"runId"`
+	Prompt string `json:"prompt,omitempty"`
+	// Message carries a failure reason on EventRunFinished, or is empty on a
+	// clean finish.
+	Message string `json:"message,omitempty"`
+	// Cancelled marks a run the user stopped.
+	Cancelled bool `json:"cancelled,omitempty"`
+	// Mode, Reason and Steps are set on EventRunPlan.
+	Mode   PlanMode   `json:"mode,omitempty"`
+	Reason string     `json:"reason,omitempty"`
+	Steps  []PlanStep `json:"steps,omitempty"`
 }

@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -39,9 +40,26 @@ not json at all
 		t.Fatalf("got %d events, want %d: %+v", len(got), len(want), got)
 	}
 	for i := range want {
-		if got[i] != want[i] {
+		if !reflect.DeepEqual(got[i], want[i]) {
 			t.Errorf("event %d:\n got %+v\nwant %+v", i, got[i], want[i])
 		}
+	}
+}
+
+// TestScanStreamReadsStructuredOutput covers the schema-constrained turn used
+// for delegation planning: the object arrives alongside the text result.
+func TestScanStreamReadsStructuredOutput(t *testing.T) {
+	const stream = `{"type":"result","subtype":"success","is_error":false,"result":"{\"mode\":\"team\"}","structured_output":{"mode":"team","steps":[]}}
+`
+	var got []Event
+	if err := scanStream(strings.NewReader(stream), func(e Event) { got = append(got, e) }); err != nil {
+		t.Fatalf("scanStream: %v", err)
+	}
+	if len(got) != 1 || got[0].Kind != KindResult {
+		t.Fatalf("got %+v, want a single result event", got)
+	}
+	if want := `{"mode":"team","steps":[]}`; string(got[0].Structured) != want {
+		t.Errorf("structured = %s, want %s", got[0].Structured, want)
 	}
 }
 

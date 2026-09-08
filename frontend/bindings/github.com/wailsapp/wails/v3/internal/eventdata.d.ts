@@ -23,6 +23,9 @@ declare module "@wailsio/runtime" {
             "claude:text": workbench$0.ClaudeEvent;
             "claude:thinking": workbench$0.ClaudeEvent;
             "claude:tool": workbench$0.ClaudeEvent;
+            "run:finished": workbench$0.RunEvent;
+            "run:plan": workbench$0.RunEvent;
+            "run:started": workbench$0.RunEvent;
         }
     }
 }

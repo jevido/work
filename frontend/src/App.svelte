@@ -20,7 +20,12 @@
       .then((list) => {
         if (cancelled) return;
         // A Go nil slice arrives as null, so an empty team is not an error.
-        agents = (list ?? []).map((a) => ({
+        const roster = list ?? [];
+        // The console labels output by agent, so it needs the roster too.
+        session.setAgents(
+          roster.map((a) => ({ id: a.id, name: a.name, colour: a.colour })),
+        );
+        agents = roster.map((a) => ({
           id: a.id,
           name: a.name,
           colour: a.colour,
@@ -67,16 +72,23 @@
     display: grid;
     /* Office takes the room; the console keeps a usable, fixed-ish width. */
     grid-template-columns: minmax(0, 1fr) clamp(340px, 27%, 620px);
+    /* An auto-sized row grows to its tallest child, which lets a long
+       transcript push the whole window -- canvas included -- off screen.
+       Pinning the row to the viewport makes the console scroll instead. */
+    grid-template-rows: minmax(0, 100%);
     height: 100%;
+    overflow: hidden;
   }
 
   .office {
     position: relative;
     min-width: 0;
+    min-height: 0;
   }
 
   aside {
     min-width: 0;
+    min-height: 0;
   }
 
   .load-error {

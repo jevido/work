@@ -11,6 +11,8 @@ import * as agents$0 from "../agents/models.js";
 export interface AgentEvent {
     "agentId": string;
     "taskId": string;
+    "runId": string;
+    "phase": Phase;
     "state": AgentState;
     "message"?: string;
 }
@@ -49,6 +51,13 @@ export interface AgentStatus {
      * local Claude installation decide".
      */
     "model": string;
+
+    /**
+     * PlanModel is the model used for a coordinator's routing turn. Routing is
+     * a short, schema-constrained judgement call, so it does not need the
+     * agent's main model. Empty falls back to Model.
+     */
+    "planModel"?: string;
     "state": AgentState;
     "taskId"?: string;
 }
@@ -58,6 +67,8 @@ export interface AgentStatus {
  */
 export interface ClaudeEvent {
     "taskId": string;
+    "runId": string;
+    "phase": Phase;
     "agentId": string;
     "text"?: string;
     "sessionId"?: string;
@@ -73,11 +84,108 @@ export interface ClaudeEvent {
 }
 
 /**
- * Task is a unit of work handed to an agent.
+ * Phase says which part of a run a task belongs to. The console groups output
+ * by phase so a delegated run reads as a sequence rather than an interleaved
+ * mess.
+ */
+export enum Phase {
+    /**
+     * The Go zero value for the underlying type of the enum.
+     */
+    $zero = "",
+
+    /**
+     * PhasePlan is Anton deciding who should do the work.
+     */
+    PhasePlan = "plan",
+
+    /**
+     * PhaseWork is an agent doing its share.
+     */
+    PhaseWork = "work",
+
+    /**
+     * PhaseSynthesis is Anton turning the specialists' answers into one.
+     */
+    PhaseSynthesis = "synthesis",
+};
+
+/**
+ * PlanMode is Anton's decision about how to approach a task.
+ */
+export enum PlanMode {
+    /**
+     * The Go zero value for the underlying type of the enum.
+     */
+    $zero = "",
+
+    /**
+     * ModeSelf means Anton handles the task himself.
+     */
+    ModeSelf = "self",
+
+    /**
+     * ModeTeam means Anton splits the task between specialists.
+     */
+    ModeTeam = "team",
+};
+
+/**
+ * PlanStep is one specialist's share of the work.
+ */
+export interface PlanStep {
+    "agentId": string;
+    "task": string;
+}
+
+/**
+ * RunEvent is the payload for every run:* event.
+ */
+export interface RunEvent {
+    "runId": string;
+    "prompt"?: string;
+
+    /**
+     * Message carries a failure reason on EventRunFinished, or is empty on a
+     * clean finish.
+     */
+    "message"?: string;
+
+    /**
+     * Cancelled marks a run the user stopped.
+     */
+    "cancelled"?: boolean;
+
+    /**
+     * Mode, Reason and Steps are set on EventRunPlan.
+     */
+    "mode"?: PlanMode;
+    "reason"?: string;
+    "steps"?: PlanStep[] | null;
+}
+
+/**
+ * Task identifies the work started by one Submit call.
  */
 export interface Task {
+    /**
+     * ID is the run ID. Cancel takes this.
+     */
     "id": string;
+
+    /**
+     * Prompt is the user's request.
+     */
     "prompt": string;
+
+    /**
+     * AgentID is the agent the request went to: the coordinator for a routed
+     * run, or the named agent for a direct one.
+     */
     "agentId": string;
-    "assigned": boolean;
+
+    /**
+     * Routed is true when Anton will decide who does the work.
+     */
+    "routed": boolean;
 }
