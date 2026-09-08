@@ -112,6 +112,42 @@ scratch, so a stale session degrades into a fresh answer rather than a failed
 run. The routing turn is deliberately excluded: it is schema-constrained and
 stateless, and is simply told when it is looking at a follow-up.
 
+## Measured cost
+
+Taken on a 20-core laptop, 2560x1600 at 240Hz, GTK4 + WebKitGTK 6.0. Memory is
+reported as PSS (each shared page divided between the processes mapping it),
+which is the honest figure for a multi-process webview; RSS double-counts.
+
+| | |
+|---|---|
+| Binary, everything embedded | 9.5 MB |
+| Disk at rest, nothing else needed | 9.5 MB |
+| Memory, idle | ~340 MB PSS (~940 MB RSS across 8 processes) |
+| Startup, exec to window on screen | 216-220 ms |
+| CPU, window not presented | ~0% |
+| CPU, no animation loop | ~1% of one core |
+| CPU, visible and animating | ~27% of one core |
+| One Claude turn | 365 MB peak RSS, ~26% of one core while running |
+
+Two things worth knowing about those numbers.
+
+The idle memory is the webview, not Work: it is the same with the animation
+loop switched off, and the Go side is a rounding error next to it. A single
+Claude turn costs more RAM than the entire application, and a delegated run
+holds two or more of them at once, so agent count is the memory story.
+
+The visible CPU figure is not our drawing. The renderer's own frame time is
+1.0-1.2 ms with a 2.0 ms peak, which at 30fps is about 3.5% of a core. The rest
+is WebKit compositing a full-canvas repaint every frame. Reducing JavaScript
+work would therefore buy very little; reducing the *area that changes per
+frame* is what would help, which means caching the static floor, desks and grid
+and repainting only the rectangles agents actually moved through.
+
+Measuring this on a tiling compositor needs care: when the window stops being
+presented, `requestAnimationFrame` stops firing and the cost falls to nothing,
+so a sample taken while the window is covered reads far lower than the truth.
+Compare only samples taken at the same window size with the window on top.
+
 ## Status
 
 Delegation, the conversation and the board work end to end. Still missing:
