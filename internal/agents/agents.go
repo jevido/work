@@ -18,12 +18,16 @@ const (
 // Desk is the agent's fixed spot in the office, in world coordinates.
 //
 // The canvas renderer uses a fixed logical world (see frontend office/world.ts)
-// so these numbers stay meaningful no matter how the window is resized.
+// so these numbers stay meaningful no matter how the window is resized. The
+// layout is a classroom: the coordinator's desk is at the front, the
+// specialists' desks face it from below.
 type Desk struct {
 	// X and Y are the centre of the desk surface.
 	X float64 `json:"x"`
 	Y float64 `json:"y"`
-	// SeatX and SeatY are where the agent stands/sits when working.
+	// SeatX and SeatY are where the agent stands/sits when working. A seat is
+	// always in front of its desk, so the desk reads as furniture the agent is
+	// working at rather than something they are standing on.
 	SeatX float64 `json:"seatX"`
 	SeatY float64 `json:"seatY"`
 }
@@ -106,7 +110,7 @@ func Default() *Registry {
 			Role:   RoleCoordinator,
 			Title:  "Lead",
 			Colour: "#f2b544",
-			Desk:   Desk{X: 300, Y: 200, SeatX: 300, SeatY: 268},
+			Desk:   Desk{X: 500, Y: 140, SeatX: 500, SeatY: 208},
 			// Every routed task pays for a planning turn, so it runs on a
 			// cheaper, faster model than the work itself.
 			PlanModel: "sonnet",
@@ -126,7 +130,7 @@ func Default() *Registry {
 			Role:   RoleSpecialist,
 			Title:  "Systems",
 			Colour: "#5bc8a0",
-			Desk:   Desk{X: 700, Y: 200, SeatX: 700, SeatY: 268},
+			Desk:   Desk{X: 320, Y: 430, SeatX: 320, SeatY: 498},
 			Specialties: []string{
 				"Go", "infrastructure", "architecture", "performance",
 				"memory", "CPU", "concurrency", "systems integration",
@@ -144,7 +148,7 @@ func Default() *Registry {
 			Role:   RoleSpecialist,
 			Title:  "Experience",
 			Colour: "#7aa7ff",
-			Desk:   Desk{X: 500, Y: 470, SeatX: 500, SeatY: 538},
+			Desk:   Desk{X: 680, Y: 430, SeatX: 680, SeatY: 498},
 			Specialties: []string{
 				"UX", "usability", "interaction design", "Svelte",
 				"information hierarchy", "visual clarity", "reducing friction",

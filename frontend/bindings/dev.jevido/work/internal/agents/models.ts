@@ -5,7 +5,9 @@
  * Desk is the agent's fixed spot in the office, in world coordinates.
  * 
  * The canvas renderer uses a fixed logical world (see frontend office/world.ts)
- * so these numbers stay meaningful no matter how the window is resized.
+ * so these numbers stay meaningful no matter how the window is resized. The
+ * layout is a classroom: the coordinator's desk is at the front, the
+ * specialists' desks face it from below.
  */
 export interface Desk {
     /**
@@ -15,7 +17,9 @@ export interface Desk {
     "y": number;
 
     /**
-     * SeatX and SeatY are where the agent stands/sits when working.
+     * SeatX and SeatY are where the agent stands/sits when working. A seat is
+     * always in front of its desk, so the desk reads as furniture the agent is
+     * working at rather than something they are standing on.
      */
     "seatX": number;
     "seatY": number;

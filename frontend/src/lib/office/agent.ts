@@ -1,4 +1,11 @@
-import { AGENT_RADIUS, BOUNDS, WALK_SPEED } from "./world";
+import {
+  AGENT_RADIUS,
+  BOUNDS,
+  WALK_SPEED,
+  isWalkable,
+  pathIsClear,
+  type Rect,
+} from "./world";
 
 /**
  * What an agent is visibly doing. This is animation state, owned entirely by
@@ -8,6 +15,11 @@ export type VisualState = "idle" | "walking" | "working" | "finished" | "error";
 
 /** Where the agent is trying to get to, which outlives any single walk. */
 type Intent = "wander" | "desk";
+
+/** How far outside its own bounds an agent's drawing can reach. */
+const BOX_HALF_WIDTH = 46;
+const BOX_ABOVE = 52;
+const BOX_BELOW = 46;
 
 /**
  * A worker in the office.
@@ -37,6 +49,15 @@ export class OfficeAgent {
   targetX: number;
   targetY: number;
 
+  /**
+   * One optional stop on the way to the target, used to walk around a desk
+   * instead of through it. Simpler than a path: two straight legs are enough
+   * in a room this shape, and it costs no allocation.
+   */
+  private wayX = 0;
+  private wayY = 0;
+  private hasWaypoint = false;
+
   state: VisualState = "idle";
   intent: Intent = "wander";
 
@@ -48,6 +69,29 @@ export class OfficeAgent {
   facing: 1 | -1 = 1;
   /** Walk cycle phase, in radians. */
   step = 0;
+
+  /** Where the agent was when it was last drawn, for dirty-rectangle repaints. */
+  drawnX = 0;
+  drawnY = 0;
+  drawnState: VisualState = "idle";
+  /** True until the agent has been drawn once. */
+  neverDrawn = true;
+
+  /** Desks the agent must walk around, shared with the scene. */
+  private obstacles: readonly Rect[] = [];
+
+  /**
+   * True when this agent's motion is worth the full frame rate: working,
+   * finishing, failing, or crossing the room because it was given a task.
+   *
+   * An aimless stroll is not. It is the office's resting state, it runs for
+   * hours, and at half rate nobody can tell.
+   */
+  get wantsSmoothFrames(): boolean {
+    if (this.state === "idle") return false;
+    if (this.state === "walking" && this.intent === "wander") return false;
+    return true;
+  }
 
   constructor(opts: {
     id: string;
@@ -68,21 +112,52 @@ export class OfficeAgent {
     this.seatX = opts.seatX;
     this.seatY = opts.seatY;
 
-    // Start somewhere loose in the room rather than on the desk, so the first
-    // frame already looks like an office and not a lineup.
-    this.x = clamp(opts.deskX + rand(-110, 110), BOUNDS.minX, BOUNDS.maxX);
-    this.y = clamp(opts.deskY + rand(90, 170), BOUNDS.minY, BOUNDS.maxY);
+    this.x = opts.seatX;
+    this.y = opts.seatY + 60;
     this.targetX = this.x;
     this.targetY = this.y;
+    this.drawnX = this.x;
+    this.drawnY = this.y;
     this.timer = rand(0.2, 2);
+  }
+
+  /**
+   * Tells the agent which desks are solid. Called when the scene is built, and
+   * again if the cast changes.
+   */
+  setObstacles(obstacles: readonly Rect[]): void {
+    this.obstacles = obstacles;
+    // Being spawned inside a desk is possible if the layout changed, so nudge
+    // clear of one rather than starting stuck.
+    if (!isWalkable(obstacles, this.x, this.y)) {
+      for (let drop = 20; drop <= 160; drop += 20) {
+        if (isWalkable(obstacles, this.seatX, this.seatY + drop)) {
+          this.x = this.seatX;
+          this.y = this.seatY + drop;
+          break;
+        }
+      }
+      this.targetX = this.x;
+      this.targetY = this.y;
+      this.drawnX = this.x;
+      this.drawnY = this.y;
+    }
+  }
+
+  /** The rectangle this agent's drawing occupies, in world units. */
+  boxAt(x: number, y: number, out: Rect): Rect {
+    out.x = x - BOX_HALF_WIDTH;
+    out.y = y - BOX_ABOVE;
+    out.w = BOX_HALF_WIDTH * 2;
+    out.h = BOX_ABOVE + BOX_BELOW;
+    return out;
   }
 
   /** Send the agent to their desk and put them to work when they arrive. */
   assign(): void {
     this.intent = "desk";
     this.state = "walking";
-    this.targetX = this.seatX;
-    this.targetY = this.seatY;
+    this.headTo(this.seatX, this.seatY);
   }
 
   /** Already at the desk and producing output. */
@@ -124,8 +199,12 @@ export class OfficeAgent {
         // Standing still between strolls.
         this.timer -= dt;
         if (this.timer <= 0) {
-          this.pickWanderTarget();
-          this.state = "walking";
+          if (this.pickWanderTarget()) {
+            this.state = "walking";
+          } else {
+            // Nowhere sensible to go this time; try again shortly.
+            this.timer = rand(0.4, 1.2);
+          }
         }
         return;
       }
@@ -156,6 +235,41 @@ export class OfficeAgent {
     }
   }
 
+  /**
+   * Aims at a destination, inserting one intermediate stop if the direct line
+   * crosses a desk.
+   *
+   * The detour tries the two L-shaped routes -- across then down, or down then
+   * across -- which is enough to get around a rectangle in an open room.
+   */
+  private headTo(x: number, y: number): void {
+    this.targetX = x;
+    this.targetY = y;
+    this.hasWaypoint = false;
+
+    if (pathIsClear(this.obstacles, this.x, this.y, x, y)) return;
+
+    const corners = [
+      [x, this.y],
+      [this.x, y],
+    ] as const;
+    for (const [cx, cy] of corners) {
+      if (
+        isWalkable(this.obstacles, cx, cy) &&
+        pathIsClear(this.obstacles, this.x, this.y, cx, cy) &&
+        pathIsClear(this.obstacles, cx, cy, x, y)
+      ) {
+        this.wayX = cx;
+        this.wayY = cy;
+        this.hasWaypoint = true;
+        return;
+      }
+    }
+    // No clear route found. Walking the direct line would cut a corner off a
+    // desk, so give up on this destination and let the caller's state machine
+    // pick another.
+  }
+
   /** True when the agent is close enough to the target to count as arrived. */
   private nearTarget(epsilon: number): boolean {
     const dx = this.targetX - this.x;
@@ -163,14 +277,22 @@ export class OfficeAgent {
     return dx * dx + dy * dy <= epsilon * epsilon;
   }
 
-  /** Moves along a straight line. Returns true on arrival. */
+  /** Moves along the current leg. Returns true once the target is reached. */
   private moveTowardsTarget(dt: number): boolean {
-    const dx = this.targetX - this.x;
-    const dy = this.targetY - this.y;
+    const goalX = this.hasWaypoint ? this.wayX : this.targetX;
+    const goalY = this.hasWaypoint ? this.wayY : this.targetY;
+
+    const dx = goalX - this.x;
+    const dy = goalY - this.y;
     const dist = Math.sqrt(dx * dx + dy * dy);
     if (dist < 1.5) {
-      this.x = this.targetX;
-      this.y = this.targetY;
+      this.x = goalX;
+      this.y = goalY;
+      if (this.hasWaypoint) {
+        // First leg done; carry on to the real target.
+        this.hasWaypoint = false;
+        return false;
+      }
       this.step = 0;
       return true;
     }
@@ -185,21 +307,34 @@ export class OfficeAgent {
     return false;
   }
 
-  private pickWanderTarget(): void {
+  /**
+   * Picks somewhere to stroll near the agent's own desk, on the floor and clear
+   * of the furniture. Returns false when no candidate worked, which is the
+   * signal to stand still a moment longer rather than walk through a desk.
+   */
+  private pickWanderTarget(): boolean {
     // Wander near the desk rather than across the whole floor: it reads as
     // "hanging around my area" instead of a random walk.
     const spanX = 190;
-    const spanY = 120;
-    this.targetX = clamp(
-      this.deskX + rand(-spanX, spanX),
-      BOUNDS.minX + AGENT_RADIUS,
-      BOUNDS.maxX - AGENT_RADIUS,
-    );
-    this.targetY = clamp(
-      this.deskY + rand(60, spanY + 90),
-      BOUNDS.minY + AGENT_RADIUS,
-      BOUNDS.maxY - AGENT_RADIUS,
-    );
+    for (let attempt = 0; attempt < 12; attempt++) {
+      const x = clamp(
+        this.deskX + rand(-spanX, spanX),
+        BOUNDS.minX + AGENT_RADIUS,
+        BOUNDS.maxX - AGENT_RADIUS,
+      );
+      const y = clamp(
+        this.seatY + rand(10, 150),
+        BOUNDS.minY + AGENT_RADIUS,
+        BOUNDS.maxY - AGENT_RADIUS,
+      );
+      if (!isWalkable(this.obstacles, x, y)) continue;
+      if (!pathIsClear(this.obstacles, this.x, this.y, x, y)) continue;
+      this.targetX = x;
+      this.targetY = y;
+      this.hasWaypoint = false;
+      return true;
+    }
+    return false;
   }
 }
 

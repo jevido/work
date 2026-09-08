@@ -4,9 +4,14 @@ import {
   AGENT_RADIUS,
   DESK_HEIGHT,
   DESK_WIDTH,
+  IDLE_FPS,
   TARGET_FPS,
+  WALL_Y,
   WORLD_HEIGHT,
   WORLD_WIDTH,
+  deskObstacle,
+  deskRect,
+  type Rect,
 } from "./world";
 
 /** What the bridge hands the renderer: one agent, one new coarse state. */
@@ -26,18 +31,31 @@ export interface AgentSpec {
 }
 
 const FRAME_INTERVAL_MS = 1000 / TARGET_FPS;
-
-/** World y where the back wall meets the floor. */
-const WALL_Y = 56;
-
-/** Highest device pixel ratio the canvas will render at. */
-const MAX_DPR = 2;
+const IDLE_INTERVAL_MS = 1000 / IDLE_FPS;
 
 /** Longest delta we integrate. Protects the sim after the tab is unhidden. */
 const MAX_DT = 0.1;
 
+/** Highest device pixel ratio the canvas will render at. */
+const MAX_DPR = 2;
+
+/**
+ * Above this share of the canvas, repainting everything beats bookkeeping.
+ * Reached only when the office is crowded or the agents are spread wide.
+ */
+const FULL_REPAINT_RATIO = 0.6;
+
+/** Rects are pooled: the loop must not allocate. */
+const MAX_DIRTY = 24;
+
 /**
  * Draws the office with one requestAnimationFrame loop and nothing else.
+ *
+ * The floor, grid, wall and desks are painted once into an offscreen canvas and
+ * then blitted back as the background. Each frame repaints only the rectangles
+ * that actually changed -- where an agent was, where it now is, and any monitor
+ * that lit up -- because measurement showed the cost of this renderer is not
+ * its drawing but the webview compositing a full-canvas repaint every frame.
  *
  * The renderer is deliberately not reactive. Semantic state changes arrive
  * through `push`, are queued as plain objects, and are drained at the top of a
@@ -49,8 +67,13 @@ export class OfficeRenderer {
   private readonly ctx: CanvasRenderingContext2D;
   private readonly sampler = new PerfSampler();
 
+  /** The static background: floor, grid, wall and unlit desks. */
+  private readonly layer: HTMLCanvasElement;
+  private readonly layerCtx: CanvasRenderingContext2D;
+
   private agents: OfficeAgent[] = [];
   private byId = new Map<string, OfficeAgent>();
+  private obstacles: Rect[] = [];
 
   /** Pending commands, drained each frame. Reused, never reallocated. */
   private queue: AgentCommand[] = [];
@@ -68,18 +91,30 @@ export class OfficeRenderer {
   private offsetX = 0;
   private offsetY = 0;
 
-  /**
-   * The floor is drawn across the whole canvas rather than only the world
-   * rectangle, so a window of any aspect ratio shows a room instead of black
-   * bars. These are the canvas corners expressed in world coordinates.
-   */
+  /** The canvas corners in world coordinates. */
   private viewMinX = 0;
   private viewMinY = 0;
   private viewMaxX = WORLD_WIDTH;
   private viewMaxY = WORLD_HEIGHT;
 
-  /** Floor detail, rebuilt on resize and reused every frame. */
-  private floorGrid = new Path2D();
+  /** Set when the next frame must repaint everything. */
+  private needsFullRepaint = true;
+
+  /** True while any agent is doing something more interesting than strolling. */
+  private busy = false;
+
+  /** Dirty rectangles for this frame, in world units. Pooled. */
+  private readonly dirty: Rect[] = Array.from({ length: MAX_DIRTY }, () => ({
+    x: 0,
+    y: 0,
+    w: 0,
+    h: 0,
+  }));
+  private dirtyCount = 0;
+
+  /** Scratch rectangles, so boxAt need not allocate. */
+  private readonly scratchA: Rect = { x: 0, y: 0, w: 0, h: 0 };
+  private readonly scratchB: Rect = { x: 0, y: 0, w: 0, h: 0 };
 
   private readonly onVisibility = () => {
     if (document.hidden) this.pause();
@@ -91,6 +126,11 @@ export class OfficeRenderer {
     if (!ctx) throw new Error("Canvas 2D is unavailable");
     this.canvas = canvas;
     this.ctx = ctx;
+
+    this.layer = document.createElement("canvas");
+    const layerCtx = this.layer.getContext("2d", { alpha: false });
+    if (!layerCtx) throw new Error("Canvas 2D is unavailable");
+    this.layerCtx = layerCtx;
   }
 
   get stats(): FrameStats {
@@ -101,6 +141,12 @@ export class OfficeRenderer {
   setAgents(specs: readonly AgentSpec[]): void {
     this.agents = specs.map((s) => new OfficeAgent(s));
     this.byId = new Map(this.agents.map((a) => [a.id, a]));
+    this.obstacles = specs.map((s) => deskObstacle(s.deskX, s.deskY));
+    for (const agent of this.agents) agent.setObstacles(this.obstacles);
+
+    this.paintLayer();
+    this.needsFullRepaint = true;
+    if (!this.running) this.draw(performance.now());
   }
 
   /** Queues a coarse state change. Cheap enough to call from an event handler. */
@@ -121,10 +167,14 @@ export class OfficeRenderer {
     this.cssHeight = h;
     this.dpr = dpr;
 
-    this.canvas.width = Math.floor(w * dpr);
-    this.canvas.height = Math.floor(h * dpr);
+    const deviceW = Math.floor(w * dpr);
+    const deviceH = Math.floor(h * dpr);
+    this.canvas.width = deviceW;
+    this.canvas.height = deviceH;
     this.canvas.style.width = `${w}px`;
     this.canvas.style.height = `${h}px`;
+    this.layer.width = deviceW;
+    this.layer.height = deviceH;
 
     // Fit the whole world, preserving aspect, and centre the remainder.
     this.scale = Math.min(w / WORLD_WIDTH, h / WORLD_HEIGHT);
@@ -135,13 +185,9 @@ export class OfficeRenderer {
     this.viewMinY = -this.offsetY / this.scale;
     this.viewMaxX = (w - this.offsetX) / this.scale;
     this.viewMaxY = (h - this.offsetY) / this.scale;
-    this.floorGrid = buildFloorGrid(
-      this.viewMinX,
-      this.viewMinY,
-      this.viewMaxX,
-      this.viewMaxY,
-    );
 
+    this.paintLayer();
+    this.needsFullRepaint = true;
     if (!this.running) this.draw(performance.now());
   }
 
@@ -172,6 +218,7 @@ export class OfficeRenderer {
     if (!this.running || this.raf) return;
     this.lastTime = performance.now();
     this.sampler.reset();
+    this.needsFullRepaint = true;
     this.raf = requestAnimationFrame(this.tick);
   }
 
@@ -179,8 +226,11 @@ export class OfficeRenderer {
     if (!this.running) return;
     this.raf = requestAnimationFrame(this.tick);
 
-    // Frame cap. Cheaper than drawing at panel rate, and invisible at 48fps.
-    if (now - this.lastDraw < FRAME_INTERVAL_MS - 0.5) return;
+    // Frame cap. Cheaper than drawing at panel rate, and invisible at 30fps.
+    // A calm office drops to half rate, which the eye cannot pick up on a
+    // slow stroll but the compositor certainly can.
+    const interval = this.busy ? FRAME_INTERVAL_MS : IDLE_INTERVAL_MS;
+    if (now - this.lastDraw < interval - 0.5) return;
 
     const dt = Math.min((now - this.lastTime) / 1000, MAX_DT);
     this.lastTime = now;
@@ -223,7 +273,12 @@ export class OfficeRenderer {
 
   private update(dt: number): void {
     const list = this.agents;
-    for (let i = 0; i < list.length; i++) list[i].update(dt);
+    let busy = false;
+    for (let i = 0; i < list.length; i++) {
+      list[i].update(dt);
+      if (list[i].wantsSmoothFrames) busy = true;
+    }
+    this.busy = busy;
 
     // Painter's order by depth. Insertion sort in place: no allocation, and
     // the list is nearly sorted every frame.
@@ -238,32 +293,18 @@ export class OfficeRenderer {
     }
   }
 
-  private draw(now: number): void {
-    const ctx = this.ctx;
-    const dpr = this.dpr;
+  /** Paints the static background: floor, grid, wall and unlit desks. */
+  private paintLayer(): void {
+    if (this.layer.width === 0 || this.layer.height === 0) return;
 
-    // Surround, in device space.
+    const ctx = this.layerCtx;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.fillStyle = "#0b0d11";
-    ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+    ctx.fillRect(0, 0, this.layer.width, this.layer.height);
 
-    const s = this.scale * dpr;
-    ctx.setTransform(s, 0, 0, s, this.offsetX * dpr, this.offsetY * dpr);
+    const s = this.scale * this.dpr;
+    ctx.setTransform(s, 0, 0, s, this.offsetX * this.dpr, this.offsetY * this.dpr);
 
-    this.drawFloor(ctx);
-
-    // Text settings are the same for every label, so set them once per frame
-    // rather than once per agent.
-    ctx.font = "600 12px Inter, system-ui, sans-serif";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-
-    const list = this.agents;
-    for (let i = 0; i < list.length; i++) this.drawDesk(ctx, list[i]);
-    for (let i = 0; i < list.length; i++) this.drawAgent(ctx, list[i], now);
-  }
-
-  private drawFloor(ctx: CanvasRenderingContext2D): void {
     const x = this.viewMinX;
     const y = this.viewMinY;
     const w = this.viewMaxX - x;
@@ -272,35 +313,208 @@ export class OfficeRenderer {
     ctx.fillStyle = "#171b22";
     ctx.fillRect(x, y, w, h);
 
+    // Floor grid.
     ctx.strokeStyle = "#1e242e";
     ctx.lineWidth = 1 / this.scale;
-    ctx.stroke(this.floorGrid);
+    ctx.beginPath();
+    const step = 50;
+    const top = Math.max(y, WALL_Y);
+    for (let gx = Math.ceil(x / step) * step; gx < this.viewMaxX; gx += step) {
+      ctx.moveTo(gx, top);
+      ctx.lineTo(gx, this.viewMaxY);
+    }
+    for (let gy = Math.ceil(top / step) * step; gy < this.viewMaxY; gy += step) {
+      ctx.moveTo(x, gy);
+      ctx.lineTo(this.viewMaxX, gy);
+    }
+    ctx.stroke();
 
     // Back wall, to give the room a floor/wall split.
     ctx.fillStyle = "#12151b";
     ctx.fillRect(x, y, w, WALL_Y - y);
     ctx.fillStyle = "#232a35";
     ctx.fillRect(x, WALL_Y - 2, w, 2);
+
+    ctx.font = "600 12px Inter, system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    for (const agent of this.agents) this.drawDesk(ctx, agent, false);
   }
 
-  private drawDesk(ctx: CanvasRenderingContext2D, a: OfficeAgent): void {
+  private draw(now: number): void {
+    const ctx = this.ctx;
+    if (this.canvas.width === 0) return;
+
+    this.collectDirty();
+
+    const full =
+      this.needsFullRepaint ||
+      this.dirtyCount === 0 ||
+      this.dirtyArea() > (this.viewMaxX - this.viewMinX) * (this.viewMaxY - this.viewMinY) * FULL_REPAINT_RATIO;
+
+    if (full) {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.drawImage(this.layer, 0, 0);
+      this.setWorldTransform();
+      this.drawScene(ctx, now);
+      this.needsFullRepaint = false;
+    } else {
+      for (let i = 0; i < this.dirtyCount; i++) {
+        const r = this.dirty[i];
+        // Restore the background for this patch, in device space so the blit
+        // is a straight copy with no resampling.
+        const dx = Math.floor(this.toDeviceX(r.x));
+        const dy = Math.floor(this.toDeviceY(r.y));
+        const dw = Math.ceil(r.w * this.scale * this.dpr) + 2;
+        const dh = Math.ceil(r.h * this.scale * this.dpr) + 2;
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.drawImage(this.layer, dx, dy, dw, dh, dx, dy, dw, dh);
+
+        this.setWorldTransform();
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(r.x, r.y, r.w, r.h);
+        ctx.clip();
+        this.drawScene(ctx, now);
+        ctx.restore();
+      }
+    }
+
+    // Remember where everyone was drawn, so the next frame knows what to erase.
+    for (const agent of this.agents) {
+      agent.drawnX = agent.x;
+      agent.drawnY = agent.y;
+      agent.drawnState = agent.state;
+      agent.neverDrawn = false;
+    }
+  }
+
+  /** Draws everything that moves: lit monitors and the agents themselves. */
+  private drawScene(ctx: CanvasRenderingContext2D, now: number): void {
+    ctx.font = "600 12px Inter, system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+
+    const list = this.agents;
+    for (let i = 0; i < list.length; i++) {
+      if (isLit(list[i].state)) this.drawDesk(ctx, list[i], true);
+    }
+    for (let i = 0; i < list.length; i++) this.drawAgent(ctx, list[i], now);
+  }
+
+  /**
+   * Works out which rectangles changed since the last frame: where each agent
+   * was, where it is now, and the desk of any agent whose monitor just lit up
+   * or went dark.
+   */
+  private collectDirty(): void {
+    this.dirtyCount = 0;
+    const list = this.agents;
+
+    for (let i = 0; i < list.length; i++) {
+      const agent = list[i];
+      const moved = agent.x !== agent.drawnX || agent.y !== agent.drawnY;
+      const restyled = agent.state !== agent.drawnState;
+      // A working or erroring agent animates in place -- typing dots, a
+      // pulsing ring, a breathing bob -- so it is dirty even when still.
+      const animating = agent.state !== "idle";
+
+      if (!moved && !restyled && !animating && !agent.neverDrawn) continue;
+
+      this.addDirty(agent.boxAt(agent.drawnX, agent.drawnY, this.scratchA));
+      if (moved) this.addDirty(agent.boxAt(agent.x, agent.y, this.scratchB));
+
+      if (restyled || isLit(agent.state)) {
+        const desk = deskRect(agent.deskX, agent.deskY);
+        this.addDirty(desk);
+      }
+    }
+
+    this.mergeDirty();
+  }
+
+  private addDirty(r: Rect): void {
+    if (this.dirtyCount >= MAX_DIRTY) {
+      // Out of slots: fall back to one full repaint rather than dropping a
+      // patch and leaving a smear on screen.
+      this.needsFullRepaint = true;
+      return;
+    }
+    const slot = this.dirty[this.dirtyCount++];
+    slot.x = r.x;
+    slot.y = r.y;
+    slot.w = r.w;
+    slot.h = r.h;
+  }
+
+  /** Collapses overlapping rectangles, so no pixel is painted twice. */
+  private mergeDirty(): void {
+    let merged = true;
+    while (merged) {
+      merged = false;
+      for (let i = 0; i < this.dirtyCount; i++) {
+        for (let j = i + 1; j < this.dirtyCount; j++) {
+          if (!overlaps(this.dirty[i], this.dirty[j])) continue;
+          union(this.dirty[i], this.dirty[j]);
+          // Remove j by swapping the last rect into its place.
+          const last = this.dirty[this.dirtyCount - 1];
+          const target = this.dirty[j];
+          target.x = last.x;
+          target.y = last.y;
+          target.w = last.w;
+          target.h = last.h;
+          this.dirtyCount--;
+          merged = true;
+          j--;
+        }
+      }
+    }
+  }
+
+  private dirtyArea(): number {
+    let area = 0;
+    for (let i = 0; i < this.dirtyCount; i++) {
+      area += this.dirty[i].w * this.dirty[i].h;
+    }
+    return area;
+  }
+
+  private setWorldTransform(): void {
+    const s = this.scale * this.dpr;
+    this.ctx.setTransform(s, 0, 0, s, this.offsetX * this.dpr, this.offsetY * this.dpr);
+  }
+
+  private toDeviceX(worldX: number): number {
+    return worldX * this.scale * this.dpr + this.offsetX * this.dpr;
+  }
+
+  private toDeviceY(worldY: number): number {
+    return worldY * this.scale * this.dpr + this.offsetY * this.dpr;
+  }
+
+  /**
+   * Draws one desk. `lit` draws only the parts that change with state, so the
+   * static layer can hold the rest.
+   */
+  private drawDesk(ctx: CanvasRenderingContext2D, a: OfficeAgent, lit: boolean): void {
     const x = a.deskX - DESK_WIDTH / 2;
     const y = a.deskY - DESK_HEIGHT / 2;
 
-    // Surface.
-    ctx.fillStyle = "#2a313d";
-    ctx.beginPath();
-    ctx.roundRect(x, y, DESK_WIDTH, DESK_HEIGHT, 7);
-    ctx.fill();
+    if (!lit) {
+      // Surface.
+      ctx.fillStyle = "#2a313d";
+      ctx.beginPath();
+      ctx.roundRect(x, y, DESK_WIDTH, DESK_HEIGHT, 7);
+      ctx.fill();
 
-    // Front edge, for a hint of thickness.
-    ctx.fillStyle = "#222833";
-    ctx.beginPath();
-    ctx.roundRect(x, y + DESK_HEIGHT - 9, DESK_WIDTH, 9, 5);
-    ctx.fill();
+      // Front edge, for a hint of thickness.
+      ctx.fillStyle = "#222833";
+      ctx.beginPath();
+      ctx.roundRect(x, y + DESK_HEIGHT - 9, DESK_WIDTH, 9, 5);
+      ctx.fill();
+    }
 
     // Monitor, tinted with the owner's colour when they are working.
-    const lit = a.state === "working";
     ctx.fillStyle = "#151920";
     ctx.beginPath();
     ctx.roundRect(a.deskX - 30, y - 26, 60, 30, 4);
@@ -310,9 +524,11 @@ export class OfficeRenderer {
     ctx.roundRect(a.deskX - 26, y - 22, 52, 22, 3);
     ctx.fill();
 
-    // Nameplate.
-    ctx.fillStyle = "#5f6878";
-    ctx.fillText(a.name, a.deskX, a.deskY + 2);
+    if (!lit) {
+      // Nameplate.
+      ctx.fillStyle = "#5f6878";
+      ctx.fillText(a.name, a.deskX, a.deskY + 2);
+    }
   }
 
   private drawAgent(ctx: CanvasRenderingContext2D, a: OfficeAgent, now: number): void {
@@ -346,7 +562,13 @@ export class OfficeRenderer {
     // Head.
     ctx.fillStyle = a.colourSoft;
     ctx.beginPath();
-    ctx.arc(a.x + a.facing * 1.5, bodyY - bob - AGENT_RADIUS * 0.42, AGENT_RADIUS * 0.52, 0, Math.PI * 2);
+    ctx.arc(
+      a.x + a.facing * 1.5,
+      bodyY - bob - AGENT_RADIUS * 0.42,
+      AGENT_RADIUS * 0.52,
+      0,
+      Math.PI * 2,
+    );
     ctx.fill();
 
     // Name tag, so a wandering agent is still identifiable away from the desk.
@@ -403,21 +625,25 @@ export class OfficeRenderer {
   }
 }
 
-/**
- * Floor grid as a single reusable path, covering the visible world rectangle.
- * Rebuilt on resize only; stroking it costs one call per frame.
- */
-function buildFloorGrid(minX: number, minY: number, maxX: number, maxY: number): Path2D {
-  const p = new Path2D();
-  const step = 50;
-  const top = Math.max(minY, WALL_Y);
-  for (let x = Math.ceil(minX / step) * step; x < maxX; x += step) {
-    p.moveTo(x, top);
-    p.lineTo(x, maxY);
-  }
-  for (let y = Math.ceil(top / step) * step; y < maxY; y += step) {
-    p.moveTo(minX, y);
-    p.lineTo(maxX, y);
-  }
-  return p;
+/** True when the agent's monitor should be tinted. */
+function isLit(state: VisualState): boolean {
+  return state === "working" || state === "finished";
+}
+
+function overlaps(a: Rect, b: Rect): boolean {
+  return (
+    a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
+  );
+}
+
+/** Grows a to cover b. */
+function union(a: Rect, b: Rect): void {
+  const x = Math.min(a.x, b.x);
+  const y = Math.min(a.y, b.y);
+  const right = Math.max(a.x + a.w, b.x + b.w);
+  const bottom = Math.max(a.y + a.h, b.y + b.h);
+  a.x = x;
+  a.y = y;
+  a.w = right - x;
+  a.h = bottom - y;
 }

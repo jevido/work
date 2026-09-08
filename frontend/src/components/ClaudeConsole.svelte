@@ -40,9 +40,17 @@
   }
 
   function onKeydown(event: KeyboardEvent) {
-    // Enter sends, Shift+Enter makes a new line. This is a console, not a
-    // document editor.
-    if (event.key === "Enter" && !event.shiftKey) {
+    // Enter sends; Shift+Enter, Ctrl+Enter and Alt+Enter all make a new line.
+    // isComposing guards input methods, where Enter commits a candidate and
+    // must never be read as "send".
+    if (
+      event.key === "Enter" &&
+      !event.shiftKey &&
+      !event.ctrlKey &&
+      !event.altKey &&
+      !event.metaKey &&
+      !event.isComposing
+    ) {
       event.preventDefault();
       submit();
       return;
@@ -53,6 +61,23 @@
       void session.cancel();
     }
   }
+
+  /**
+   * Grows the composer with its content, up to a third of the panel. A fixed
+   * three-line box makes a long prompt feel like typing through a letterbox.
+   */
+  function fitComposer() {
+    const el = promptEl;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 260)}px`;
+  }
+
+  // Re-fit whenever the text changes, including when submit() empties it.
+  $effect(() => {
+    void prompt;
+    fitComposer();
+  });
 
   function onScroll() {
     const el = scroller;
@@ -152,8 +177,9 @@
       bind:this={promptEl}
       bind:value={prompt}
       onkeydown={onKeydown}
-      placeholder="Give Anton work…"
-      rows="3"
+      oninput={fitComposer}
+      placeholder="Give Anton work…   (Shift+Enter for a new line)"
+      rows="2"
       spellcheck="false"
     ></textarea>
     <div class="actions">
@@ -397,7 +423,11 @@
 
   textarea {
     width: 100%;
+    /* Height is driven by content in fitComposer, so the handle would lie. */
     resize: none;
+    overflow-y: auto;
+    min-height: 2.6em;
+    max-height: 260px;
     padding: 8px 9px;
     border: 1px solid var(--line);
     border-radius: 6px;
