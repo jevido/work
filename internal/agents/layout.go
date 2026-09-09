@@ -8,7 +8,12 @@ const (
 
 	// coordinatorY is the front of the classroom, where the coordinator sits
 	// facing the specialists.
-	coordinatorY = 140.0
+	//
+	// Far enough off the back wall to leave room for the task board that hangs
+	// behind the desk (see drawTaskBoard in the frontend's office/renderer.ts),
+	// and no further: the seat is 68 below this, and past about 176 the agent
+	// sitting in it starts to overlap the first row of specialist desks.
+	coordinatorY = 172.0
 	// seatOffsetY puts an agent in front of their desk rather than on it.
 	seatOffsetY = 68.0
 

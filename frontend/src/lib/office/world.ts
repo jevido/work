@@ -61,6 +61,36 @@ export const BOUNDS = {
 export const DESK_WIDTH = 150;
 export const DESK_HEIGHT = 58;
 
+/**
+ * The coordinator's desk, which is a different piece of furniture rather than
+ * the same one drawn bigger.
+ *
+ * Half again as wide and a third deeper. That is not vanity: the office reads
+ * at a glance, and "who runs this room" has to be one of the things it says
+ * without a caption -- the rooms lost their labels for the same reason. The
+ * width is what carries it at small scale; the depth is only enough to leave
+ * room for a writing pad in front of the monitor.
+ *
+ * Kept under twice the specialists' width on purpose. Wider than that and the
+ * lane between the coordinator and the first row of desks stops being walkable,
+ * which the router would discover at runtime and nobody would enjoy.
+ */
+export const BOSS_DESK_WIDTH = 226;
+export const BOSS_DESK_HEIGHT = 74;
+
+/**
+ * The surface size of one desk. `boss` is the coordinator's desk, which is the
+ * only one that differs -- see AssignDesks in internal/agents/layout.go for who
+ * that is.
+ */
+export function deskWidth(boss: boolean): number {
+  return boss ? BOSS_DESK_WIDTH : DESK_WIDTH;
+}
+
+export function deskHeight(boss: boolean): number {
+  return boss ? BOSS_DESK_HEIGHT : DESK_HEIGHT;
+}
+
 /** Agent body size in world units. */
 export const AGENT_RADIUS = 15;
 
@@ -128,13 +158,15 @@ export interface Rect {
  * The area a desk occupies visually: the surface plus the monitor standing on
  * it. Used both for drawing bounds and, inflated, as an obstacle.
  */
-export function deskRect(deskX: number, deskY: number): Rect {
-  const top = deskY - DESK_HEIGHT / 2 - 28;
+export function deskRect(deskX: number, deskY: number, boss = false): Rect {
+  const w = deskWidth(boss);
+  const h = deskHeight(boss);
+  const top = deskY - h / 2 - 28;
   return {
-    x: deskX - DESK_WIDTH / 2,
+    x: deskX - w / 2,
     y: top,
-    w: DESK_WIDTH,
-    h: deskY + DESK_HEIGHT / 2 - top,
+    w,
+    h: deskY + h / 2 - top,
   };
 }
 
@@ -174,9 +206,9 @@ export const MONITOR_TEXT_PAD = 2;
  * The renderer draws from this and the pointer hit-test measures against it, so
  * the two cannot drift apart.
  */
-export function monitorRect(deskX: number, deskY: number, out: Rect): Rect {
+export function monitorRect(deskX: number, deskY: number, boss: boolean, out: Rect): Rect {
   out.x = deskX - MONITOR_WIDTH / 2;
-  out.y = deskY - DESK_HEIGHT / 2 - MONITOR_RISE;
+  out.y = deskY - deskHeight(boss) / 2 - MONITOR_RISE;
   out.w = MONITOR_WIDTH;
   out.h = MONITOR_HEIGHT;
   return out;
@@ -189,13 +221,15 @@ export function monitorRect(deskX: number, deskY: number, out: Rect): Rect {
  * is drawn standing behind the desk, and treating it as solid would push agents
  * an awkward distance away from their own seat.
  */
-export function deskObstacle(deskX: number, deskY: number): Rect {
+export function deskObstacle(deskX: number, deskY: number, boss = false): Rect {
   const pad = AGENT_RADIUS * 0.8;
+  const w = deskWidth(boss);
+  const h = deskHeight(boss);
   return {
-    x: deskX - DESK_WIDTH / 2 - pad,
-    y: deskY - DESK_HEIGHT / 2 - pad,
-    w: DESK_WIDTH + pad * 2,
-    h: DESK_HEIGHT + pad * 2,
+    x: deskX - w / 2 - pad,
+    y: deskY - h / 2 - pad,
+    w: w + pad * 2,
+    h: h + pad * 2,
   };
 }
 
@@ -218,8 +252,12 @@ export interface Point {
 export type RoomId = "bullpen" | "break" | "meeting";
 
 /**
- * One room: the rectangle of its floor, what to call it, and the lanes through
- * it that are known to be clear.
+ * One room: the rectangle of its floor, and the lanes through it that are
+ * known to be clear.
+ *
+ * A room is not labelled. Each one has its own floor, its own furniture and a
+ * wall around it, which is what tells them apart from across the office; a word
+ * in the corner was a caption on a picture that did not need one.
  *
  * `junctions` are circulation points -- the middle of a doorway's approach, the
  * open lane down one side. The router falls back to them when a destination
@@ -229,13 +267,6 @@ export type RoomId = "bullpen" | "break" | "meeting";
  */
 export interface Room {
   id: RoomId;
-  label: string;
-  /**
-   * Which corner the label goes in. Every room in this office has something
-   * against its back wall, and in the break room the near wall is where people
-   * sit, so there is no one corner that is free in all three.
-   */
-  labelCorner: "top-left" | "top-right" | "bottom-left";
   x: number;
   y: number;
   w: number;
@@ -246,8 +277,6 @@ export interface Room {
 export const ROOMS: readonly Room[] = [
   {
     id: "bullpen",
-    label: "BULLPEN",
-    labelCorner: "bottom-left",
     x: FLOOR_LEFT,
     y: FLOOR_TOP,
     w: WING_X - FLOOR_LEFT,
@@ -262,8 +291,6 @@ export const ROOMS: readonly Room[] = [
   },
   {
     id: "break",
-    label: "BREAK ROOM",
-    labelCorner: "top-right",
     x: WING_X,
     y: FLOOR_TOP,
     w: FLOOR_RIGHT - WING_X,
@@ -276,8 +303,6 @@ export const ROOMS: readonly Room[] = [
   },
   {
     id: "meeting",
-    label: "MEETING",
-    labelCorner: "bottom-left",
     x: WING_X,
     y: WING_SPLIT_Y,
     w: FLOOR_RIGHT - WING_X,

@@ -1,3 +1,4 @@
+import { admits } from "./entry";
 import { DISPATCH_HOLD_SECONDS, SpeechBubble } from "./speech";
 import { MonitorTail } from "./tail";
 import {
@@ -33,8 +34,37 @@ type Intent = "wander" | "desk";
  */
 export type IdleActivity = "none" | "coffee" | "lunch" | "chat" | "pingpong";
 
-/** What an agent is carrying, drawn in their hand. */
-export type Held = "none" | "mug" | "paddle";
+/**
+ * What an agent is carrying, drawn in their hand.
+ *
+ * A mug is theirs and expires on a timer. A paddle belongs to the table. The
+ * last two belong to a director: a folder of work is the thing that has to
+ * come back, and a phone is up for as long as the call lasts.
+ */
+export type Held = "none" | "mug" | "paddle" | "files" | "phone";
+
+/**
+ * Whether a director is currently steering this agent, and how.
+ *
+ * Deliberately only two values and no detail. The scripted sequences -- a
+ * handoff, a folder coming back -- keep their own state in their own slot (see
+ * handoff.ts); all the agent needs to know is "somebody else is deciding where
+ * I stand", which is what stops the aimless stroll below from walking them out
+ * of it and what keeps the idle director from talking them into a coffee.
+ *
+ * "hold" is standing or sitting where they were put. "walk" is a leg of a
+ * scripted route, which unlike a stroll is worth the full frame rate.
+ */
+export type Errand = "none" | "hold" | "walk";
+
+/**
+ * A short reaction played on the spot: winning a rally, or losing one.
+ *
+ * Runs on its own timer rather than a director's, because it has to outlive
+ * the bit that caused it -- the point of a cheer is that it is still going
+ * while both players walk away from the table.
+ */
+export type Emote = "none" | "cheer" | "sob";
 
 /** How far outside its own bounds an agent's drawing can reach. */
 const BOX_HALF_WIDTH = 46;
@@ -79,6 +109,15 @@ export class OfficeAgent {
   /** Desk surface centre. */
   readonly deskX: number;
   readonly deskY: number;
+  /**
+   * True for the coordinator, who has a desk of a different size and shape.
+   *
+   * Carried on the agent because the geometry follows from it: how wide the
+   * surface is, where the monitor stands on it, and how big a box to mark
+   * dirty when the desk lights up. The role itself is the backend's; this is
+   * only the one bit of it the drawing needs.
+   */
+  readonly boss: boolean;
   /** Where the agent stands when working. */
   readonly seatX: number;
   readonly seatY: number;
@@ -109,8 +148,26 @@ export class OfficeAgent {
   /** What is in their hand. A mug outlives the errand that fetched it. */
   holding: Held = "none";
 
+  /** Whether a director is steering them, and how. See Errand. */
+  errand: Errand = "none";
+
+  /** A reaction being played on the spot, or "none". */
+  emote: Emote = "none";
+
+  /** Seconds left in the reaction. */
+  private emoteSeconds = 0;
+
   /** Seconds left before whatever they are holding is finished with. */
   private carrySeconds = 0;
+
+  /**
+   * Seconds since the thing in their hand was picked up.
+   *
+   * Counts up rather than down because a rule asks how fresh a coffee is, not
+   * how long is left of it (see entry.ts). Meaningless while their hands are
+   * empty, and reset the moment anything is put in them.
+   */
+  carriedFor = 0;
 
   /**
    * True when the agent is sat down somewhere that is not their desk -- at the
@@ -155,6 +212,16 @@ export class OfficeAgent {
   drawnY = 0;
   drawnState: VisualState = "idle";
   /**
+   * Whether they were drawn seated.
+   *
+   * Sitting lowers the body six units without moving the agent, so standing up
+   * changes pixels that neither `drawnX`/`drawnY` nor `drawnState` can see: a
+   * waiting agent gets out of their chair while idle, and stays idle. Without
+   * this the seated drawing is left on screen until something else happens to
+   * dirty the same patch.
+   */
+  drawnSitting = false;
+  /**
    * The bubble as it was last drawn.
    *
    * A bubble is wider than the agent's own box and it does not animate, so the
@@ -178,6 +245,13 @@ export class OfficeAgent {
   private obstacles: readonly Rect[] = [];
 
   /**
+   * This agent as a party of one, for the entry rules. Held rather than built
+   * because it is read while picking a place to stroll to, which happens a few
+   * times a minute per agent and must not allocate.
+   */
+  private readonly solo: readonly OfficeAgent[] = [this];
+
+  /**
    * True when this agent's motion is worth the full frame rate: working,
    * finishing, failing, or crossing the room because it was given a task.
    *
@@ -185,6 +259,13 @@ export class OfficeAgent {
    * hours, and at half rate nobody can tell.
    */
   get wantsSmoothFrames(): boolean {
+    // A scripted walk is somebody being carried across the room by a
+    // sequence, not a stroll: it is short, it is the thing being watched, and
+    // it is the one idle-state walk worth the full rate. Standing waiting on
+    // an errand is not -- Anton sits in his chair for most of a run, and
+    // pinning the office at 30fps for that would buy nothing at all.
+    if (this.errand === "walk") return true;
+    if (this.emote !== "none") return true;
     if (this.state === "idle") return false;
     if (this.state === "walking" && this.intent === "wander") return false;
     return true;
@@ -210,6 +291,14 @@ export class OfficeAgent {
     // here whether or not the errand that fetched it is still running: it goes
     // wandering with them and it is still steaming.
     if (this.holding !== "none") return true;
+    // A seated body has a breath in it -- see the renderer's bob -- so anybody
+    // sat down is repainted even though they are going nowhere. Every seated
+    // agent used to be working or at lunch, both of which are already true
+    // above; somebody waiting in a chair is neither.
+    if (this.sitting) return true;
+    // Arms up, or a tear going down. Both happen standing still, which is
+    // exactly the case the dirty-rect pass would otherwise skip.
+    if (this.emote !== "none") return true;
     return this.activity === "lunch" || this.activity === "pingpong";
   }
 
@@ -221,6 +310,7 @@ export class OfficeAgent {
     deskY: number;
     seatX: number;
     seatY: number;
+    boss?: boolean;
   }) {
     this.id = opts.id;
     this.name = opts.name;
@@ -231,6 +321,7 @@ export class OfficeAgent {
     this.deskY = opts.deskY;
     this.seatX = opts.seatX;
     this.seatY = opts.seatY;
+    this.boss = opts.boss ?? false;
 
     // At the seat, not in front of it. A bottom-row desk's seat is already
     // near the back of the bullpen, and spawning an agent further out than
@@ -296,11 +387,33 @@ export class OfficeAgent {
    */
   assign(): void {
     this.release();
-    this.putDown();
+    this.dismiss();
+    this.clearHands();
+    this.emote = "none";
     this.intent = "desk";
     this.state = "walking";
     this.speakHold = DISPATCH_HOLD_SECONDS;
     this.headForDesk();
+  }
+
+  /**
+   * Told the work is theirs, and to wait where they stand for the folder.
+   *
+   * The gap between a task being assigned and its first output is real -- it
+   * is the CLI starting up -- and this is what spends it on somebody bringing
+   * the work over rather than on a walk to an empty desk. They keep their feet
+   * and say nothing: the line belongs to the moment the folder changes hands.
+   *
+   * Nothing here is load-bearing. If the backend says they are producing
+   * output before the folder arrives, `work` runs as it always did and seats
+   * them; the delivery then catches up with them at their desk.
+   */
+  awaitHandoff(): void {
+    this.release();
+    this.clearHands();
+    this.emote = "none";
+    this.intent = "desk";
+    this.hold();
   }
 
   /**
@@ -313,7 +426,9 @@ export class OfficeAgent {
    */
   work(): void {
     this.release();
-    this.putDown();
+    this.dismiss();
+    this.clearHands();
+    this.emote = "none";
     this.intent = "desk";
     if (this.state === "working") return;
     if (this.nearSeat(6) && this.speakHold <= 0) {
@@ -418,21 +533,116 @@ export class OfficeAgent {
     this.sitting = false;
     // The mug stays. Fetching a coffee and then carrying it about is the whole
     // point of the errand, so it outlives the bit and expires on its own timer;
-    // a bat is the table's, and goes back on it.
+    // a bat is the table's, and goes back on it. A folder is neither -- it
+    // belongs to the handoff, which is the only thing allowed to take it back.
     if (this.holding === "paddle") this.holding = "none";
     this.timer = rand(0.3, 1.2);
+  }
+
+  /**
+   * Stands the agent still under a director's hand, wherever they are.
+   *
+   * Cancels any walk in progress, which is the point: a scripted sequence
+   * decides where its people are, and half a stroll left running would drift
+   * them out from under it.
+   */
+  hold(): void {
+    this.errand = "hold";
+    this.legCount = 0;
+    this.state = "idle";
+  }
+
+  /**
+   * Sends the agent somewhere on a director's business. False when there is no
+   * route, which is the signal to do the thing that needs no walk -- to phone
+   * instead of visiting, in the handoff's case.
+   */
+  walk(x: number, y: number): boolean {
+    if (!this.headTo(x, y)) return false;
+    this.errand = "walk";
+    this.intent = "wander";
+    this.state = "walking";
+    // Out of the chair first. A director can send somebody off from a seat --
+    // Anton gets up out of his to take the next folder over -- and a walk that
+    // left the flag set would draw him seated, crossing the room.
+    this.sitting = false;
+    return true;
+  }
+
+  /**
+   * True when a scripted walk has landed and the agent is standing waiting.
+   *
+   * The same trick `settled` plays for idle bits: a director's walk ends in
+   * "idle" like any other, and the idle branch of `update` leaves an agent on
+   * an errand exactly where it put them -- so standing still, mid-errand, is
+   * the arrival signal.
+   */
+  get arrived(): boolean {
+    return this.errand !== "none" && this.state === "idle";
+  }
+
+  /**
+   * Hands the agent back from a director, leaving them standing where they are.
+   *
+   * Deliberately does not take a folder out of their hands. A task landing
+   * mid-errand ends the choreography, not the possession: the folder is the
+   * thing that has to come back, and only the handoff -- which knows whether
+   * it has been given back yet -- is allowed to make it disappear.
+   */
+  dismiss(): void {
+    if (this.errand === "none") return;
+    this.errand = "none";
+    this.sitting = false;
+    // A call ends when the errand does. There is nothing to return.
+    if (this.holding === "phone") this.holding = "none";
+    this.timer = rand(0.3, 1.2);
+  }
+
+  /**
+   * Keeps the agent on a director's books without moving them.
+   *
+   * The counterpart to `dismiss`: every task transition ends an errand,
+   * because a task always wins, but some claims outlive the turn that started
+   * them -- a folder still owed back is one. This is how a director re-states
+   * a claim on somebody who is busy, and it deliberately touches nothing else:
+   * they are working, they are seated, and they stay both.
+   */
+  reserve(): void {
+    if (this.errand === "none") this.errand = "hold";
+  }
+
+  /** Plays a reaction for a few seconds. */
+  react(emote: Emote, seconds: number): void {
+    this.emote = emote;
+    this.emoteSeconds = seconds;
   }
 
   /** Puts something in the agent's hand for a while. */
   carry(item: Held, seconds: number): void {
     this.holding = item;
     this.carrySeconds = seconds;
+    this.carriedFor = 0;
   }
 
   /** Empties their hands, whatever was in them. */
   putDown(): void {
     this.holding = "none";
     this.carrySeconds = 0;
+    this.carriedFor = 0;
+  }
+
+  /**
+   * Empties their hands of everything a task transition is entitled to take.
+   *
+   * A mug and a bat are the agent's own business, and being given work ends
+   * both. A folder is not: it came off Anton's desk and it goes back to
+   * Anton's desk, so a second task landing does not make the first one's
+   * paperwork vanish -- the handoff clears it when the sequence closes,
+   * however it ends.
+   */
+  private clearHands(): void {
+    if (this.holding === "files") return;
+    this.putDown();
   }
 
   /**
@@ -443,8 +653,13 @@ export class OfficeAgent {
     this.clock += dt;
     this.speech.update(dt);
     if (this.speakHold > 0) this.speakHold -= dt;
+    if (this.emoteSeconds > 0) {
+      this.emoteSeconds -= dt;
+      if (this.emoteSeconds <= 0) this.emote = "none";
+    }
     if (this.carrySeconds > 0) {
       this.carrySeconds -= dt;
+      this.carriedFor += dt;
       if (this.carrySeconds <= 0) this.putDown();
     }
 
@@ -454,6 +669,11 @@ export class OfficeAgent {
         // otherwise. This is what stops the wander below from walking an agent
         // out of a conversation it just walked them into.
         if (this.activity !== "none") return;
+
+        // The same, for the other director: standing still on an errand is
+        // how a handoff sees that a walk has landed, and is also Anton waiting
+        // in his chair -- neither of which survives being strolled away from.
+        if (this.errand !== "none") return;
 
         // No strolling for somebody who asked for less movement. They stay
         // where they are; the office is still a room full of people at desks,
@@ -613,6 +833,11 @@ export class OfficeAgent {
         BOUNDS.maxY - AGENT_RADIUS,
       );
       if (!isWalkable(this.obstacles, x, y)) continue;
+      // A stroll is one agent going somewhere on their own, so a room that
+      // asks for a party of two, or for a coffee in hand, is not somewhere a
+      // stroll may end (see entry.ts). Today no wander target is in the wing
+      // anyway; this is what keeps that true if the range ever widens.
+      if (!admits(this.solo, x, y)) continue;
       if (this.headTo(x, y)) return true;
     }
     return false;

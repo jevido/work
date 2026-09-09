@@ -1,4 +1,12 @@
-import { AGENT_RADIUS, BOUNDS, isWalkable, rectsOverlap, type Point, type Rect } from "./world";
+import {
+  AGENT_RADIUS,
+  BOUNDS,
+  deskWidth,
+  isWalkable,
+  rectsOverlap,
+  type Point,
+  type Rect,
+} from "./world";
 
 /**
  * The furniture that is not a desk.
@@ -24,6 +32,8 @@ export const COFFEE_MACHINE_HEIGHT = 42;
 
 /** Where somebody stands to use the machine, measured from the counter front. */
 export const COFFEE_STAND_GAP = 34;
+/** How far apart two people stand along the counter when both are waiting. */
+export const COFFEE_STAND_SPACING = 46;
 
 export const FRIDGE_WIDTH = 46;
 export const FRIDGE_HEIGHT = 64;
@@ -92,11 +102,6 @@ export const PRINTER: Prop = { x: 884, y: 90 };
 export const PRINTER_WIDTH = 46;
 export const PRINTER_HEIGHT = 42;
 
-/** A low bookshelf along the bullpen's back wall. */
-export const SHELF: Prop = { x: 172, y: 78 };
-export const SHELF_WIDTH = 124;
-export const SHELF_HEIGHT = 28;
-
 export interface Props {
   coffee: Prop;
   fridge: Prop;
@@ -138,10 +143,6 @@ export function printerRect(p: Prop, out: Rect): Rect {
   return centred(p, PRINTER_WIDTH, PRINTER_HEIGHT, out);
 }
 
-export function shelfRect(p: Prop, out: Rect): Rect {
-  return centred(p, SHELF_WIDTH, SHELF_HEIGHT, out);
-}
-
 /** Furniture as an obstacle, inflated by the body radius as desks are. */
 function obstacleOf(r: Rect): Rect {
   const pad = AGENT_RADIUS * 0.8;
@@ -164,7 +165,6 @@ export function furnitureObstacles(props: Props): Rect[] {
     obstacleOf(lunchRect(props.lunch, scratch)),
     obstacleOf(meetingRect(props.meeting, scratch)),
     obstacleOf(printerRect(PRINTER, scratch)),
-    obstacleOf(shelfRect(SHELF, scratch)),
   ];
   for (const plant of PLANTS) {
     list.push(
@@ -180,10 +180,23 @@ export function furnitureObstacles(props: Props): Rect[] {
   return list;
 }
 
-/** Where somebody stands to fetch a coffee: in front of the counter. */
-export function coffeeStand(p: Prop): Point {
-  return { x: p.x, y: p.y + COFFEE_HEIGHT / 2 + COFFEE_STAND_GAP };
+/**
+ * Where a party stands to fetch coffee: one spot each along the counter front,
+ * centred on the machine.
+ *
+ * A room's entry rule can send two agents to the machine together (see
+ * entry.ts), and two bodies on the same point is one body as far as the
+ * renderer is concerned.
+ */
+export function coffeeStands(p: Prop, count: number): readonly Point[] {
+  const y = p.y + COFFEE_HEIGHT / 2 + COFFEE_STAND_GAP;
+  const spots: Point[] = [];
+  for (let i = 0; i < count; i++) {
+    spots.push({ x: p.x + (i - (count - 1) / 2) * COFFEE_STAND_SPACING, y });
+  }
+  return spots;
 }
+
 
 /**
  * The bench spots along the front of the lunch table.
@@ -209,6 +222,46 @@ export function meetingSpots(p: Prop): readonly Point[] {
     { x: p.x - 44, y },
     { x: p.x + 44, y },
   ];
+}
+
+/**
+ * The chair somebody is sitting on, centred on the spot they stand at.
+ *
+ * The same shape the lunch benches use, because it is the same piece of
+ * furniture seen the same way: a rounded block under the body, which at this
+ * scale is all a chair is. Only the coordinator's is drawn -- his is the one
+ * that moves, and a chair that moves has to exist to begin with.
+ */
+export const CHAIR_WIDTH = 34;
+export const CHAIR_HEIGHT = 21;
+
+export function chairRect(x: number, y: number, out: Rect): Rect {
+  out.x = x - CHAIR_WIDTH / 2;
+  out.y = y - 2;
+  out.w = CHAIR_WIDTH;
+  out.h = CHAIR_HEIGHT;
+  return out;
+}
+
+/** How far off the end of the coordinator's desk his chair goes to wait. */
+const WAIT_GAP = 18;
+
+/**
+ * Where the coordinator waits for finished work to come back: off the
+ * right-hand end of his own desk, a little in front of it.
+ *
+ * Off the end rather than behind the desk, because agents are drawn as flat
+ * figures over furniture that is painted into the background -- sitting him
+ * level with the desk top would draw him on top of the desk, the same reason
+ * the lunch benches are all on the near side. Clear of the desk's obstacle
+ * padding too, so the router can actually get him there.
+ *
+ * From here he looks back along his own desk, which is where the task board
+ * hangs (it is centred over it, see the renderer's drawTaskBoard) -- so
+ * waiting and watching the board are the same posture.
+ */
+export function waitSeat(deskX: number, seatY: number): Point {
+  return { x: deskX + deskWidth(true) / 2 + WAIT_GAP, y: seatY - 6 };
 }
 
 /** The two ends of the ping pong table: left player, right player. */

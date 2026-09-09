@@ -1,24 +1,34 @@
-import type { IdleActivity, OfficeAgent } from "./agent";
+import type { Held, IdleActivity, OfficeAgent } from "./agent";
 import {
   callLine,
   coffeeLine,
+  loseLine,
   openerLine,
   replyLine,
   serveLine,
   SPEECH_SECONDS,
+  winLine,
 } from "./speech";
 import {
   COFFEE,
   FRIDGE,
   LUNCH,
   MEETING,
-  coffeeStand,
+  coffeeStands,
   lunchSeats,
   meetingSpots,
   pongStands,
+  type Prop,
   type Props,
 } from "./props";
-import { isWalkable, prefersReducedMotion, type Point, type Rect } from "./world";
+import { admits, allCarrying, entryRule } from "./entry";
+import {
+  isWalkable,
+  prefersReducedMotion,
+  type Point,
+  type Rect,
+  type RoomId,
+} from "./world";
 
 /**
  * What the office does with itself when nobody has given it any work.
@@ -71,6 +81,10 @@ const CHAT_RANGE = 340;
 const CARRY_MIN = 34;
 const CARRY_MAX = 70;
 
+/** How long somebody stands at the machine while it pours. */
+const POUR_MIN = 2.6;
+const POUR_MAX = 4.2;
+
 /** How long lunch takes, and the gap between remarks over it. */
 const LUNCH_MIN = 11;
 const LUNCH_MAX = 20;
@@ -84,11 +98,40 @@ const MEETING_CHANCE = 0.4;
 const VOLLEY_SECONDS = 0.42;
 const VOLLEY_LIFT = 16;
 
+/**
+ * How long the winner celebrates and the loser does not.
+ *
+ * The cheer is the longer of the two on purpose: both players stay at the
+ * table until it ends, so the loser has finished sulking and is standing there
+ * watching by the time they both walk off. A sob that outlasted the cheer
+ * would end the bit on the losing player, which is the wrong note to leave a
+ * game on.
+ */
+const CHEER_SECONDS = 1.5;
+const SOB_SECONDS = 1;
+
 /** How far above the table the ball is struck. */
 const BALL_HEIGHT = 12;
 
 const PHASE_TRAVEL = 0;
 const PHASE_ACT = 1;
+/**
+ * Walking to where something is picked up, and standing there while it is.
+ *
+ * These two come before PHASE_TRAVEL for a bit whose destination has an entry
+ * rule to satisfy first (see entry.ts), and are the whole of the plain coffee
+ * errand, which is that prelude with nothing after it.
+ */
+const PHASE_FETCH = 2;
+const PHASE_POUR = 3;
+/**
+ * The beat after a rally is decided: one player cheering, the other not.
+ *
+ * A rally used to stop with somebody saying "Point." and everybody walking
+ * off, which made the game a screensaver -- nothing was at stake because
+ * nothing happened at the end of it. This is the phase that gives it a result.
+ */
+const PHASE_CELEBRATE = 4;
 
 /** Sets a line on an agent. The renderer supplies it: only it can measure text. */
 export type Speaker = (agent: OfficeAgent, text: string, seconds: number) => void;
@@ -104,6 +147,12 @@ class IdleBit {
   kind: IdleActivity = "none";
   a: OfficeAgent | null = null;
   b: OfficeAgent | null = null;
+
+  /**
+   * The room this bit is headed for, when that room has rules about who may be
+   * in it. Null for anything happening where it happens to happen.
+   */
+  room: RoomId | null = null;
 
   phase = PHASE_TRAVEL;
   /** Seconds left in the current phase, or the travel watchdog. */
@@ -196,6 +245,7 @@ class IdleBit {
     this.kind = "none";
     this.a = null;
     this.b = null;
+    this.room = null;
     this.phase = PHASE_TRAVEL;
     this.timer = 0;
     this.turns = 0;
@@ -293,22 +343,27 @@ export class IdleDirector {
    */
   private free(a: OfficeAgent): boolean {
     if (a.activity !== "none") return false;
+    // Somebody on a scripted errand is off duty as far as the task machine is
+    // concerned and very much not free: Anton crossing the room with a folder,
+    // or waiting in his chair for one to come back, is the whole point of what
+    // he is doing. See handoff.ts, which is the other director in this office.
+    if (a.errand !== "none") return false;
     return a.state === "idle" || (a.state === "walking" && a.intent === "wander");
   }
 
   private startCoffee(slot: IdleBit): boolean {
-    const machine = this.props.coffee;
     // Somebody already holding a coffee does not need another one.
     const candidates = this.agents.filter((a) => this.free(a) && a.holding === "none");
     if (candidates.length === 0) return false;
 
     const agent = candidates[Math.floor(Math.random() * candidates.length)];
-    const stand = coffeeStand(machine);
-    if (!agent.join("coffee", stand.x, stand.y)) return false;
+    const pickup = this.pickupFor("mug", 1);
+    if (!pickup) return false;
+    if (!this.sendParty(this.toParty(agent, null), "coffee", pickup.spots)) return false;
 
     slot.kind = "coffee";
     slot.a = agent;
-    slot.phase = PHASE_TRAVEL;
+    slot.phase = PHASE_FETCH;
     slot.timer = TRAVEL_LIMIT;
     return true;
   }
@@ -335,12 +390,9 @@ export class IdleDirector {
 
     // Neighbouring seats, so two diners are sat together rather than at
     // opposite ends of an empty table.
+    const party = this.toParty(first, second);
     const start = Math.floor(Math.random() * (seats.length - (second ? 1 : 0)));
-    if (!first.join("lunch", seats[start].x, seats[start].y)) return false;
-    if (second && !second.join("lunch", seats[start + 1].x, seats[start + 1].y)) {
-      first.release();
-      return false;
-    }
+    if (!this.sendParty(party, "lunch", seats.slice(start, start + party.length))) return false;
 
     slot.kind = "lunch";
     slot.a = first;
@@ -372,11 +424,11 @@ export class IdleDirector {
 
       // Whoever is further left takes the left side, so nobody crosses over.
       const [left, right] = a.x <= b.x ? [a, b] : [b, a];
-      if (!left.join("chat", leftX, midY)) continue;
-      if (!right.join("chat", rightX, midY)) {
-        left.release();
-        continue;
-      }
+      const spots = [
+        { x: leftX, y: midY },
+        { x: rightX, y: midY },
+      ];
+      if (!this.sendParty(this.toParty(left, right), "chat", spots)) continue;
 
       this.beginChat(slot, left, right);
       return true;
@@ -384,16 +436,41 @@ export class IdleDirector {
     return false;
   }
 
-/** The same conversation, held across the meeting table. */
+  /**
+   * The same conversation, held in the meeting room -- which has house rules.
+   *
+   * The room asks for a party of two, each with a fresh coffee (entry.ts).
+   * A pair already holding one walks straight in; otherwise the bit starts at
+   * the coffee machine and the walk to the meeting room is the second half of
+   * it. Nothing here is written for that particular rule: it reads the room's
+   * rule, checks it, and runs the errand the rule implies.
+   */
   private startMeeting(slot: IdleBit, a: OfficeAgent, b: OfficeAgent): boolean {
-    const [left, right] = meetingSpots(this.props.meeting);
+    const rule = entryRule("meeting");
     const [near, far] = a.x <= b.x ? [a, b] : [b, a];
-    if (!near.join("chat", left.x, left.y)) return false;
-    if (!far.join("chat", right.x, right.y)) {
-      near.release();
-      return false;
+    const party = this.toParty(near, far);
+    if (party.length < rule.minParty) return false;
+
+    const spots = this.roomSpots("meeting", party.length);
+    if (!spots) return false;
+
+    if (allCarrying(party, rule)) {
+      if (!this.sendParty(party, "chat", spots)) return false;
+      this.beginChat(slot, near, far);
+      slot.room = "meeting";
+      return true;
     }
+
+    // Everybody goes to the machine, not only whoever is short of a cup: the
+    // rule is about who walks in together, so the party stays a party for the
+    // errand too.
+    const pickup = this.pickupFor(rule.carrying, party.length);
+    if (!pickup) return false;
+    if (!this.sendParty(party, "chat", pickup.spots)) return false;
     this.beginChat(slot, near, far);
+    slot.room = "meeting";
+    slot.phase = PHASE_FETCH;
+    slot.timer = TRAVEL_LIMIT;
     return true;
   }
 
@@ -420,11 +497,7 @@ export class IdleDirector {
     // Each takes the end they are already closer to.
     const [left, right] = Math.abs(a.x - nearSide.x) <= Math.abs(b.x - nearSide.x) ? [a, b] : [b, a];
 
-    if (!left.join("pingpong", nearSide.x, nearSide.y)) return false;
-    if (!right.join("pingpong", farSide.x, farSide.y)) {
-      left.release();
-      return false;
-    }
+    if (!this.sendParty(this.toParty(left, right), "pingpong", [nearSide, farSide])) return false;
     left.holding = "paddle";
     right.holding = "paddle";
 
@@ -435,6 +508,74 @@ export class IdleDirector {
     slot.timer = TRAVEL_LIMIT;
     slot.turns = 5 + Math.floor(Math.random() * 6);
     return true;
+  }
+
+  /**
+   * A party as a list, in one array that is refilled rather than replaced.
+   *
+   * Borrowed, not kept: the caller uses it and lets go of it, because the next
+   * caller gets the same array back. It exists because a bit mid-errand asks
+   * for its party every frame, and an idle office is supposed to allocate
+   * nothing at all.
+   */
+  private readonly castScratch: OfficeAgent[] = [];
+
+  private toParty(a: OfficeAgent | null, b: OfficeAgent | null): readonly OfficeAgent[] {
+    const out = this.castScratch;
+    out.length = 0;
+    if (a) out.push(a);
+    if (b) out.push(b);
+    return out;
+  }
+
+  /**
+   * Walks a party to one spot each, all or nothing.
+   *
+   * Two things every bit needs and each used to do for itself. The rollback:
+   * an agent who has joined a bit is off duty with nothing steering them, so a
+   * party that only half arrives has to be handed back rather than left
+   * standing in the middle of the office. And the house rules: this is the one
+   * place a bit sends anybody anywhere, so it is the place to ask whether the
+   * room they are being sent to will have them (entry.ts).
+   *
+   * A party turned away here is a bit that does not start -- the director tries
+   * something else, or the same thing from somewhere else, a few seconds later.
+   */
+  private sendParty(
+    party: readonly OfficeAgent[],
+    activity: IdleActivity,
+    spots: readonly Point[],
+  ): boolean {
+    if (spots.length < party.length) return false;
+    for (let i = 0; i < party.length; i++) {
+      if (!admits(party, spots[i].x, spots[i].y)) return false;
+    }
+    for (let i = 0; i < party.length; i++) {
+      if (party[i].join(activity, spots[i].x, spots[i].y)) continue;
+      for (let j = 0; j < i; j++) party[j].release();
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Where an item comes from: the furniture it is picked up at, and a spot at
+   * it for each member of the party. Null when the office has nowhere to get
+   * one, which is the answer for anything a rule asks for that is not a drink.
+   */
+  private pickupFor(item: Held, count: number): { at: Prop; spots: readonly Point[] } | null {
+    if (item !== "mug") return null;
+    return { at: this.props.coffee, spots: coffeeStands(this.props.coffee, count) };
+  }
+
+  /**
+   * Where a party stands once inside a room, one spot each, or null when the
+   * room has nowhere to put that many.
+   */
+  private roomSpots(room: RoomId, count: number): readonly Point[] | null {
+    if (room !== "meeting") return null;
+    const spots = meetingSpots(this.props.meeting);
+    return spots.length >= count ? spots : null;
   }
 
   /** Two free agents within range of each other, or null. */
@@ -480,32 +621,88 @@ export class IdleDirector {
   }
 
   private advanceCoffee(bit: IdleBit, dt: number): void {
-    const agent = bit.a!;
-    const machine = this.props.coffee;
-
-    if (bit.phase === PHASE_TRAVEL) {
-      bit.timer -= dt;
-      if (bit.timer <= 0) {
-        this.cancel(bit);
-        return;
-      }
-      if (!agent.settled) return;
-      // At the counter, facing it, while it pours.
-      agent.face(machine.x);
-      if (Math.random() < 0.45) this.say(agent, coffeeLine(), SPEECH_SECONDS);
-      bit.phase = PHASE_ACT;
-      bit.timer = rand(2.6, 4.2);
-      return;
-    }
-
-    bit.timer -= dt;
-    if (bit.timer > 0) return;
+    if (!this.pour(bit, dt, this.toParty(bit.a, null), "mug")) return;
 
     // The cup is the point of the errand, so it leaves with them: they go back
     // to wandering holding it, and it expires on its own clock a minute or so
     // later. `release` leaves a mug alone for exactly this reason.
-    agent.carry("mug", rand(CARRY_MIN, CARRY_MAX));
     this.cancel(bit);
+  }
+
+  /**
+   * Walks a party to where an item is kept and puts one in each of their
+   * hands: over to the counter, then standing there while it pours.
+   *
+   * Shared by the plain coffee errand and by any room whose entry rule asks
+   * for something in hand. Both are the same two beats and differ only in what
+   * happens once everybody has one.
+   *
+   * Returns true on the frame the last cup lands. A walk that takes too long,
+   * or an item the office cannot supply, cancels the bit outright -- so a
+   * false return means "not yet, and possibly never", which is all a caller
+   * ever has to do anything about.
+   */
+  private pour(
+    bit: IdleBit,
+    dt: number,
+    party: readonly OfficeAgent[],
+    item: Held,
+  ): boolean {
+    const pickup = this.pickupFor(item, party.length);
+    if (!pickup) {
+      this.cancel(bit);
+      return false;
+    }
+
+    if (bit.phase === PHASE_FETCH) {
+      bit.timer -= dt;
+      if (bit.timer <= 0) {
+        this.cancel(bit);
+        return false;
+      }
+      for (const agent of party) if (!agent.settled) return false;
+      // At the counter, facing it, while it pours.
+      for (const agent of party) agent.face(pickup.at.x);
+      if (Math.random() < 0.45) this.say(party[0], coffeeLine(), SPEECH_SECONDS);
+      bit.phase = PHASE_POUR;
+      bit.timer = rand(POUR_MIN, POUR_MAX);
+      return false;
+    }
+
+    bit.timer -= dt;
+    if (bit.timer > 0) return false;
+    for (const agent of party) agent.carry(item, rand(CARRY_MIN, CARRY_MAX));
+    return true;
+  }
+
+  /**
+   * The errand a room's rule imposes before its door: fetch whatever it asks
+   * for, then go in together.
+   *
+   * The rule is tested again at the door rather than trusted from when the bit
+   * started, because a walk across the office and a queue at the machine
+   * happen in between, and a colleague can be called away to a task in the
+   * middle of them. This is the check that makes "never alone, coffee in hand"
+   * true of the room rather than merely intended by whoever set the bit up.
+   */
+  private advanceEntry(bit: IdleBit, dt: number): void {
+    const room = bit.room!;
+    const rule = entryRule(room);
+    const party = this.toParty(bit.a, bit.b);
+    if (!this.pour(bit, dt, party, rule.carrying)) return;
+
+    const spots = this.roomSpots(room, party.length);
+    if (!spots || !admits(party, spots[0].x, spots[0].y)) {
+      this.cancel(bit);
+      return;
+    }
+    for (let i = 0; i < party.length; i++) {
+      if (party[i].goto(spots[i].x, spots[i].y)) continue;
+      this.cancel(bit);
+      return;
+    }
+    bit.phase = PHASE_TRAVEL;
+    bit.timer = TRAVEL_LIMIT;
   }
 
   /**
@@ -559,6 +756,12 @@ export class IdleDirector {
   private advanceChat(bit: IdleBit, dt: number): void {
     const a = bit.a!;
     const b = bit.b!;
+
+    // A conversation in a room with an entry rule starts at the coffee machine.
+    if (bit.phase === PHASE_FETCH || bit.phase === PHASE_POUR) {
+      this.advanceEntry(bit, dt);
+      return;
+    }
 
     if (bit.phase === PHASE_TRAVEL) {
       bit.timer -= dt;
@@ -620,20 +823,55 @@ export class IdleDirector {
       return;
     }
 
+    if (bit.phase === PHASE_CELEBRATE) {
+      // Left to their reactions. Neither is steered here: the emotes run on
+      // the agents' own clocks, so the cheer carries on while they walk away.
+      bit.timer -= dt;
+      if (bit.timer <= 0) this.cancel(bit);
+      return;
+    }
+
     // Both keep their eye on the table, which is between them either way.
     a.face(table.x);
     b.face(table.x);
 
     if (!bit.flyBall(dt, table.y)) return;
     bit.turns--;
-    if (bit.turns > 0) return;
 
-    // Rallies end with somebody claiming something.
-    if (Math.random() < 0.6) this.say(Math.random() < 0.5 ? a : b, callLine(), SPEECH_SECONDS);
-    this.cancel(bit);
+    // Mid-rally, and somebody occasionally says so.
+    if (bit.turns > 0) {
+      if (bit.turns === 1 && Math.random() < 0.5) {
+        this.say(Math.random() < 0.5 ? a : b, callLine(), SPEECH_SECONDS);
+      }
+      return;
+    }
+
+    // The last ball has landed and nobody sent it back: that is the point, and
+    // who won it is a coin toss. Deliberately decided here rather than at the
+    // serve -- a rally whose result was already fixed while it was still being
+    // played would be the same animation with a secret.
+    const [winner, loser] = Math.random() < 0.5 ? [a, b] : [b, a];
+    winner.react("cheer", CHEER_SECONDS);
+    loser.react("sob", SOB_SECONDS);
+    this.say(winner, winLine(), SPEECH_SECONDS);
+    this.say(loser, loseLine(), SPEECH_SECONDS);
+    // Turning to face each other is what makes it an exchange rather than two
+    // people reacting to the wall.
+    winner.face(loser.x);
+    loser.face(winner.x);
+
+    bit.phase = PHASE_CELEBRATE;
+    bit.timer = CHEER_SECONDS;
   }
 
-  /** Hands both agents back to plain wandering and frees the slot. */
+  /**
+   * Hands both agents back to plain wandering and frees the slot.
+   *
+   * Whoever is left in a room they were escorted into walks out of it on their
+   * own: an idle agent strolls near their own desk, and every desk is in the
+   * bullpen. They cannot wander back in, because a stroll is a party of one
+   * and the rules turn those away at the door (see OfficeAgent's wander).
+   */
   private cancel(bit: IdleBit): void {
     bit.a?.release();
     bit.b?.release();

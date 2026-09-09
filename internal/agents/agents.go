@@ -187,14 +187,16 @@ func (r *Registry) Coordinator() (Agent, bool) {
 // without a coordinator, so his role, colour and planning model are Work's to
 // guarantee. His personality file is still the user's document.
 func Default() *Registry {
-	return NewRegistry(
+	return newPlacedRegistry(
 		Agent{
 			ID:     "anton",
 			Name:   "Anton",
 			Role:   RoleCoordinator,
 			Title:  "Lead",
 			Colour: "#f2b544",
-			Desk:   Desk{X: 500, Y: 140, SeatX: 500, SeatY: 208},
+			// Desk deliberately left to AssignDesks below: the office layout
+			// has one source of truth, and a copy here goes stale the moment
+			// the coordinator's row moves.
 			// Every routed task pays for a planning turn, so it runs on a
 			// cheaper, faster model than the work itself.
 			PlanModel: "sonnet",
@@ -214,4 +216,12 @@ func Default() *Registry {
 				"sake of it. Be direct and concrete.",
 		},
 	)
+}
+
+// newPlacedRegistry builds a registry with desks assigned, so a team that
+// never goes through Scan still sits where the office is drawn. Default() is
+// exactly that team: it stands in before the user has picked a config root.
+func newPlacedRegistry(list ...Agent) *Registry {
+	AssignDesks(list)
+	return NewRegistry(list...)
 }

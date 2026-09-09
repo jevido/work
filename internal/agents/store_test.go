@@ -340,11 +340,11 @@ func TestReadPersonalityIsCapped(t *testing.T) {
 	}
 }
 
-// The generated layout has to reproduce the hand-placed office, or every
-// existing screenshot and expectation shifts. Default() is one agent now, so
-// the three-desk arrangement it was drawn for is spelled out here rather than
-// taken from the shipped team.
-func TestAssignDesksMatchesTheHandPlacedOffice(t *testing.T) {
+// The specialist rows have to keep the positions the office was drawn for, and
+// the coordinator has to keep the one the task board behind their desk was
+// sized to. Default() is one agent now, so the three-desk arrangement is
+// spelled out here rather than taken from the shipped team.
+func TestAssignDesksMatchesTheDrawnOffice(t *testing.T) {
 	list := []Agent{
 		{ID: "anton", Role: RoleCoordinator},
 		{ID: "first", Role: RoleSpecialist},
@@ -353,7 +353,7 @@ func TestAssignDesksMatchesTheHandPlacedOffice(t *testing.T) {
 	AssignDesks(list)
 
 	want := map[string]Desk{
-		"anton":  {X: 500, Y: 140, SeatX: 500, SeatY: 208},
+		"anton":  {X: 500, Y: 172, SeatX: 500, SeatY: 240},
 		"first":  {X: 320, Y: 430, SeatX: 320, SeatY: 498},
 		"second": {X: 680, Y: 430, SeatX: 680, SeatY: 498},
 	}
@@ -383,5 +383,22 @@ func TestAssignDesksStayInTheRoom(t *testing.T) {
 				t.Errorf("n=%d: seat y %v outside the floor", n, a.Desk.SeatY)
 			}
 		}
+	}
+}
+
+// The stand-in team is used before the user has picked a config root, so it
+// has to sit where the office is drawn rather than at a position copied into
+// the built-in definition and left behind.
+func TestDefaultTeamIsPlacedInTheOffice(t *testing.T) {
+	placed := Default()
+	anton, ok := placed.Coordinator()
+	if !ok {
+		t.Fatal("the default team has no coordinator")
+	}
+
+	list := []Agent{{ID: "anton", Role: RoleCoordinator}}
+	AssignDesks(list)
+	if anton.Desk != list[0].Desk {
+		t.Fatalf("Default() desk = %+v, AssignDesks = %+v", anton.Desk, list[0].Desk)
 	}
 }

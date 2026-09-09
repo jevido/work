@@ -1,22 +1,34 @@
 <script lang="ts">
   import { untrack } from "svelte";
+  import { Role } from "../../bindings/dev.jevido/work/internal/agents/models";
   import { avatarUrl } from "../lib/agents/avatar";
   import type { Roster } from "../lib/agents/roster.svelte";
+  import type { CardStatus, TaskBoard } from "../lib/board/board.svelte";
   import { connectOffice, visualStateOf } from "../lib/bridge/office";
   import type { ClaudeSession, TextPart } from "../lib/claude/session.svelte";
   import type { Config } from "../lib/config/config.svelte";
-  import { OfficeRenderer, type AgentSpec, type DeskTarget } from "../lib/office/renderer";
+  import {
+    BOARD_NOTES,
+    OfficeRenderer,
+    type AgentSpec,
+    type BoardNote,
+    type DeskTarget,
+  } from "../lib/office/renderer";
   import AgentDialog from "./AgentDialog.svelte";
   import PerfOverlay from "./PerfOverlay.svelte";
 
   let {
     roster,
     session,
+    board,
     config,
     showPerf = false,
   }: {
     roster: Roster;
     session: ClaudeSession;
+    /** The same board the panel above the office shows, for the cork board
+        hanging behind the coordinator's desk. */
+    board: TaskBoard;
     /** Passed straight through to the desk panel's profile view. */
     config: Config;
     showPerf?: boolean;
@@ -130,6 +142,9 @@
             deskY: a.desk.y,
             seatX: a.desk.seatX,
             seatY: a.desk.seatY,
+            // Which desk to draw them. The role is the backend's, and the one
+            // thing the office does with it is furnish the room.
+            boss: a.role === Role.RoleCoordinator,
             // Carried in the spec as well as pushed below, so a cast rebuilt
             // for a seating change does not open faceless and fill in after.
             avatar: avatarUrl(a, roster.revision) ?? undefined,
@@ -187,6 +202,28 @@
       const live = liveTextFor(session, agent.id);
       r.setMonitorText(agent.id, live?.id ?? "", live?.text ?? "");
     }
+  });
+
+  /**
+   * What is pinned to the board behind the coordinator's desk.
+   *
+   * Ordered here rather than in the renderer, because which of a long board's
+   * cards deserve the wall is a question about the work: what is moving, then
+   * what is stuck, then what is waiting, and only then what is finished. The
+   * cork holds eight, so on a busy board the done pile is the first thing to
+   * drop off it -- which is the right way round for a board you glance at.
+   */
+  const NOTE_ORDER: CardStatus[] = ["doing", "blocked", "todo", "done"];
+
+  const notes = $derived<BoardNote[]>(
+    board.cards
+      .map((card) => ({ title: card.title, status: card.status }))
+      .sort((a, b) => NOTE_ORDER.indexOf(a.status) - NOTE_ORDER.indexOf(b.status))
+      .slice(0, BOARD_NOTES),
+  );
+
+  $effect(() => {
+    renderer?.setBoardNotes(notes);
   });
 
   // An agent who leaves the roster cannot keep a panel open.

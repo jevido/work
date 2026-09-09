@@ -45,3 +45,19 @@ tasks:
     summary: Runs the Go test suite
     cmds:
       - go test ./...
+
+  verify:office:
+    summary: Drives the office's scripted sequences without a browser
+    # The simulation is plain TypeScript with no DOM in it, so this compiles
+    # that subgraph on its own and steps it in node -- which runs a handoff and
+    # a rally in a second apiece instead of the minute each takes on screen.
+    # Emitted as CommonJS into a folder of its own, because tsc writes bare
+    # specifiers that node's ESM loader will not resolve.
+    dir: frontend
+    vars:
+      OUT: node_modules/.office-verify
+    cmds:
+      - rm -rf {{.OUT}}
+      - npx tsc .verify/sequences.ts --outDir {{.OUT}} --module commonjs --target es2022 --moduleResolution node --skipLibCheck
+      - printf '{"type":"commonjs"}' > {{.OUT}}/package.json
+      - node {{.OUT}}/.verify/sequences.js

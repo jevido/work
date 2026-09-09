@@ -148,6 +148,44 @@ const serves = new LinePool(["Serve.", "Ready?", "My serve.", "First to eleven."
 /** Calling one, once there is something to call. */
 const calls = new LinePool(["Point.", "11-9.", "Rematch?", "Off the edge.", "Lucky.", "Out."]);
 
+/** Winning one. Has to sound like the end of a game, not a point in it. */
+const wins = new LinePool(["Game.", "11-9. Mine.", "Yes!", "Told you.", "Unbeaten."]);
+
+/** Losing one, which is the funnier half. */
+const losses = new LinePool(["No.", "Rematch. Now.", "Net cord.", "Ugh.", "That was out."]);
+
+/** Anton, handing a folder over in person. */
+const handoffs = new LinePool([
+  "Yours.",
+  "Here you go.",
+  "Take this one.",
+  "Read it first.",
+  "Brief's in there.",
+]);
+
+/** Anton, when the walk is not worth it and he picks up the phone instead. */
+const calls_out = new LinePool([
+  "Got a minute?",
+  "It's Anton.",
+  "Sending it over.",
+  "You free?",
+]);
+
+/** Answering that phone. */
+const answers = new LinePool(["Speaking.", "Go ahead.", "Got it.", "Understood."]);
+
+/** Bringing a finished folder back to Anton's desk. */
+const returns = new LinePool([
+  "Done.",
+  "All yours.",
+  "Signed off.",
+  "Notes are in it.",
+  "That's the lot.",
+]);
+
+/** Taking it back off them. */
+const receipts = new LinePool(["Thanks.", "Nice one.", "I'll read it.", "Good."]);
+
 export function dispatchLine(): string {
   return dispatch.pick();
 }
@@ -170,4 +208,32 @@ export function serveLine(): string {
 
 export function callLine(): string {
   return calls.pick();
+}
+
+export function winLine(): string {
+  return wins.pick();
+}
+
+export function loseLine(): string {
+  return losses.pick();
+}
+
+export function handoffLine(): string {
+  return handoffs.pick();
+}
+
+export function phoneLine(): string {
+  return calls_out.pick();
+}
+
+export function answerLine(): string {
+  return answers.pick();
+}
+
+export function returnLine(): string {
+  return returns.pick();
+}
+
+export function receiptLine(): string {
+  return receipts.pick();
 }

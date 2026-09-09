@@ -118,7 +118,7 @@
         {#if roster.loadError}
           <div class="load-error">{roster.loadError}</div>
         {/if}
-        <OfficeCanvas {roster} {session} {config} {showPerf} />
+        <OfficeCanvas {roster} {session} {board} {config} {showPerf} />
       </div>
     </div>
     <aside>
