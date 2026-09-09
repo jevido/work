@@ -75,6 +75,50 @@ export function deskRect(deskX: number, deskY: number): Rect {
   };
 }
 
+/** Monitor size in world units. */
+export const MONITOR_WIDTH = 60;
+export const MONITOR_HEIGHT = 30;
+
+/** How far the monitor's top edge rises above the top of the desk surface. */
+export const MONITOR_RISE = 26;
+
+/** Width of the monitor's bezel: the frame around the tinted glass. */
+export const MONITOR_BEZEL = 4;
+
+/**
+ * The live readout drawn on a working agent's monitor, in world units.
+ *
+ * A monitor is 60x30, which leaves 52x22 of glass, so the type has to be tiny.
+ * Six units gets roughly thirteen characters across and three rows down: too
+ * small to read a sentence from across the room, but enough that the shape of
+ * the words moves, and enough to actually read once the window is large. Two
+ * bigger rows was the alternative and it looked like a label, not a terminal.
+ *
+ * These are world units on purpose. The wrap width therefore never changes
+ * with the window, so resizing re-scales the readout instead of re-wrapping it.
+ */
+export const MONITOR_TEXT_SIZE = 6;
+export const MONITOR_LINE_HEIGHT = 7;
+export const MONITOR_TEXT_LINES = 3;
+
+/** Breathing room between the bezel and the first character. */
+export const MONITOR_TEXT_PAD = 2;
+
+/**
+ * The monitor standing on a desk. Fills `out` rather than returning a new
+ * object, because this is called while drawing and the loop must not allocate.
+ *
+ * The renderer draws from this and the pointer hit-test measures against it, so
+ * the two cannot drift apart.
+ */
+export function monitorRect(deskX: number, deskY: number, out: Rect): Rect {
+  out.x = deskX - MONITOR_WIDTH / 2;
+  out.y = deskY - DESK_HEIGHT / 2 - MONITOR_RISE;
+  out.w = MONITOR_WIDTH;
+  out.h = MONITOR_HEIGHT;
+  return out;
+}
+
 /**
  * Desks as obstacles, inflated by the agent's body so nobody clips a corner.
  *

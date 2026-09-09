@@ -59,6 +59,13 @@ type Workbench struct {
 
 	nextRun atomic.Uint64
 
+	// admit serialises the decision to start a run. It is held for the whole
+	// of Submit, and by Redirect across cancel-wait-start, so no other caller
+	// can slip into the free slot in between. Never held together with mu, and
+	// never taken by a run's own goroutine, so waiting on a run while holding
+	// it cannot deadlock.
+	admit sync.Mutex
+
 	mu      sync.Mutex
 	state   map[string]AgentState
 	current map[string]string // agentID -> taskID
@@ -83,8 +90,15 @@ type run struct {
 	prompt string
 	cancel context.CancelFunc
 	nextID atomic.Uint64
+	// agentID is the lead: the coordinator for a routed run, the named agent
+	// for a direct one. Redirect reports it back to the caller.
+	agentID string
 	// followUp is true when this is not the first request of the conversation.
 	followUp bool
+	// done is closed by finishRun once the run has released the workbench and
+	// emitted its last event. Redirect waits on it, so cancelling and starting
+	// again is a single ordered handover rather than a race.
+	done chan struct{}
 }
 
 // taskID mints a stable, readable ID for one Claude call inside the run.

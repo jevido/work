@@ -4,6 +4,7 @@
   import KanbanBoard from "./components/KanbanBoard.svelte";
   import OfficeCanvas from "./components/OfficeCanvas.svelte";
   import { TaskBoard } from "./lib/board/board.svelte";
+  import { visualStateOf } from "./lib/bridge/office";
   import { ChangeReview } from "./lib/changes/changes.svelte";
   import { ClaudeSession } from "./lib/claude/session.svelte";
   import type { AgentIdentity } from "./lib/claude/session.svelte";
@@ -42,6 +43,9 @@
           deskY: a.desk.y,
           seatX: a.desk.seatX,
           seatY: a.desk.seatY,
+          // A run can outlive the page: dev reloads happen mid-stream, and the
+          // office has to open showing the work that is already underway.
+          state: visualStateOf(a.state),
         }));
       })
       .catch((err: unknown) => {
@@ -71,7 +75,7 @@
       {#if loadError}
         <div class="load-error">{loadError}</div>
       {/if}
-      <OfficeCanvas {agents} {showPerf} />
+      <OfficeCanvas {agents} {session} {showPerf} />
     </div>
   </div>
   <aside>

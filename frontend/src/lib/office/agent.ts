@@ -1,3 +1,4 @@
+import { MonitorTail } from "./tail";
 import {
   AGENT_RADIUS,
   BOUNDS,
@@ -76,6 +77,13 @@ export class OfficeAgent {
   drawnState: VisualState = "idle";
   /** True until the agent has been drawn once. */
   neverDrawn = true;
+
+  /**
+   * The tail of what this agent is writing, wrapped for their monitor. Filled
+   * from the console's stream when it changes and read while drawing; empty
+   * whenever they are not mid-turn, which is what keeps a quiet desk dark.
+   */
+  readonly tail = new MonitorTail();
 
   /** Desks the agent must walk around, shared with the scene. */
   private obstacles: readonly Rect[] = [];
@@ -178,6 +186,26 @@ export class OfficeAgent {
   fail(): void {
     this.state = "error";
     this.timer = 2.6;
+  }
+
+  /**
+   * Puts the agent straight into a state that was already true before this
+   * page existed. A reload mid-run must not replay the walk to the desk: the
+   * work started minutes ago, so they are simply sitting there, monitor lit.
+   *
+   * Only the states worth restoring are honoured. "finished" and "error" are
+   * flourishes measured in seconds, so a reload has already missed them.
+   */
+  resume(state: VisualState): void {
+    if (state === "working") {
+      this.intent = "desk";
+      this.state = "working";
+      this.hasWaypoint = false;
+      this.x = this.targetX = this.drawnX = this.seatX;
+      this.y = this.targetY = this.drawnY = this.seatY;
+      return;
+    }
+    if (state === "walking") this.assign();
   }
 
   /** Back to aimless wandering. */

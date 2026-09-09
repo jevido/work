@@ -5,12 +5,20 @@ import {
   DESK_HEIGHT,
   DESK_WIDTH,
   IDLE_FPS,
+  MONITOR_BEZEL,
+  MONITOR_HEIGHT,
+  MONITOR_LINE_HEIGHT,
+  MONITOR_TEXT_LINES,
+  MONITOR_TEXT_PAD,
+  MONITOR_TEXT_SIZE,
+  MONITOR_WIDTH,
   TARGET_FPS,
   WALL_Y,
   WORLD_HEIGHT,
   WORLD_WIDTH,
   deskObstacle,
   deskRect,
+  monitorRect,
   type Rect,
 } from "./world";
 
@@ -28,6 +36,12 @@ export interface AgentSpec {
   deskY: number;
   seatX: number;
   seatY: number;
+  /**
+   * What the agent was already doing when the roster was read. Events carry
+   * every change after that, but a page that loads mid-run has missed the ones
+   * before it, so the first state comes with the roster.
+   */
+  state?: VisualState;
 }
 
 const FRAME_INTERVAL_MS = 1000 / TARGET_FPS;
@@ -47,6 +61,28 @@ const FULL_REPAINT_RATIO = 0.6;
 
 /** Rects are pooled: the loop must not allocate. */
 const MAX_DIRTY = 24;
+
+/**
+ * Slop around a monitor when hit-testing a pointer, in world units.
+ *
+ * A monitor is 60x30 units, which is a small target once the world is scaled
+ * into a window, and clicking one is a deliberate act -- missing it by two
+ * pixels should not read as "nothing there".
+ */
+const HIT_PADDING = 8;
+
+/** Nameplates and agent labels. */
+const LABEL_FONT = "600 12px Inter, system-ui, sans-serif";
+
+/**
+ * The monitor readout. Monospace is not decoration here: a fixed advance is
+ * what lets the wrap width be a character count computed once, so the loop can
+ * draw a line without ever measuring one.
+ */
+const MONO_FONT = "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+
+/** Measured once to learn how wide one monospace character is. */
+const SAMPLE = "0123456789abcdefghij";
 
 /**
  * Draws the office with one requestAnimationFrame loop and nothing else.
@@ -115,6 +151,23 @@ export class OfficeRenderer {
   /** Scratch rectangles, so boxAt need not allocate. */
   private readonly scratchA: Rect = { x: 0, y: 0, w: 0, h: 0 };
   private readonly scratchB: Rect = { x: 0, y: 0, w: 0, h: 0 };
+  /** Separate scratch for monitors: drawing and hit-testing must not share. */
+  private readonly scratchMonitor: Rect = { x: 0, y: 0, w: 0, h: 0 };
+  private readonly scratchHit: Rect = { x: 0, y: 0, w: 0, h: 0 };
+
+  /** The agent whose monitor the pointer is over, if any. */
+  private hoverId: string | null = null;
+
+  /**
+   * The monitor readout's metrics, in world units, measured once.
+   *
+   * Both are constants of the world, not of the window: a monitor is always 60
+   * units wide whatever the canvas is, so the wrap width is fixed and resizing
+   * re-scales the readout rather than re-wrapping it. Knowing the advance also
+   * means the caret can be placed by multiplication instead of measurement.
+   */
+  private readonly monitorAdvance: number;
+  private readonly monitorColumns: number;
 
   private readonly onVisibility = () => {
     if (document.hidden) this.pause();
@@ -131,6 +184,14 @@ export class OfficeRenderer {
     const layerCtx = this.layer.getContext("2d", { alpha: false });
     if (!layerCtx) throw new Error("Canvas 2D is unavailable");
     this.layerCtx = layerCtx;
+
+    // Measured from a long sample at a large size, so rounding in the metrics
+    // cannot skew the ratio. This is the only text measurement the renderer
+    // ever does.
+    ctx.font = `100px ${MONO_FONT}`;
+    this.monitorAdvance = (ctx.measureText(SAMPLE).width / SAMPLE.length / 100) * MONITOR_TEXT_SIZE;
+    const usable = MONITOR_WIDTH - (MONITOR_BEZEL + MONITOR_TEXT_PAD) * 2;
+    this.monitorColumns = Math.max(1, Math.floor(usable / this.monitorAdvance));
   }
 
   get stats(): FrameStats {
@@ -143,6 +204,10 @@ export class OfficeRenderer {
     this.byId = new Map(this.agents.map((a) => [a.id, a]));
     this.obstacles = specs.map((s) => deskObstacle(s.deskX, s.deskY));
     for (const agent of this.agents) agent.setObstacles(this.obstacles);
+    // Whoever was already at work gets put back at their desk rather than
+    // walked there: the office should open in the state the backend is in, not
+    // in the state a fresh page would be in.
+    for (const spec of specs) if (spec.state) this.byId.get(spec.id)?.resume(spec.state);
 
     this.paintLayer();
     this.needsFullRepaint = true;
@@ -152,6 +217,85 @@ export class OfficeRenderer {
   /** Queues a coarse state change. Cheap enough to call from an event handler. */
   push(agentId: string, state: VisualState): void {
     this.queue.push({ agentId, state });
+  }
+
+  /**
+   * Hands an agent the prose they are writing right now, so their monitor can
+   * show it. `sourceId` identifies the run of text, which is how a few more
+   * characters on the end are told from a new run after a tool call; an empty
+   * one blanks the monitor.
+   *
+   * Called at most once per agent per frame, from the one place that watches
+   * the console. The wrapping happens here rather than while drawing, and only
+   * when the text actually grew -- an unchanged call costs one comparison.
+   *
+   * Nothing is marked dirty on the way out, deliberately. A working agent's
+   * desk is already repainted every frame, so new characters land for free;
+   * for anyone else the readout is not drawn at all, so a growing tail changes
+   * no pixels and forcing a repaint for it would throw away the dirty-rect
+   * pass on exactly the frames where an agent is hurrying to their desk. The
+   * frame they stop working, `collectDirty` redraws the desk anyway, because
+   * the state changed.
+   */
+  setMonitorText(agentId: string, sourceId: string, text: string): void {
+    const agent = this.byId.get(agentId);
+    if (!agent) return;
+    if (sourceId) agent.tail.update(sourceId, text, this.monitorColumns);
+    else agent.tail.clear();
+  }
+
+  /** The visual state an agent is in, or null if there is no such agent. */
+  stateOf(agentId: string): VisualState | null {
+    return this.byId.get(agentId)?.state ?? null;
+  }
+
+  /**
+   * Turns a point in CSS pixels relative to the canvas into world coordinates.
+   * The inverse of the transform `resize` builds.
+   */
+  toWorldX(cssX: number): number {
+    return (cssX - this.offsetX) / this.scale;
+  }
+
+  toWorldY(cssY: number): number {
+    return (cssY - this.offsetY) / this.scale;
+  }
+
+  /**
+   * The agent whose monitor sits under a point given in CSS pixels relative to
+   * the canvas, or null. Monitors never overlap, so the first hit is the hit.
+   */
+  hitTestMonitor(cssX: number, cssY: number): string | null {
+    const x = this.toWorldX(cssX);
+    const y = this.toWorldY(cssY);
+    for (let i = 0; i < this.agents.length; i++) {
+      const a = this.agents[i];
+      const r = monitorRect(a.deskX, a.deskY, this.scratchHit);
+      if (
+        x >= r.x - HIT_PADDING &&
+        x <= r.x + r.w + HIT_PADDING &&
+        y >= r.y - HIT_PADDING &&
+        y <= r.y + r.h + HIT_PADDING
+      ) {
+        return a.id;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Marks one agent's monitor as hovered, or none. The caller decides what is
+   * worth highlighting; the renderer only draws it.
+   *
+   * A change forces one full repaint instead of growing the dirty-rect
+   * bookkeeping. It happens when the pointer crosses a monitor's edge, which is
+   * rare next to the fifteen to thirty frames a second already being drawn.
+   */
+  setHover(agentId: string | null): void {
+    if (agentId === this.hoverId) return;
+    this.hoverId = agentId;
+    this.needsFullRepaint = true;
+    if (!this.running) this.draw(performance.now());
   }
 
   /** Recomputes the world-to-device transform. Call on size changes. */
@@ -335,7 +479,7 @@ export class OfficeRenderer {
     ctx.fillStyle = "#232a35";
     ctx.fillRect(x, WALL_Y - 2, w, 2);
 
-    ctx.font = "600 12px Inter, system-ui, sans-serif";
+    ctx.font = LABEL_FONT;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     for (const agent of this.agents) this.drawDesk(ctx, agent, false);
@@ -391,7 +535,7 @@ export class OfficeRenderer {
 
   /** Draws everything that moves: lit monitors and the agents themselves. */
   private drawScene(ctx: CanvasRenderingContext2D, now: number): void {
-    ctx.font = "600 12px Inter, system-ui, sans-serif";
+    ctx.font = LABEL_FONT;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
 
@@ -514,21 +658,102 @@ export class OfficeRenderer {
       ctx.fill();
     }
 
-    // Monitor, tinted with the owner's colour when they are working.
-    ctx.fillStyle = "#151920";
+    // Monitor, tinted with the owner's colour when they are working, and
+    // brightened further while the pointer is over it. The highlight stays
+    // inside the monitor's own outline so it needs no extra dirty rectangle.
+    const m = monitorRect(a.deskX, a.deskY, this.scratchMonitor);
+    const hot = lit && a.id === this.hoverId;
+    ctx.fillStyle = hot ? a.colour : "#151920";
     ctx.beginPath();
-    ctx.roundRect(a.deskX - 30, y - 26, 60, 30, 4);
+    ctx.roundRect(m.x, m.y, m.w, m.h, 4);
     ctx.fill();
-    ctx.fillStyle = lit ? a.colourDim : "#1d232c";
+    ctx.fillStyle = lit ? (hot ? a.colourSoft : a.colourDim) : "#1d232c";
     ctx.beginPath();
-    ctx.roundRect(a.deskX - 26, y - 22, 52, 22, 3);
+    ctx.roundRect(m.x + MONITOR_BEZEL, m.y + MONITOR_BEZEL, m.w - MONITOR_BEZEL * 2, m.h - MONITOR_BEZEL * 2, 3);
     ctx.fill();
+
+    // The readout belongs to a turn in progress rather than to a lit monitor:
+    // a finished desk keeps its glow but stops reporting, the same as today.
+    // `lit` also keeps it out of the static layer, which would bake it in.
+    if (lit && a.state === "working" && a.tail.active) this.drawReadout(ctx, a, m, hot);
 
     if (!lit) {
       // Nameplate.
       ctx.fillStyle = "#5f6878";
       ctx.fillText(a.name, a.deskX, a.deskY + 2);
     }
+  }
+
+  /**
+   * The live terminal on a working agent's monitor: the tail of what they are
+   * writing, oldest line at the top, the line being typed at the bottom.
+   *
+   * Everything expensive already happened when the text arrived. The lines are
+   * wrapped, they are trimmed to the height of the glass, and the caret sits at
+   * a known multiple of the character advance -- so this is three fillText
+   * calls and a rectangle, with nothing measured and nothing allocated.
+   */
+  private drawReadout(
+    ctx: CanvasRenderingContext2D,
+    a: OfficeAgent,
+    m: Rect,
+    hot: boolean,
+  ): void {
+    const lines = a.tail.lines;
+    const glassX = m.x + MONITOR_BEZEL;
+    const glassY = m.y + MONITOR_BEZEL;
+    const glassW = MONITOR_WIDTH - MONITOR_BEZEL * 2;
+    const glassH = MONITOR_HEIGHT - MONITOR_BEZEL * 2;
+
+    // Type this small only survives on a dark ground. The lit tint and the
+    // agent's ink are the same hue a shade apart, which is a fine way to show
+    // a monitor is on and a hopeless one to read six units of text off, so a
+    // readout drops the glass to near-black first. Hover lets more of the
+    // colour through instead of flipping the ink, which keeps the highlight
+    // visible without costing contrast.
+    ctx.fillStyle = hot ? "rgba(10,12,17,0.7)" : "rgba(10,12,17,0.88)";
+    ctx.beginPath();
+    ctx.roundRect(glassX, glassY, glassW, glassH, 3);
+    ctx.fill();
+
+    // Centre the full block of rows, so the readout does not shift downwards
+    // as the first lines fill in.
+    const left = glassX + MONITOR_TEXT_PAD;
+    let y =
+      glassY +
+      (glassH - MONITOR_LINE_HEIGHT * MONITOR_TEXT_LINES) / 2 +
+      MONITOR_LINE_HEIGHT / 2;
+
+    ctx.font = `${MONITOR_TEXT_SIZE}px ${MONO_FONT}`;
+    ctx.textAlign = "left";
+    ctx.fillStyle = a.colourSoft;
+
+    // Scrollback sits back a little, which puts the eye on the line still
+    // being written without having to animate anything to say so.
+    ctx.globalAlpha = 0.72;
+    for (let i = 0; i < lines.length; i++) {
+      ctx.fillText(lines[i], left, y);
+      y += MONITOR_LINE_HEIGHT;
+    }
+
+    ctx.globalAlpha = 1;
+    ctx.fillText(a.tail.current, left, y);
+
+    // Block caret, blinking on the agent's own clock so the desks are not all
+    // winking in unison. Skipped on a full line, where it would overhang.
+    const column = a.tail.current.length;
+    if (column < this.monitorColumns && Math.sin(a.clock * 5) > -0.2) {
+      ctx.fillRect(
+        left + column * this.monitorAdvance,
+        y - MONITOR_TEXT_SIZE * 0.42,
+        this.monitorAdvance * 0.85,
+        MONITOR_TEXT_SIZE * 0.84,
+      );
+    }
+
+    // Hand the context back the way the rest of the scene expects it.
+    ctx.font = LABEL_FONT;
+    ctx.textAlign = "center";
   }
 
   private drawAgent(ctx: CanvasRenderingContext2D, a: OfficeAgent, now: number): void {

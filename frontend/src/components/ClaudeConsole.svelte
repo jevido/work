@@ -1,8 +1,8 @@
 <script lang="ts">
-  import type { ClaudeSession, Phase, RunStatus } from "../lib/claude/session.svelte";
+  import type { ClaudeSession, RunStatus } from "../lib/claude/session.svelte";
   import type { ChangeReview as ChangeReviewState } from "../lib/changes/changes.svelte";
+  import AgentTurn from "./AgentTurn.svelte";
   import ChangeReview from "./ChangeReview.svelte";
-  import ToolRow from "./ToolRow.svelte";
 
   let {
     session,
@@ -21,14 +21,6 @@
     done: "Done",
     cancelled: "Stopped",
     error: "Error",
-  };
-
-  // Only the synthesis turn is worth labelling: a plain work turn is obvious
-  // from the agent's name, and routing has an entry of its own.
-  const phaseLabel: Record<Phase, string> = {
-    plan: "",
-    work: "",
-    synthesis: "bringing it together",
   };
 
   // The console is the only text input in the window, so it takes focus on
@@ -123,7 +115,12 @@
     {#each session.entries as entry (entry.id)}
       {#if entry.kind === "user"}
         <article class="turn you">
-          <div class="speaker"><span class="name">You</span></div>
+          <div class="speaker">
+            <span class="name">You</span>
+            {#if entry.agentId}
+              <span class="aside">→ {session.nameOf(entry.agentId)}</span>
+            {/if}
+          </div>
           <div class="said">{entry.text}</div>
         </article>
       {:else if entry.kind === "plan"}
@@ -158,37 +155,7 @@
           </div>
         </article>
       {:else if entry.kind === "agent"}
-        <article class="turn" data-status={entry.status}>
-          <div class="speaker">
-            <span class="dot" style:background={entry.colour}></span>
-            <span class="name">{entry.agentName}</span>
-            {#if phaseLabel[entry.phase]}
-              <span class="aside">{phaseLabel[entry.phase]}</span>
-            {/if}
-            {#if entry.status === "streaming"}
-              <span class="pulse" style:background={entry.colour}></span>
-            {/if}
-          </div>
-
-          {#each entry.parts as part (part.id)}
-            {#if part.kind === "text"}
-              {#if part.text.trim()}<pre>{part.text}</pre>{/if}
-            {:else}
-              <div class="tools"><ToolRow call={part.call} /></div>
-            {/if}
-          {/each}
-
-          {#if entry.error}
-            <div class="error" role="alert">{entry.error}</div>
-          {/if}
-
-          {#if entry.status !== "streaming" && entry.durationMs > 0}
-            <div class="footnote">
-              {(entry.durationMs / 1000).toFixed(1)}s
-              {#if entry.costUsd > 0}· ${entry.costUsd.toFixed(4)}{/if}
-            </div>
-          {/if}
-        </article>
+        <AgentTurn {entry} />
       {:else}
         <div class="notice" class:bad={entry.tone === "error"} role={entry.tone === "error" ? "alert" : undefined}>
           {entry.text}
@@ -317,26 +284,6 @@
     flex: none;
   }
 
-  .pulse {
-    width: 5px;
-    height: 5px;
-    border-radius: 50%;
-    animation: blink 1s steps(2, end) infinite;
-  }
-
-  @keyframes blink {
-    50% {
-      opacity: 0.15;
-    }
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .pulse {
-      animation: none;
-      opacity: 0.6;
-    }
-  }
-
   /* Your own words sit in a block of their own, so the conversation reads as
      an exchange rather than a log of replies. */
   .you .name {
@@ -414,42 +361,6 @@
     font-size: 10px;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-  }
-
-  /* Tool rows sit in the same left-hand channel as the prose, so a turn reads
-     as one column of activity. */
-  .tools {
-    padding-left: 14px;
-    border-left: 1px solid var(--line);
-  }
-
-  pre {
-    margin: 0;
-    padding-left: 14px;
-    border-left: 1px solid var(--line);
-    font-family: ui-monospace, "SF Mono", Menlo, monospace;
-    font-size: 12px;
-    line-height: 1.55;
-    white-space: pre-wrap;
-    word-break: break-word;
-    user-select: text;
-  }
-
-  .error {
-    margin: 6px 0 0 14px;
-    padding: 7px 9px;
-    border: 1px solid #4a2b2b;
-    border-radius: 6px;
-    background: #241a1a;
-    color: var(--err);
-    font-size: 12px;
-    user-select: text;
-  }
-
-  .footnote {
-    padding: 5px 0 0 14px;
-    color: var(--muted);
-    font-size: 11px;
   }
 
   .notice {

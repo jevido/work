@@ -53,6 +53,12 @@ export interface UserEntry {
   kind: "user";
   id: string;
   text: string;
+  /**
+   * The agent it was addressed to, or "" for the team -- which is to say
+   * Anton, who decides who picks it up. Set when you talk to one agent
+   * directly, so that conversation can be read back on its own.
+   */
+  agentId: string;
 }
 
 /** One edit Anton made to the board while routing. */
@@ -150,6 +156,11 @@ export class ClaudeSession {
   /** Tells the console who the agents are. Safe to call again on a change. */
   setAgents(list: readonly AgentIdentity[]): void {
     this.roster = new Map(list.map((a) => [a.id, a]));
+  }
+
+  /** An agent's display name, falling back to their ID if they are unknown. */
+  nameOf(agentId: string): string {
+    return this.identify(agentId).name;
   }
 
   /** Subscribes to backend events. Returns an unsubscribe function. */
@@ -294,7 +305,7 @@ export class ClaudeSession {
     const text = prompt.trim();
     if (!text || this.busy) return;
 
-    this.entries.push({ kind: "user", id: this.mintId("you"), text });
+    this.entries.push({ kind: "user", id: this.mintId("you"), text, agentId });
     this.status = "planning";
 
     try {
