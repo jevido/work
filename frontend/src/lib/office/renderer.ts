@@ -1,10 +1,50 @@
 import { OfficeAgent, type VisualState } from "./agent";
 import { avatarImage } from "./avatars";
+import { IdleDirector } from "./idle";
 import { PerfSampler, type FrameStats } from "./perf";
+import {
+  COFFEE_HEIGHT,
+  COFFEE_MACHINE_HEIGHT,
+  COFFEE_MACHINE_WIDTH,
+  COFFEE_WIDTH,
+  FRIDGE_HEIGHT,
+  LUNCH_HEIGHT,
+  MEETING_HEIGHT,
+  MEETING_WIDTH,
+  PLANTS,
+  PLANT_RADIUS,
+  PONG_HEIGHT,
+  PRINTER,
+  PRINTER_HEIGHT,
+  SHELF,
+  SHELF_HEIGHT,
+  SHELF_WIDTH,
+  coffeeRect,
+  fridgeRect,
+  furnitureObstacles,
+  lunchRect,
+  lunchSeats,
+  meetingRect,
+  placeProps,
+  pongRect,
+  printerRect,
+  shelfRect,
+  type Prop,
+  type Props,
+} from "./props";
+import {
+  dispatchLine,
+  speechRect,
+  SPEECH_FONT,
+  SPEECH_HEIGHT,
+  SPEECH_PAD_X,
+  SPEECH_SECONDS,
+} from "./speech";
 import {
   AGENT_RADIUS,
   DESK_HEIGHT,
   DESK_WIDTH,
+  DOORWAYS,
   IDLE_FPS,
   MONITOR_BEZEL,
   MONITOR_HEIGHT,
@@ -13,13 +53,17 @@ import {
   MONITOR_TEXT_PAD,
   MONITOR_TEXT_SIZE,
   MONITOR_WIDTH,
+  ROOMS,
   TARGET_FPS,
-  WALL_Y,
+  WALL,
+  WALLS,
   WORLD_HEIGHT,
   WORLD_WIDTH,
   deskObstacle,
   deskRect,
   monitorRect,
+  prefersReducedMotion,
+  rectsOverlap,
   type Rect,
 } from "./world";
 
@@ -66,17 +110,37 @@ const MAX_DPR = 2;
  */
 const FULL_REPAINT_RATIO = 0.6;
 
-/** Rects are pooled: the loop must not allocate. */
-const MAX_DIRTY = 24;
+/**
+ * Rects are pooled: the loop must not allocate. There is room for every agent
+ * to be moving with a bubble up and a ball in the air, because running out
+ * costs a full repaint.
+ */
+const MAX_DIRTY = 32;
 
 /**
- * Slop around a monitor when hit-testing a pointer, in world units.
+ * Slop around a monitor when working out its target box, in world units.
  *
  * A monitor is 60x30 units, which is a small target once the world is scaled
- * into a window, and clicking one is a deliberate act -- missing it by two
+ * into a window, and opening a desk is a deliberate act -- missing it by two
  * pixels should not read as "nothing there".
  */
 const HIT_PADDING = 8;
+
+/**
+ * One desk's box on screen, in CSS pixels relative to the canvas.
+ *
+ * The office is a canvas, so nothing in it can be focused, labelled or reached
+ * with a keyboard. These are what the component puts a real button over: the
+ * renderer owns where a desk is in pixels, the component owns what it is
+ * called and what happens when it is pressed.
+ */
+export interface DeskTarget {
+  id: string;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
 
 /** Nameplates and agent labels. */
 const LABEL_FONT = "600 12px Inter, system-ui, sans-serif";
@@ -94,11 +158,14 @@ const SAMPLE = "0123456789abcdefghij";
 /**
  * Draws the office with one requestAnimationFrame loop and nothing else.
  *
- * The floor, grid, wall and desks are painted once into an offscreen canvas and
- * then blitted back as the background. Each frame repaints only the rectangles
- * that actually changed -- where an agent was, where it now is, and any monitor
- * that lit up -- because measurement showed the cost of this renderer is not
- * its drawing but the webview compositing a full-canvas repaint every frame.
+ * The floorplan -- room floors, walls, doorways, desks and every piece of
+ * furniture -- is painted once into an offscreen canvas and then blitted back
+ * as the background. Each frame repaints only the rectangles that actually
+ * changed -- where an agent was, where it now is, a bubble that appeared, a
+ * ball in flight, any monitor that lit up -- because measurement showed the
+ * cost of this renderer is not its drawing but the webview compositing a
+ * full-canvas repaint every frame. An office with three rooms of furniture in
+ * it therefore costs exactly what the empty floor did.
  *
  * The renderer is deliberately not reactive. Semantic state changes arrive
  * through `push`, are queued as plain objects, and are drained at the top of a
@@ -110,13 +177,29 @@ export class OfficeRenderer {
   private readonly ctx: CanvasRenderingContext2D;
   private readonly sampler = new PerfSampler();
 
-  /** The static background: floor, grid, wall and unlit desks. */
+  /** The static background: rooms, walls, furniture and unlit desks. */
   private readonly layer: HTMLCanvasElement;
   private readonly layerCtx: CanvasRenderingContext2D;
 
   private agents: OfficeAgent[] = [];
   private byId = new Map<string, OfficeAgent>();
   private obstacles: Rect[] = [];
+
+  /**
+   * The furniture. Fixed addresses in the wing, plus a ping pong table
+   * wherever the bullpen had space for one.
+   */
+  private props: Props = placeProps([]);
+
+  /**
+   * What the office does with itself between tasks.
+   *
+   * Given the callback it cannot write itself: a bubble's width has to be
+   * measured, and this is the only object that owns a canvas context.
+   */
+  private readonly director = new IdleDirector((agent, text, seconds) =>
+    this.speak(agent, text, seconds),
+  );
 
   /** Pending commands, drained each frame. Reused, never reallocated. */
   private queue: AgentCommand[] = [];
@@ -146,6 +229,16 @@ export class OfficeRenderer {
   /** True while any agent is doing something more interesting than strolling. */
   private busy = false;
 
+  /**
+   * True while the person watching has asked for less movement.
+   *
+   * Read once a frame rather than per oscillator, and every oscillator in the
+   * renderer is guarded by it: a bob, a blinking caret, hopping typing dots
+   * and drifting steam are all decoration, and the office has to be able to
+   * hold still.
+   */
+  private still = false;
+
   /** Dirty rectangles for this frame, in world units. Pooled. */
   private readonly dirty: Rect[] = Array.from({ length: MAX_DIRTY }, () => ({
     x: 0,
@@ -158,9 +251,13 @@ export class OfficeRenderer {
   /** Scratch rectangles, so boxAt need not allocate. */
   private readonly scratchA: Rect = { x: 0, y: 0, w: 0, h: 0 };
   private readonly scratchB: Rect = { x: 0, y: 0, w: 0, h: 0 };
-  /** Separate scratch for monitors: drawing and hit-testing must not share. */
+  /** Separate scratch for monitors: drawing and measuring must not share. */
   private readonly scratchMonitor: Rect = { x: 0, y: 0, w: 0, h: 0 };
   private readonly scratchHit: Rect = { x: 0, y: 0, w: 0, h: 0 };
+  /** Scratch for speech bubbles, ball rects and the furniture. */
+  private readonly scratchSpeech: Rect = { x: 0, y: 0, w: 0, h: 0 };
+  private readonly scratchBall: Rect = { x: 0, y: 0, w: 0, h: 0 };
+  private readonly scratchProp: Rect = { x: 0, y: 0, w: 0, h: 0 };
 
   /** The agent whose monitor the pointer is over, if any. */
   private hoverId: string | null = null;
@@ -210,7 +307,14 @@ export class OfficeRenderer {
     this.agents = specs.map((s) => new OfficeAgent(s));
     this.byId = new Map(this.agents.map((a) => [a.id, a]));
     this.obstacles = specs.map((s) => deskObstacle(s.deskX, s.deskY));
+    // The desks are laid out from the roster, so where a ping pong table fits
+    // is only knowable once they are placed. Everything solid goes in before
+    // the agents are told what to walk around, and the router works from the
+    // same list, so nobody plans a route through drawn furniture.
+    this.props = placeProps(this.obstacles);
+    this.obstacles.push(...furnitureObstacles(this.props));
     for (const agent of this.agents) agent.setObstacles(this.obstacles);
+    this.director.setScene(this.agents, this.obstacles, this.props);
     // Whoever was already at work gets put back at their desk rather than
     // walked there: the office should open in the state the backend is in, not
     // in the state a fresh page would be in.
@@ -295,37 +399,28 @@ export class OfficeRenderer {
   }
 
   /**
-   * Turns a point in CSS pixels relative to the canvas into world coordinates.
-   * The inverse of the transform `resize` builds.
+   * Every desk's box on screen, in CSS pixels relative to the canvas.
+   *
+   * Ordered by where the desk is in the room -- back to front, left to right --
+   * and deliberately not in the order the agents are drawn in, which is sorted
+   * by depth every frame. A tab order that reshuffled itself as people walked
+   * about would be worse than no tab order.
+   *
+   * Recomputed by the component on a resize or a change of cast, which is the
+   * only time it can change; the walking about does not move a desk.
    */
-  toWorldX(cssX: number): number {
-    return (cssX - this.offsetX) / this.scale;
-  }
-
-  toWorldY(cssY: number): number {
-    return (cssY - this.offsetY) / this.scale;
-  }
-
-  /**
-   * The agent whose monitor sits under a point given in CSS pixels relative to
-   * the canvas, or null. Monitors never overlap, so the first hit is the hit.
-   */
-  hitTestMonitor(cssX: number, cssY: number): string | null {
-    const x = this.toWorldX(cssX);
-    const y = this.toWorldY(cssY);
-    for (let i = 0; i < this.agents.length; i++) {
-      const a = this.agents[i];
+  deskTargets(): DeskTarget[] {
+    const targets = this.agents.map((a): DeskTarget => {
       const r = monitorRect(a.deskX, a.deskY, this.scratchHit);
-      if (
-        x >= r.x - HIT_PADDING &&
-        x <= r.x + r.w + HIT_PADDING &&
-        y >= r.y - HIT_PADDING &&
-        y <= r.y + r.h + HIT_PADDING
-      ) {
-        return a.id;
-      }
-    }
-    return null;
+      return {
+        id: a.id,
+        left: (r.x - HIT_PADDING) * this.scale + this.offsetX,
+        top: (r.y - HIT_PADDING) * this.scale + this.offsetY,
+        width: (r.w + HIT_PADDING * 2) * this.scale,
+        height: (r.h + HIT_PADDING * 2) * this.scale,
+      };
+    });
+    return targets.sort((a, b) => a.top - b.top || a.left - b.left);
   }
 
   /**
@@ -442,6 +537,9 @@ export class OfficeRenderer {
       switch (cmd.state) {
         case "walking":
           agent.assign();
+          // Anton has just handed them the task. They answer before they sit
+          // down -- the line is canned, so this costs nothing but a bubble.
+          this.speak(agent, dispatchLine());
           break;
         case "working":
           agent.work();
@@ -467,7 +565,12 @@ export class OfficeRenderer {
       list[i].update(dt);
       if (list[i].wantsSmoothFrames) busy = true;
     }
-    this.busy = busy;
+    // After the agents, so a bit reads the standing-still that this frame
+    // produced rather than waiting for the next one.
+    this.director.update(dt);
+    // A ball in the air is the one idle thing small and fast enough to strobe
+    // at the idle rate. It lasts a few seconds, twice a minute at worst.
+    this.busy = busy || this.director.wantsSmoothFrames;
 
     // Painter's order by depth. Insertion sort in place: no allocation, and
     // the list is nearly sorted every frame.
@@ -537,35 +640,9 @@ export class OfficeRenderer {
     const s = this.scale * this.dpr;
     ctx.setTransform(s, 0, 0, s, this.offsetX * this.dpr, this.offsetY * this.dpr);
 
-    const x = this.viewMinX;
-    const y = this.viewMinY;
-    const w = this.viewMaxX - x;
-    const h = this.viewMaxY - y;
-
-    ctx.fillStyle = "#171b22";
-    ctx.fillRect(x, y, w, h);
-
-    // Floor grid.
-    ctx.strokeStyle = "#1e242e";
-    ctx.lineWidth = 1 / this.scale;
-    ctx.beginPath();
-    const step = 50;
-    const top = Math.max(y, WALL_Y);
-    for (let gx = Math.ceil(x / step) * step; gx < this.viewMaxX; gx += step) {
-      ctx.moveTo(gx, top);
-      ctx.lineTo(gx, this.viewMaxY);
-    }
-    for (let gy = Math.ceil(top / step) * step; gy < this.viewMaxY; gy += step) {
-      ctx.moveTo(x, gy);
-      ctx.lineTo(this.viewMaxX, gy);
-    }
-    ctx.stroke();
-
-    // Back wall, to give the room a floor/wall split.
-    ctx.fillStyle = "#12151b";
-    ctx.fillRect(x, y, w, WALL_Y - y);
-    ctx.fillStyle = "#232a35";
-    ctx.fillRect(x, WALL_Y - 2, w, 2);
+    for (const room of ROOMS) this.drawRoomFloor(ctx, room);
+    this.drawWalls(ctx);
+    this.drawDoorways(ctx);
 
     ctx.font = LABEL_FONT;
     ctx.textAlign = "center";
@@ -573,13 +650,513 @@ export class OfficeRenderer {
     // Never hot: a highlight baked into the layer would outlive the pointer
     // that caused it, and only another paintLayer would take it off again.
     for (const agent of this.agents) this.drawDesk(ctx, agent, false, false);
+
+    // The furniture nobody works at. Static shapes with nothing that changes,
+    // so the office pays for these once and never again.
+    this.drawCoffeeStation(ctx, this.props.coffee);
+    this.drawFridge(ctx, this.props.fridge);
+    this.drawLunchTable(ctx, this.props.lunch);
+    this.drawMeetingTable(ctx, this.props.meeting);
+    this.drawWhiteboard(ctx);
+    this.drawPrinter(ctx, PRINTER);
+    this.drawShelf(ctx, SHELF);
+    for (const plant of PLANTS) this.drawPlant(ctx, plant);
+    if (this.props.pong) this.drawPongTable(ctx, this.props.pong);
+
+    this.drawRoomLabels(ctx);
+  }
+
+  /**
+   * One room's floor.
+   *
+   * Each room gets its own surface, because that is most of what tells them
+   * apart from across the office: the bullpen keeps the grid it always had,
+   * the break room is warmer and tiled tighter, the meeting room is carpet
+   * with a rug under the table. Walls alone would read as lines on one floor.
+   */
+  private drawRoomFloor(ctx: CanvasRenderingContext2D, room: (typeof ROOMS)[number]): void {
+    const carpet = room.id === "meeting";
+    ctx.fillStyle = floorColour(room.id);
+    ctx.fillRect(room.x, room.y, room.w, room.h);
+
+    if (carpet) {
+      // A rug rather than a grid: nothing is tiled in a meeting room.
+      ctx.fillStyle = "#1b2029";
+      ctx.beginPath();
+      ctx.roundRect(room.x + 26, room.y + 34, room.w - 52, room.h - 68, 8);
+      ctx.fill();
+      return;
+    }
+
+    const step = room.id === "break" ? 34 : 50;
+    ctx.strokeStyle = room.id === "break" ? "#26211f" : "#1e242e";
+    ctx.lineWidth = 1 / this.scale;
+    ctx.beginPath();
+    for (let gx = Math.ceil(room.x / step) * step; gx < room.x + room.w; gx += step) {
+      ctx.moveTo(gx, room.y);
+      ctx.lineTo(gx, room.y + room.h);
+    }
+    for (let gy = Math.ceil(room.y / step) * step; gy < room.y + room.h; gy += step) {
+      ctx.moveTo(room.x, gy);
+      ctx.lineTo(room.x + room.w, gy);
+    }
+    ctx.stroke();
+  }
+
+  /**
+   * The walls.
+   *
+   * Three tones each: a body, a lit face along the top and left, and a shadow
+   * where the wall meets the floor. The first attempt at this drew walls
+   * darker than the floor, which from any distance read as a seam between two
+   * carpets rather than as something you cannot walk through. A wall has to be
+   * the lightest thing in the room's outline to read as standing up.
+   *
+   * Walls are drawing only. What keeps an agent out of one is that the space it
+   * occupies is not floor -- see `onFloor` in world.ts.
+   */
+  private drawWalls(ctx: CanvasRenderingContext2D): void {
+    for (const wall of WALLS) {
+      const horizontal = wall.w >= wall.h;
+      ctx.fillStyle = "#39424f";
+      ctx.fillRect(wall.x, wall.y, wall.w, wall.h);
+      ctx.fillStyle = "#4e5868";
+      if (horizontal) ctx.fillRect(wall.x, wall.y, wall.w, 3);
+      else ctx.fillRect(wall.x, wall.y, 3, wall.h);
+      ctx.fillStyle = "#0e1116";
+      if (horizontal) ctx.fillRect(wall.x, wall.y + wall.h - 2, wall.w, 2);
+      else ctx.fillRect(wall.x + wall.w - 2, wall.y, 2, wall.h);
+    }
+  }
+
+  /**
+   * The doorways: a threshold across the opening and a jamb either side of it.
+   *
+   * Without the jambs an opening reads as a wall somebody forgot to finish.
+   * They are the two short blocks that turn a gap into a frame, and they are
+   * drawn over the wall rather than cut out of it, which keeps the wall
+   * geometry -- the thing agents route through -- one rectangle per stretch.
+   */
+  private drawDoorways(ctx: CanvasRenderingContext2D): void {
+    const post = 9;
+    for (const door of DOORWAYS) {
+      const half = door.span / 2;
+      const near = floorColour(door.a);
+      const far = floorColour(door.b);
+
+      if (door.axis === "v") {
+        // The floor of each room carried through to the middle of the wall, so
+        // the opening reads as somewhere you can walk rather than as a recess.
+        // Filling it dark was the first attempt and looked like a niche.
+        ctx.fillStyle = near;
+        ctx.fillRect(door.at - WALL / 2, door.centre - half, WALL / 2, door.span);
+        ctx.fillStyle = far;
+        ctx.fillRect(door.at, door.centre - half, WALL / 2, door.span);
+        // Jamb posts, framing the opening at both ends.
+        ctx.fillStyle = "#1b2027";
+        ctx.fillRect(door.at - WALL / 2, door.centre - half, WALL, post);
+        ctx.fillRect(door.at - WALL / 2, door.centre + half - post, WALL, post);
+        // The saddle, one pale line where the floors meet.
+        ctx.fillStyle = "#5a6575";
+        ctx.fillRect(door.at - 1, door.centre - half + post, 2, door.span - post * 2);
+      } else {
+        ctx.fillStyle = near;
+        ctx.fillRect(door.centre - half, door.at - WALL / 2, door.span, WALL / 2);
+        ctx.fillStyle = far;
+        ctx.fillRect(door.centre - half, door.at, door.span, WALL / 2);
+        ctx.fillStyle = "#1b2027";
+        ctx.fillRect(door.centre - half, door.at - WALL / 2, post, WALL);
+        ctx.fillRect(door.centre + half - post, door.at - WALL / 2, post, WALL);
+        ctx.fillStyle = "#5a6575";
+        ctx.fillRect(door.centre - half + post, door.at - 1, door.span - post * 2, 2);
+      }
+    }
+  }
+
+  /**
+   * What each room is called, small and dim.
+   *
+   * In the bottom corner rather than the top, because the top of every room in
+   * this office has something against the wall: a coffee counter, a bookshelf,
+   * the coordinator's desk.
+   */
+  private drawRoomLabels(ctx: CanvasRenderingContext2D): void {
+    ctx.font = "600 11px Inter, system-ui, sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "#333b47";
+    for (const room of ROOMS) {
+      const right = room.labelCorner === "top-right";
+      ctx.textAlign = right ? "right" : "left";
+      ctx.fillText(
+        room.label,
+        right ? room.x + room.w - 16 : room.x + 16,
+        room.labelCorner === "bottom-left" ? room.y + room.h - 14 : room.y + 16,
+      );
+    }
+    ctx.font = LABEL_FONT;
+    ctx.textAlign = "center";
+  }
+
+  /**
+   * The coffee station: a counter, a pale worktop, and an espresso machine
+   * standing on it with cups beside it.
+   *
+   * The old version was a small dark box against a dark wall, which at the
+   * scale this world is drawn read as nothing at all. What fixes that is not
+   * more detail, it is silhouette and contrast: a wide warm counter, one pale
+   * horizontal worktop line, and a steel machine standing above that line with
+   * a black group head under it. Three shapes, recognisable at half size, and
+   * the only warm colours in an office of blue-grey.
+   */
+  private drawCoffeeStation(ctx: CanvasRenderingContext2D, p: Prop): void {
+    const r = coffeeRect(p, this.scratchProp);
+    const topY = r.y;
+
+    // Cabinet.
+    ctx.fillStyle = "#3b2f27";
+    ctx.beginPath();
+    ctx.roundRect(r.x, topY, r.w, r.h, 4);
+    ctx.fill();
+    // Cupboard doors, so the front is not a flat slab.
+    ctx.strokeStyle = "#2c231d";
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    for (let i = 1; i < 3; i++) {
+      const x = r.x + (r.w / 3) * i;
+      ctx.moveTo(x, topY + 12);
+      ctx.lineTo(x, topY + r.h - 4);
+    }
+    ctx.stroke();
+    // Toe kick, for a little thickness at the bottom.
+    ctx.fillStyle = "#241d18";
+    ctx.beginPath();
+    ctx.roundRect(r.x, topY + r.h - 7, r.w, 7, 3);
+    ctx.fill();
+
+    // The worktop: the single strongest cue in the whole prop, so it overhangs
+    // the cabinet at both ends and carries everything standing on it.
+    ctx.fillStyle = "#c2bbac";
+    ctx.beginPath();
+    ctx.roundRect(r.x - 5, topY - 7, r.w + 10, 15, 3);
+    ctx.fill();
+    ctx.fillStyle = "#8d8779";
+    ctx.fillRect(r.x - 5, topY + 5, r.w + 10, 3);
+
+    // Espresso machine, standing on the worktop.
+    const machineX = r.x + 14;
+    const machineY = topY - 7 - COFFEE_MACHINE_HEIGHT;
+    // Dark body with a steel top. It was pale to begin with, which next to a
+    // pale fridge two feet away made the break room read as two fridges.
+    ctx.fillStyle = "#262c36";
+    ctx.beginPath();
+    ctx.roundRect(machineX, machineY, COFFEE_MACHINE_WIDTH, COFFEE_MACHINE_HEIGHT, 3);
+    ctx.fill();
+    ctx.fillStyle = "#aab4c2";
+    ctx.beginPath();
+    ctx.roundRect(machineX, machineY, COFFEE_MACHINE_WIDTH, 9, 3);
+    ctx.fill();
+    // Bean hopper on top, a badge, and two buttons.
+    ctx.fillStyle = "#3a2f27";
+    ctx.beginPath();
+    ctx.roundRect(machineX + COFFEE_MACHINE_WIDTH - 22, machineY - 9, 16, 10, 2);
+    ctx.fill();
+    ctx.fillStyle = "#c0392b";
+    ctx.fillRect(machineX + 7, machineY + 14, 9, 3);
+    ctx.fillStyle = "#8d97a6";
+    ctx.beginPath();
+    ctx.arc(machineX + 10, machineY + 24, 2.4, 0, Math.PI * 2);
+    ctx.arc(machineX + 18, machineY + 24, 2.4, 0, Math.PI * 2);
+    ctx.fill();
+    // Group head and spout, hanging over the worktop, with a cup under it.
+    ctx.fillStyle = "#151a20";
+    ctx.fillRect(machineX + 22, machineY + COFFEE_MACHINE_HEIGHT - 12, 28, 12);
+    ctx.fillRect(machineX + 34, machineY + COFFEE_MACHINE_HEIGHT, 5, 6);
+    ctx.fillStyle = "#e6e9ee";
+    ctx.beginPath();
+    ctx.roundRect(machineX + 31, topY - 14, 11, 8, 2);
+    ctx.fill();
+
+    // A stack of cups, and the carafe at the far end.
+    ctx.fillStyle = "#dfe3ea";
+    for (let i = 0; i < 2; i++) {
+      ctx.beginPath();
+      ctx.roundRect(r.x + 86 + i * 13, topY - 18, 11, 11, 2);
+      ctx.fill();
+    }
+    // The carafe on its hotplate at the end of the run.
+    ctx.fillStyle = "#2f3540";
+    ctx.beginPath();
+    ctx.roundRect(r.x + r.w - 26, topY - 25, 19, 18, 3);
+    ctx.fill();
+    ctx.strokeStyle = "#2f3540";
+    ctx.lineWidth = 2.4;
+    ctx.beginPath();
+    ctx.arc(r.x + r.w - 5, topY - 16, 4.5, -Math.PI / 2, Math.PI / 2);
+    ctx.stroke();
+    ctx.fillStyle = "#6b4a35";
+    ctx.fillRect(r.x + r.w - 24, topY - 14, 15, 6);
+  }
+
+  /** The fridge, standing against the same wall. */
+  private drawFridge(ctx: CanvasRenderingContext2D, p: Prop): void {
+    const r = fridgeRect(p, this.scratchProp);
+    ctx.fillStyle = "#c3c9d2";
+    ctx.beginPath();
+    ctx.roundRect(r.x, r.y, r.w, r.h, 4);
+    ctx.fill();
+    // The freezer split and two handles: what makes a white box a fridge.
+    ctx.strokeStyle = "#9aa2ae";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(r.x, r.y + FRIDGE_HEIGHT * 0.34);
+    ctx.lineTo(r.x + r.w, r.y + FRIDGE_HEIGHT * 0.34);
+    ctx.stroke();
+    ctx.fillStyle = "#7d8492";
+    ctx.fillRect(r.x + r.w - 10, r.y + 8, 3, 12);
+    ctx.fillRect(r.x + r.w - 10, r.y + FRIDGE_HEIGHT * 0.34 + 8, 3, 16);
+  }
+
+  /**
+   * The lunch table: a long surface with a place setting per bench spot.
+   *
+   * The settings are what make it a lunch table rather than a desk, and they
+   * are drawn at the seats agents actually sit in, so a diner lines up with a
+   * plate instead of with the middle of the wood.
+   */
+  private drawLunchTable(ctx: CanvasRenderingContext2D, p: Prop): void {
+    const r = lunchRect(p, this.scratchProp);
+
+    ctx.fillStyle = "#5c4835";
+    ctx.beginPath();
+    ctx.roundRect(r.x, r.y, r.w, r.h, 6);
+    ctx.fill();
+    ctx.fillStyle = "#42331f";
+    ctx.beginPath();
+    ctx.roundRect(r.x, r.y + r.h - 8, r.w, 8, 4);
+    ctx.fill();
+    // Boards along the length, drawn in the lighter grain colour.
+    ctx.strokeStyle = "#6b5540";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 1; i < 3; i++) {
+      const y = r.y + (LUNCH_HEIGHT / 3) * i;
+      ctx.moveTo(r.x + 6, y);
+      ctx.lineTo(r.x + r.w - 6, y);
+    }
+    ctx.stroke();
+
+    // A lighter strip along the back edge: the difference between a table top
+    // and a slab is that you can see the far edge of it.
+    ctx.fillStyle = "#6e5741";
+    ctx.fillRect(r.x + 4, r.y + 3, r.w - 8, 3);
+    // Something in the middle of the table to eat off of.
+    ctx.fillStyle = "#d9b26a";
+    ctx.beginPath();
+    ctx.roundRect(p.x - 26, r.y + 13, 52, 14, 3);
+    ctx.fill();
+    ctx.fillStyle = "#3f7a52";
+    ctx.beginPath();
+    ctx.roundRect(p.x + 40, r.y + 11, 9, 20, 3);
+    ctx.fill();
+
+    for (const seat of lunchSeats(p)) {
+      // Chair, which the diner is then drawn sitting on.
+      ctx.fillStyle = "#2a2f38";
+      ctx.beginPath();
+      ctx.roundRect(seat.x - 17, seat.y - 2, 34, 21, 5);
+      ctx.fill();
+
+      // Plate and cutlery, on the near edge of the table.
+      const plateY = r.y + r.h - 17;
+      ctx.fillStyle = "#dfe3ea";
+      ctx.beginPath();
+      ctx.arc(seat.x, plateY, 8, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#b9bfc9";
+      ctx.beginPath();
+      ctx.arc(seat.x, plateY, 4.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#9aa2ae";
+      ctx.fillRect(seat.x + 11, plateY - 5, 2, 10);
+    }
+  }
+
+  /** The meeting table, with chairs round it. */
+  private drawMeetingTable(ctx: CanvasRenderingContext2D, p: Prop): void {
+    const r = meetingRect(p, this.scratchProp);
+
+    // Chairs first: they sit behind the table on the far side and are drawn
+    // over by it, which is what puts the table between them.
+    ctx.fillStyle = "#2a2f38";
+    for (let i = 0; i < 3; i++) {
+      const x = r.x + 30 + i * ((MEETING_WIDTH - 60) / 2);
+      ctx.beginPath();
+      ctx.roundRect(x - 15, r.y - 14, 30, 20, 4);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.roundRect(x - 15, r.y + r.h - 6, 30, 20, 4);
+      ctx.fill();
+    }
+
+    ctx.fillStyle = "#33404f";
+    ctx.beginPath();
+    ctx.roundRect(r.x, r.y, r.w, r.h, 26);
+    ctx.fill();
+    ctx.fillStyle = "#2a3542";
+    ctx.beginPath();
+    ctx.roundRect(r.x, r.y + r.h - 10, r.w, 10, 10);
+    ctx.fill();
+    // A laptop and a couple of cups left on it.
+    ctx.fillStyle = "#1c222b";
+    ctx.beginPath();
+    ctx.roundRect(p.x - 16, p.y - 12, 32, 22, 3);
+    ctx.fill();
+    ctx.fillStyle = "#4d5a6b";
+    ctx.fillRect(p.x - 13, p.y - 9, 26, 13);
+    ctx.fillStyle = "#dfe3ea";
+    ctx.beginPath();
+    ctx.arc(p.x - 34, p.y + 14, 5, 0, Math.PI * 2);
+    ctx.arc(p.x + 36, p.y - 16, 5, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  /**
+   * A whiteboard, hung on the meeting room's far wall.
+   *
+   * Wide enough to be a board: the first version was fourteen units across and
+   * read as a scrollbar. It is drawn overlapping the wall, because that is
+   * where a board hangs, and it is not an obstacle -- nobody can stand in a
+   * wall to begin with.
+   */
+  private drawWhiteboard(ctx: CanvasRenderingContext2D): void {
+    const room = ROOMS.find((r) => r.id === "meeting");
+    if (!room) return;
+    const w = 26;
+    const h = 150;
+    const x = room.x + room.w - w + 6;
+    const y = room.y + 68;
+
+    ctx.fillStyle = "#8b949f";
+    ctx.beginPath();
+    ctx.roundRect(x - 2, y - 2, w + 4, h + 4, 3);
+    ctx.fill();
+    ctx.fillStyle = "#eef1f6";
+    ctx.fillRect(x, y, w, h);
+    // Scribbles, which is what stops it looking like a window.
+    ctx.strokeStyle = "#8892a0";
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    for (let i = 0; i < 6; i++) {
+      const ly = y + 16 + i * 22;
+      ctx.moveTo(x + 5, ly);
+      ctx.lineTo(x + w - 6 - (i % 3) * 5, ly);
+    }
+    ctx.stroke();
+    // A marker on the tray.
+    ctx.fillStyle = "#c0392b";
+    ctx.fillRect(x + 6, y + h + 1, 10, 3);
+  }
+
+  /** The printer, with a paper tray and a stack of output on top. */
+  private drawPrinter(ctx: CanvasRenderingContext2D, p: Prop): void {
+    const r = printerRect(p, this.scratchProp);
+    ctx.fillStyle = "#333b47";
+    ctx.beginPath();
+    ctx.roundRect(r.x, r.y, r.w, r.h, 4);
+    ctx.fill();
+    ctx.fillStyle = "#20262f";
+    ctx.fillRect(r.x + 5, r.y + PRINTER_HEIGHT * 0.5, r.w - 10, 5);
+    ctx.fillStyle = "#4fd1c5";
+    ctx.fillRect(r.x + 6, r.y + 6, 6, 3);
+    // Paper on the out-tray, which is what says printer and not bin.
+    ctx.fillStyle = "#e8ebf0";
+    ctx.beginPath();
+    ctx.roundRect(r.x + 8, r.y - 5, r.w - 16, 7, 1);
+    ctx.fill();
+  }
+
+  /** A low bookshelf along the back wall, with a row of spines. */
+  private drawShelf(ctx: CanvasRenderingContext2D, p: Prop): void {
+    const r = shelfRect(p, this.scratchProp);
+    ctx.fillStyle = "#3b2f27";
+    ctx.beginPath();
+    ctx.roundRect(r.x, r.y, r.w, r.h, 3);
+    ctx.fill();
+    const spines = ["#6ea8fe", "#5bc8a0", "#ef6f6c", "#c9a227", "#b18cf0", "#4fd1c5"];
+    for (let i = 0; i < spines.length; i++) {
+      ctx.fillStyle = spines[i];
+      ctx.fillRect(r.x + 7 + i * 19, r.y + 5, 13, SHELF_HEIGHT - 12);
+    }
+    ctx.fillStyle = "#241d18";
+    ctx.fillRect(r.x, r.y + r.h - 5, r.w, 5);
+  }
+
+  /** A potted plant. Cheap, and the corners stop looking like a warehouse. */
+  private drawPlant(ctx: CanvasRenderingContext2D, p: Prop): void {
+    ctx.fillStyle = "#6b4a35";
+    ctx.beginPath();
+    ctx.moveTo(p.x - 10, p.y + 2);
+    ctx.lineTo(p.x + 10, p.y + 2);
+    ctx.lineTo(p.x + 7, p.y + PLANT_RADIUS);
+    ctx.lineTo(p.x - 7, p.y + PLANT_RADIUS);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.fillStyle = "#3f7a52";
+    for (let i = 0; i < 3; i++) {
+      const angle = -Math.PI / 2 + (i - 1) * 0.7;
+      ctx.beginPath();
+      ctx.ellipse(
+        p.x + Math.cos(angle) * 7,
+        p.y - 6 + Math.sin(angle) * 6,
+        6,
+        10,
+        angle + Math.PI / 2,
+        0,
+        Math.PI * 2,
+      );
+      ctx.fill();
+    }
+  }
+
+  /** The ping pong table: a surface, a centre line and a net across it. */
+  private drawPongTable(ctx: CanvasRenderingContext2D, p: Prop): void {
+    const r = pongRect(p, this.scratchProp);
+
+    ctx.fillStyle = "#1f4a58";
+    ctx.beginPath();
+    ctx.roundRect(r.x, r.y, r.w, r.h, 4);
+    ctx.fill();
+
+    ctx.strokeStyle = "#3d7d8e";
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.roundRect(r.x + 3, r.y + 3, r.w - 6, r.h - 6, 3);
+    ctx.moveTo(r.x + 3, p.y);
+    ctx.lineTo(r.x + r.w - 3, p.y);
+    ctx.stroke();
+
+    // The net, standing across the middle. Drawn light so it reads as mesh.
+    ctx.fillStyle = "rgba(226,232,240,0.55)";
+    ctx.fillRect(p.x - 1, r.y - 5, 2, PONG_HEIGHT + 10);
   }
 
   private draw(now: number): void {
     const ctx = this.ctx;
     if (this.canvas.width === 0) return;
 
+    this.still = prefersReducedMotion();
     this.collectDirty();
+
+    // Nothing changed, so nothing is drawn -- not even a blit. An empty dirty
+    // list used to mean "repaint everything", which is the wrong way round: it
+    // made the cheapest frame the most expensive one, and with movement turned
+    // off every frame is that frame.
+    if (!this.needsFullRepaint && this.dirtyCount === 0) {
+      this.recordDrawn();
+      return;
+    }
 
     const full =
       this.needsFullRepaint ||
@@ -614,13 +1191,20 @@ export class OfficeRenderer {
       }
     }
 
-    // Remember where everyone was drawn, so the next frame knows what to erase.
+    this.recordDrawn();
+  }
+
+  /** Remembers where everyone was drawn, so the next frame knows what to erase. */
+  private recordDrawn(): void {
     for (const agent of this.agents) {
       agent.drawnX = agent.x;
       agent.drawnY = agent.y;
       agent.drawnState = agent.state;
+      agent.drawnSpeech = agent.speech.text;
+      agent.drawnSpeechWidth = agent.speech.width;
       agent.neverDrawn = false;
     }
+    for (const bit of this.director.bits) bit.markDrawn();
   }
 
   /** Draws everything that moves: lit monitors and the agents themselves. */
@@ -641,6 +1225,18 @@ export class OfficeRenderer {
       else if (hot) this.drawDesk(ctx, a, false, true);
     }
     for (let i = 0; i < list.length; i++) this.drawAgent(ctx, list[i], now);
+
+    // A ball in flight belongs over both players, whichever way the depth
+    // sort put them.
+    for (const bit of this.director.bits) {
+      if (bit.showsBall) this.drawBall(ctx, bit.ballX, bit.ballY);
+    }
+
+    // Bubbles last, so a line is never half-covered by whoever walks in front
+    // of the person saying it.
+    for (let i = 0; i < list.length; i++) {
+      if (list[i].speech.active) this.drawSpeech(ctx, list[i]);
+    }
   }
 
   /**
@@ -657,18 +1253,38 @@ export class OfficeRenderer {
       const moved = agent.x !== agent.drawnX || agent.y !== agent.drawnY;
       const restyled = agent.state !== agent.drawnState;
       // A working or erroring agent animates in place -- typing dots, a
-      // pulsing ring, a breathing bob -- so it is dirty even when still.
-      const animating = agent.state !== "idle";
+      // pulsing ring, a breathing bob, steam off a mug -- so it is dirty even
+      // when still. Two agents talking are not: static bubbles change no
+      // pixels once they are up.
+      const animating = agent.animates;
+      const spoke = agent.speech.text !== agent.drawnSpeech;
 
-      if (!moved && !restyled && !animating && !agent.neverDrawn) continue;
+      if (!moved && !restyled && !animating && !spoke && !agent.neverDrawn) continue;
 
       this.addDirty(agent.boxAt(agent.drawnX, agent.drawnY, this.scratchA));
       if (moved) this.addDirty(agent.boxAt(agent.x, agent.y, this.scratchB));
+
+      // A bubble is wider than the box under it, and the one being erased is
+      // the one that was drawn -- at the width it was drawn at.
+      if (agent.drawnSpeechWidth > 0) {
+        this.addDirty(
+          speechRect(agent.drawnX, agent.drawnY, agent.drawnSpeechWidth, this.scratchSpeech),
+        );
+      }
+      if (agent.speech.active) {
+        this.addDirty(speechRect(agent.x, agent.y, agent.speech.width, this.scratchSpeech));
+      }
 
       if (restyled || isLit(agent.state)) {
         const desk = deskRect(agent.deskX, agent.deskY);
         this.addDirty(desk);
       }
+    }
+
+    // The ball moves every frame it exists, so its old and new positions are
+    // both dirty; one rect covering the flight would be most of the table.
+    for (const bit of this.director.bits) {
+      if (bit.ballIsDirty) this.addDirty(bit.ballRect(this.scratchBall));
     }
 
     this.mergeDirty();
@@ -695,7 +1311,7 @@ export class OfficeRenderer {
       merged = false;
       for (let i = 0; i < this.dirtyCount; i++) {
         for (let j = i + 1; j < this.dirtyCount; j++) {
-          if (!overlaps(this.dirty[i], this.dirty[j])) continue;
+          if (!rectsOverlap(this.dirty[i], this.dirty[j])) continue;
           union(this.dirty[i], this.dirty[j]);
           // Remove j by swapping the last rect into its place.
           const last = this.dirty[this.dirtyCount - 1];
@@ -850,7 +1466,7 @@ export class OfficeRenderer {
     // Block caret, blinking on the agent's own clock so the desks are not all
     // winking in unison. Skipped on a full line, where it would overhang.
     const column = a.tail.current.length;
-    if (column < this.monitorColumns && Math.sin(a.clock * 5) > -0.2) {
+    if (column < this.monitorColumns && (this.still || Math.sin(a.clock * 5) > -0.2)) {
       ctx.fillRect(
         left + column * this.monitorAdvance,
         y - MONITOR_TEXT_SIZE * 0.42,
@@ -865,14 +1481,18 @@ export class OfficeRenderer {
   }
 
   private drawAgent(ctx: CanvasRenderingContext2D, a: OfficeAgent, now: number): void {
-    const seated = a.state === "working" || a.state === "finished";
-    // Working agents sit lower and behind the desk edge; everyone else stands.
+    // Sitting covers two different reasons for the same posture: at a desk
+    // because there is work, and at the lunch table because there is not.
+    const seated = a.state === "working" || a.state === "finished" || a.sitting;
+    // Seated agents sit lower and behind the furniture's edge; others stand.
     const bodyY = seated ? a.y - 6 : a.y;
-    const bob = seated
-      ? Math.sin(a.clock * 2.4) * 0.9
-      : a.state === "walking"
-        ? Math.abs(Math.sin(a.step)) * 2.2
-        : Math.sin(a.clock * 1.4) * 0.8;
+    const bob = this.still
+      ? 0
+      : seated
+        ? Math.sin(a.clock * 2.4) * 0.9
+        : a.state === "walking"
+          ? Math.abs(Math.sin(a.step)) * 2.2
+          : Math.sin(a.clock * 1.4) * 0.8;
 
     // Contact shadow.
     ctx.fillStyle = "rgba(0,0,0,0.28)";
@@ -904,8 +1524,15 @@ export class OfficeRenderer {
       ctx.fill();
     }
 
-    // Name tag, so a wandering agent is still identifiable away from the desk.
-    if (!seated) {
+    // Whatever an off-duty agent picked up on the way.
+    if (a.holding === "mug") this.drawMug(ctx, a, bodyY - bob);
+    else if (a.holding === "paddle") this.drawPaddle(ctx, a, bodyY - bob);
+
+    if (a.activity === "lunch" && a.sitting) this.drawEating(ctx, a, bodyY - bob);
+
+    // Name tag, so an agent away from their own desk is still identifiable --
+    // which at the lunch table they very much are.
+    if (!seated || a.sitting) {
       ctx.fillStyle = "#7d8798";
       ctx.fillText(a.name, a.x, a.y + AGENT_RADIUS * 2.1);
     }
@@ -923,7 +1550,7 @@ export class OfficeRenderer {
           a.x,
           bodyY - bob,
           "#ef6f6c",
-          0.45 + 0.55 * Math.abs(Math.sin(a.clock * 4)),
+          this.still ? 1 : 0.45 + 0.55 * Math.abs(Math.sin(a.clock * 4)),
         );
         break;
     }
@@ -975,12 +1602,164 @@ export class OfficeRenderer {
     ctx.stroke();
   }
 
+  /**
+   * A mug in the hand of whoever is on a coffee run, with steam off it.
+   *
+   * The steam is the only reason a standing agent with a mug is repainted at
+   * all (see OfficeAgent's `animates`), and it is two short strokes on the
+   * agent's own clock so the office is not breathing in unison.
+   */
+  private drawMug(ctx: CanvasRenderingContext2D, a: OfficeAgent, top: number): void {
+    const x = a.x + a.facing * AGENT_RADIUS * 1.05;
+    const y = top + AGENT_RADIUS * 0.6;
+
+    // Bigger than it was. A mug is the whole visible result of a coffee run
+    // and it has to read at a glance from across a room drawn at half scale,
+    // so it gets a pale body, a dark rim and a handle that sticks out.
+    ctx.fillStyle = "#eef1f6";
+    ctx.beginPath();
+    ctx.roundRect(x - 4.5, y - 6, 9, 11, 2);
+    ctx.fill();
+    ctx.fillStyle = "#3b2f27";
+    ctx.fillRect(x - 4.5, y - 6, 9, 2.5);
+    ctx.strokeStyle = "#eef1f6";
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.arc(x + a.facing * 5.5, y - 1, 2.6, -Math.PI / 2, Math.PI / 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = "rgba(238,241,246,0.45)";
+    ctx.lineWidth = 1.1;
+    ctx.beginPath();
+    for (let i = 0; i < 2; i++) {
+      const drift = this.still ? 0 : Math.sin(a.clock * 2.2 + i * 1.7) * 1.8;
+      ctx.moveTo(x - 2 + i * 4, y - 8);
+      ctx.lineTo(x - 2 + i * 4 + drift, y - 14);
+    }
+    ctx.stroke();
+  }
+
+  /**
+   * Eating: a forkful going up to the mouth and back down to the plate.
+   *
+   * One stroke and one dot. The plate is already painted into the table under
+   * them, so the only thing that has to move is the hand -- which is the whole
+   * difference between somebody sat at a table and somebody stood still.
+   */
+  private drawEating(ctx: CanvasRenderingContext2D, a: OfficeAgent, top: number): void {
+    // Slow, and paused at the plate: a smooth sine reads as a metronome.
+    const swing = this.still ? 0 : Math.max(0, Math.sin(a.clock * 2.1));
+    const handX = a.x + a.facing * (AGENT_RADIUS * 0.55);
+    const plateY = top + AGENT_RADIUS * 1.15;
+    const mouthY = top - AGENT_RADIUS * 0.2;
+    const handY = plateY + (mouthY - plateY) * swing;
+
+    ctx.strokeStyle = a.colourSoft;
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.moveTo(a.x + a.facing * (AGENT_RADIUS * 0.5), top + AGENT_RADIUS * 0.7);
+    ctx.lineTo(handX, handY);
+    ctx.stroke();
+
+    ctx.fillStyle = "#d9b26a";
+    ctx.beginPath();
+    ctx.arc(handX, handY - 1, 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  /** A bat, held up and waiting, for whoever is at the table. */
+  private drawPaddle(ctx: CanvasRenderingContext2D, a: OfficeAgent, top: number): void {
+    const x = a.x + a.facing * AGENT_RADIUS * 1.05;
+    // Small ready-position bob, so a player waiting for the ball is not a
+    // statue holding a bat.
+    const y = top + AGENT_RADIUS * 0.35 + (this.still ? 0 : Math.sin(a.clock * 6) * 1.4);
+
+    ctx.strokeStyle = "#c9a227";
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(x - a.facing * 2, y + 4);
+    ctx.lineTo(x, y + 1);
+    ctx.stroke();
+
+    ctx.fillStyle = "#c0392b";
+    ctx.beginPath();
+    ctx.ellipse(x, y - 2.5, 3.2, 4, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  /** The ball, mid-flight. */
+  private drawBall(ctx: CanvasRenderingContext2D, x: number, y: number): void {
+    ctx.fillStyle = "#f4f6fa";
+    ctx.beginPath();
+    ctx.arc(x, y, 2.4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  /**
+   * Says a line over an agent's head.
+   *
+   * The width is measured here, once, because measuring text is the one thing
+   * the draw loop may not do -- and because the frame a bubble vanishes has to
+   * erase it at the width it was drawn.
+   */
+  private speak(agent: OfficeAgent, text: string, seconds = SPEECH_SECONDS): void {
+    agent.speech.say(text, this.speechWidth(text), seconds);
+  }
+
+  private speechWidth(text: string): number {
+    const ctx = this.ctx;
+    ctx.font = SPEECH_FONT;
+    const width = ctx.measureText(text).width + SPEECH_PAD_X * 2;
+    // Handed back the way the rest of the scene expects it.
+    ctx.font = LABEL_FONT;
+    return width;
+  }
+
+  /**
+   * One spoken line: a light bubble with a tail, outlined in the speaker's own
+   * colour so it is obvious who said it without a second nameplate.
+   *
+   * Light on dark deliberately. The office is nearly black and the type is
+   * eleven world units, which is a handful of pixels once the room is scaled
+   * into a window -- dark text on a pale bubble is the only version of this
+   * that stays legible at that size.
+   */
+  private drawSpeech(ctx: CanvasRenderingContext2D, a: OfficeAgent): void {
+    const width = a.speech.width;
+    const r = speechRect(a.x, a.y, width, this.scratchSpeech);
+
+    ctx.fillStyle = "#e9edf5";
+    ctx.strokeStyle = a.colourSoft;
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.roundRect(r.x, r.y, width, SPEECH_HEIGHT, 6);
+    ctx.fill();
+    ctx.stroke();
+
+    // The tail, pointing back down at whoever is talking.
+    const tailY = r.y + SPEECH_HEIGHT;
+    ctx.fillStyle = "#e9edf5";
+    ctx.beginPath();
+    ctx.moveTo(a.x - 4, tailY - 1);
+    ctx.lineTo(a.x + 4, tailY - 1);
+    ctx.lineTo(a.x + a.facing * 2, tailY + 5);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.font = SPEECH_FONT;
+    ctx.fillStyle = "#161a21";
+    ctx.fillText(a.speech.text, a.x, r.y + SPEECH_HEIGHT / 2 + 0.5);
+    ctx.font = LABEL_FONT;
+  }
+
   private drawTypingDots(ctx: CanvasRenderingContext2D, a: OfficeAgent, now: number): void {
     const baseY = a.y - AGENT_RADIUS * 1.9;
     const phase = now / 220;
     for (let i = 0; i < 3; i++) {
-      const lift = Math.max(0, Math.sin(phase - i * 0.7)) * 3;
-      ctx.fillStyle = i === Math.floor(phase % 3) ? a.colourSoft : a.colourDim;
+      // Held still, the dots stay a row of three: the sign that somebody is
+      // mid-turn, without the hopping.
+      const lift = this.still ? 0 : Math.max(0, Math.sin(phase - i * 0.7)) * 3;
+      ctx.fillStyle = !this.still && i === Math.floor(phase % 3) ? a.colourSoft : a.colourDim;
       ctx.beginPath();
       ctx.arc(a.x - 7 + i * 7, baseY - lift, 2, 0, Math.PI * 2);
       ctx.fill();
@@ -1004,15 +1783,21 @@ export class OfficeRenderer {
   }
 }
 
+/**
+ * A room's floor colour.
+ *
+ * Shared by the floors and the doorways, because a doorway is floor carried
+ * through a wall and the two must not drift apart.
+ */
+function floorColour(room: (typeof ROOMS)[number]["id"]): string {
+  if (room === "break") return "#1e1b19";
+  if (room === "meeting") return "#171a21";
+  return "#171b22";
+}
+
 /** True when the agent's monitor should be tinted. */
 function isLit(state: VisualState): boolean {
   return state === "working" || state === "finished";
-}
-
-function overlaps(a: Rect, b: Rect): boolean {
-  return (
-    a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
-  );
 }
 
 /** Grows a to cover b. */

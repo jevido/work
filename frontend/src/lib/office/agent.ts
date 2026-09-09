@@ -1,10 +1,15 @@
+import { DISPATCH_HOLD_SECONDS, SpeechBubble } from "./speech";
 import { MonitorTail } from "./tail";
 import {
   AGENT_RADIUS,
   BOUNDS,
+  MAX_LEGS,
   WALK_SPEED,
   isWalkable,
-  pathIsClear,
+  planDoors,
+  planRoute,
+  prefersReducedMotion,
+  type Point,
   type Rect,
 } from "./world";
 
@@ -16,6 +21,20 @@ export type VisualState = "idle" | "walking" | "working" | "finished" | "error";
 
 /** Where the agent is trying to get to, which outlives any single walk. */
 type Intent = "wander" | "desk";
+
+/**
+ * What an off-duty agent has been talked into, or "none" for plain wandering.
+ *
+ * This is a sub-state of "idle", not a state of its own, and that distinction
+ * is the whole design: the backend still owns whether an agent is working, and
+ * an activity only ever refines the gap in between. Every method that takes a
+ * task calls `release`, so a bit cannot survive a dispatch, and the director
+ * (see idle.ts) is the only thing that ever sets one.
+ */
+export type IdleActivity = "none" | "coffee" | "lunch" | "chat" | "pingpong";
+
+/** What an agent is carrying, drawn in their hand. */
+export type Held = "none" | "mug" | "paddle";
 
 /** How far outside its own bounds an agent's drawing can reach. */
 const BOX_HALF_WIDTH = 46;
@@ -70,16 +89,57 @@ export class OfficeAgent {
   targetY: number;
 
   /**
-   * One optional stop on the way to the target, used to walk around a desk
-   * instead of through it. Simpler than a path: two straight legs are enough
-   * in a room this shape, and it costs no allocation.
+   * The planned walk: the points to hit, in order, of which the last is the
+   * target. Filled by the planner in world.ts, which knows about doorways and
+   * furniture; walking it is just "head for the next one".
+   *
+   * Preallocated and rewritten in place. A plan is made when a destination is
+   * chosen -- a few times a minute per agent -- and never while walking.
    */
-  private wayX = 0;
-  private wayY = 0;
-  private hasWaypoint = false;
+  private readonly legs: Point[] = Array.from({ length: MAX_LEGS }, () => ({ x: 0, y: 0 }));
+  private legCount = 0;
+  private legIndex = 0;
 
   state: VisualState = "idle";
   intent: Intent = "wander";
+
+  /** What they are up to while off duty. Only ever set while state is "idle". */
+  activity: IdleActivity = "none";
+
+  /** What is in their hand. A mug outlives the errand that fetched it. */
+  holding: Held = "none";
+
+  /** Seconds left before whatever they are holding is finished with. */
+  private carrySeconds = 0;
+
+  /**
+   * True when the agent is sat down somewhere that is not their desk -- at the
+   * lunch table, for now.
+   *
+   * Separate from the seated look a working agent has, because that one is
+   * derived from the task state and this one is a bit's business. Both end up
+   * in the same place in the renderer: lower body, no walk cycle.
+   */
+  sitting = false;
+
+  /**
+   * The line they are saying, if any.
+   *
+   * Owned by the agent rather than by the bit that caused it, because a line
+   * has to outlive its cause: a dispatched agent keeps answering Anton while
+   * they cross the room, and a chat interrupted by a task should let its last
+   * word fade rather than blink out.
+   */
+  readonly speech = new SpeechBubble();
+
+  /**
+   * Seconds a dispatched agent stays on their feet before starting work.
+   *
+   * A task arriving and a monitor lighting up in the same frame reads as the
+   * agent having answered before being asked. The hold is what puts the spoken
+   * line first; the walk to the desk usually covers it entirely.
+   */
+  private speakHold = 0;
 
   /** Seconds remaining in the current pause, hold or celebration. */
   timer = 0;
@@ -94,6 +154,16 @@ export class OfficeAgent {
   drawnX = 0;
   drawnY = 0;
   drawnState: VisualState = "idle";
+  /**
+   * The bubble as it was last drawn.
+   *
+   * A bubble is wider than the agent's own box and it does not animate, so the
+   * frame it changes is the only frame that touches those pixels -- and that
+   * frame has to erase the bubble that is on screen, not the one replacing it.
+   * The old width is the only thing that knows how much to wipe.
+   */
+  drawnSpeech = "";
+  drawnSpeechWidth = 0;
   /** True until the agent has been drawn once. */
   neverDrawn = true;
 
@@ -120,6 +190,29 @@ export class OfficeAgent {
     return true;
   }
 
+  /**
+   * True when the agent animates in place, and so has to be repainted even
+   * standing still: steam off a mug, a paddle waiting for the ball, typing
+   * dots, a pulsing error ring.
+   *
+   * A conversation is deliberately not in here. Two agents standing with
+   * static bubbles change no pixels, and an office at rest should cost the
+   * same whether or not anybody is talking.
+   */
+  get animates(): boolean {
+    // Nothing oscillates when movement is unwelcome, so nothing has to be
+    // repainted for it. A working agent is the exception, and not really an
+    // exception: their monitor is filling with text, and text arriving is
+    // content rather than decoration.
+    if (prefersReducedMotion()) return this.state === "working";
+    if (this.state !== "idle") return true;
+    // Steam off a mug, a fork going up and down, a bat held ready. A mug is in
+    // here whether or not the errand that fetched it is still running: it goes
+    // wandering with them and it is still steaming.
+    if (this.holding !== "none") return true;
+    return this.activity === "lunch" || this.activity === "pingpong";
+  }
+
   constructor(opts: {
     id: string;
     name: string;
@@ -139,8 +232,12 @@ export class OfficeAgent {
     this.seatX = opts.seatX;
     this.seatY = opts.seatY;
 
+    // At the seat, not in front of it. A bottom-row desk's seat is already
+    // near the back of the bullpen, and spawning an agent further out than
+    // that put them off the floor entirely -- where nothing is walkable, no
+    // route can be planned, and they stood still for the rest of the session.
     this.x = opts.seatX;
-    this.y = opts.seatY + 60;
+    this.y = opts.seatY;
     this.targetX = this.x;
     this.targetY = this.y;
     this.drawnX = this.x;
@@ -154,21 +251,31 @@ export class OfficeAgent {
    */
   setObstacles(obstacles: readonly Rect[]): void {
     this.obstacles = obstacles;
-    // Being spawned inside a desk is possible if the layout changed, so nudge
-    // clear of one rather than starting stuck.
+    // Being spawned inside a desk, or in a doorway a wall has since been drawn
+    // across, is possible if the layout changed. Nudge clear rather than
+    // starting stuck: an agent standing somewhere unwalkable can plan no route
+    // out of it, so it is stuck for good.
     if (!isWalkable(obstacles, this.x, this.y)) {
-      for (let drop = 20; drop <= 160; drop += 20) {
-        if (isWalkable(obstacles, this.seatX, this.seatY + drop)) {
-          this.x = this.seatX;
-          this.y = this.seatY + drop;
-          break;
-        }
+      for (let step = 20; step <= 180; step += 20) {
+        // Out from the desk first, then back towards it: which way is clear
+        // depends on whether the desk is at the front of the room or the back.
+        if (this.tryStand(obstacles, this.seatX, this.seatY + step)) break;
+        if (this.tryStand(obstacles, this.seatX, this.seatY - step)) break;
       }
       this.targetX = this.x;
       this.targetY = this.y;
       this.drawnX = this.x;
       this.drawnY = this.y;
+      this.legCount = 0;
     }
+  }
+
+  /** Stands the agent at a spot if it is walkable. True when it took. */
+  private tryStand(obstacles: readonly Rect[], x: number, y: number): boolean {
+    if (!isWalkable(obstacles, x, y)) return false;
+    this.x = x;
+    this.y = y;
+    return true;
   }
 
   /** The rectangle this agent's drawing occupies, in world units. */
@@ -180,29 +287,53 @@ export class OfficeAgent {
     return out;
   }
 
-  /** Send the agent to their desk and put them to work when they arrive. */
+  /**
+   * Send the agent to their desk and put them to work when they arrive.
+   *
+   * Whatever they were doing off duty ends here, mug included. The line they
+   * answer with is set by the renderer, which is the only place that can
+   * measure a bubble; this only reserves the beat it needs to be read in.
+   */
   assign(): void {
+    this.release();
+    this.putDown();
     this.intent = "desk";
     this.state = "walking";
-    this.headTo(this.seatX, this.seatY);
+    this.speakHold = DISPATCH_HOLD_SECONDS;
+    this.headForDesk();
   }
 
-  /** Already at the desk and producing output. */
+  /**
+   * At work, or on the way there.
+   *
+   * Measured against the seat rather than the current target, because an agent
+   * who was at the coffee machine when this arrived is standing still and
+   * "arrived" -- at the wrong end of the room. The walk is the same one
+   * `assign` starts, and the arrival check is what honours the spoken line.
+   */
   work(): void {
+    this.release();
+    this.putDown();
     this.intent = "desk";
-    if (this.state !== "working") {
-      this.state = this.nearTarget(6) ? "working" : "walking";
+    if (this.state === "working") return;
+    if (this.nearSeat(6) && this.speakHold <= 0) {
+      this.state = "working";
+      return;
     }
+    this.state = "walking";
+    this.headForDesk();
   }
 
   /** Task done: hold at the desk briefly, then drift back to wandering. */
   finish(): void {
+    this.release();
     this.state = "finished";
     this.timer = 1.4;
   }
 
   /** Task failed: stay put, show it, then drift back to wandering. */
   fail(): void {
+    this.release();
     this.state = "error";
     this.timer = 2.6;
   }
@@ -219,7 +350,7 @@ export class OfficeAgent {
     if (state === "working") {
       this.intent = "desk";
       this.state = "working";
-      this.hasWaypoint = false;
+      this.legCount = 0;
       this.x = this.targetX = this.drawnX = this.seatX;
       this.y = this.targetY = this.drawnY = this.seatY;
       return;
@@ -229,9 +360,79 @@ export class OfficeAgent {
 
   /** Back to aimless wandering. */
   idle(): void {
+    this.release();
     this.intent = "wander";
     this.state = "idle";
     this.timer = rand(0.3, 1.2);
+  }
+
+  /**
+   * Takes the agent on as part of an idle bit and sends them to a spot.
+   *
+   * False when there is no way through the furniture from where they are
+   * standing, which is the director's signal to drop the whole idea rather
+   * than walk somebody through a desk to reach a ping pong table.
+   */
+  join(activity: IdleActivity, x: number, y: number): boolean {
+    if (!this.headTo(x, y)) return false;
+    this.activity = activity;
+    this.intent = "wander";
+    this.state = "walking";
+    return true;
+  }
+
+  /** Moves an agent already in a bit to another spot. */
+  goto(x: number, y: number): boolean {
+    if (!this.headTo(x, y)) return false;
+    this.state = "walking";
+    return true;
+  }
+
+  /**
+   * True when a bit's walk has landed and the agent is standing waiting.
+   *
+   * Walking to a bit's spot ends in "idle" like any other stroll, and the idle
+   * branch of `update` leaves an agent with an activity exactly where it was
+   * put -- so standing still, with a bit in progress, is the arrival signal.
+   */
+  get settled(): boolean {
+    return this.activity !== "none" && this.state === "idle";
+  }
+
+  /** Turns to look at something to the left or right of them. */
+  face(x: number): void {
+    if (Math.abs(x - this.x) < 1) return;
+    this.facing = x > this.x ? 1 : -1;
+  }
+
+  /**
+   * Ends any idle bit, leaving the agent standing where they are.
+   *
+   * Deliberately touches nothing but the idle sub-state: it is called from
+   * every method that takes a task, and a mug being put down must not also
+   * undo the walk to the desk that put it down.
+   */
+  release(): void {
+    if (this.activity === "none") return;
+    this.activity = "none";
+    this.sitting = false;
+    // The mug stays. Fetching a coffee and then carrying it about is the whole
+    // point of the errand, so it outlives the bit and expires on its own timer;
+    // a bat is the table's, and goes back on it.
+    if (this.holding === "paddle") this.holding = "none";
+    this.timer = rand(0.3, 1.2);
+  }
+
+  /** Puts something in the agent's hand for a while. */
+  carry(item: Held, seconds: number): void {
+    this.holding = item;
+    this.carrySeconds = seconds;
+  }
+
+  /** Empties their hands, whatever was in them. */
+  putDown(): void {
+    this.holding = "none";
+    this.carrySeconds = 0;
   }
 
   /**
@@ -240,9 +441,25 @@ export class OfficeAgent {
    */
   update(dt: number): void {
     this.clock += dt;
+    this.speech.update(dt);
+    if (this.speakHold > 0) this.speakHold -= dt;
+    if (this.carrySeconds > 0) {
+      this.carrySeconds -= dt;
+      if (this.carrySeconds <= 0) this.putDown();
+    }
 
     switch (this.state) {
       case "idle": {
+        // Somebody in a bit stands where the director put them until it says
+        // otherwise. This is what stops the wander below from walking an agent
+        // out of a conversation it just walked them into.
+        if (this.activity !== "none") return;
+
+        // No strolling for somebody who asked for less movement. They stay
+        // where they are; the office is still a room full of people at desks,
+        // it just stops fidgeting.
+        if (prefersReducedMotion()) return;
+
         // Standing still between strolls.
         this.timer -= dt;
         if (this.timer <= 0) {
@@ -260,6 +477,10 @@ export class OfficeAgent {
         const arrived = this.moveTowardsTarget(dt);
         if (!arrived) return;
         if (this.intent === "desk") {
+          // Standing at the desk, still answering. The bubble goes up the
+          // moment the task lands and this is what keeps them on their feet
+          // under it, so the office never lights a monitor mid-sentence.
+          if (this.speakHold > 0) return;
           this.state = "working";
         } else {
           this.state = "idle";
@@ -283,63 +504,80 @@ export class OfficeAgent {
   }
 
   /**
-   * Aims at a destination, inserting one intermediate stop if the direct line
-   * crosses a desk.
+   * Aims at a destination, planning a walk that respects walls and furniture.
    *
-   * The detour tries the two L-shaped routes -- across then down, or down then
-   * across -- which is enough to get around a rectangle in an open room.
+   * Returns false when there is no clear route, which is the signal to want
+   * something else instead: an idle agent has better options than shouldering
+   * through a desk, and a bit that cannot reach its table should not start.
    */
-  private headTo(x: number, y: number): void {
+  private headTo(x: number, y: number): boolean {
     this.targetX = x;
     this.targetY = y;
-    this.hasWaypoint = false;
-
-    if (pathIsClear(this.obstacles, this.x, this.y, x, y)) return;
-
-    const corners = [
-      [x, this.y],
-      [this.x, y],
-    ] as const;
-    for (const [cx, cy] of corners) {
-      if (
-        isWalkable(this.obstacles, cx, cy) &&
-        pathIsClear(this.obstacles, this.x, this.y, cx, cy) &&
-        pathIsClear(this.obstacles, cx, cy, x, y)
-      ) {
-        this.wayX = cx;
-        this.wayY = cy;
-        this.hasWaypoint = true;
-        return;
-      }
-    }
-    // No clear route found. Walking the direct line would cut a corner off a
-    // desk, so give up on this destination and let the caller's state machine
-    // pick another.
+    this.legIndex = 0;
+    this.legCount = planRoute(this.obstacles, this.x, this.y, x, y, this.legs);
+    return this.legCount > 0;
   }
 
-  /** True when the agent is close enough to the target to count as arrived. */
-  private nearTarget(epsilon: number): boolean {
-    const dx = this.targetX - this.x;
-    const dy = this.targetY - this.y;
+  /**
+   * Aims at the agent's own desk, whatever is in the way.
+   *
+   * A task is not a suggestion, so this cannot fail: if no clear route exists
+   * it falls back to the doorways plus a straight line, which may clip the
+   * corner of somebody else's desk but will never walk through a wall.
+   */
+  private headForDesk(): void {
+    this.targetX = this.seatX;
+    this.targetY = this.seatY;
+    this.legIndex = 0;
+
+    // Movement unwelcome: skip the journey and keep the destination, which is
+    // the usual bargain for a transition somebody has opted out of. They are
+    // at their desk, on their feet, with their line still up -- the arrival
+    // check in `update` puts them to work when it has been read.
+    if (prefersReducedMotion()) {
+      this.legCount = 0;
+      this.x = this.seatX;
+      this.y = this.seatY;
+      return;
+    }
+
+    this.legCount = planRoute(
+      this.obstacles,
+      this.x,
+      this.y,
+      this.seatX,
+      this.seatY,
+      this.legs,
+    );
+    if (this.legCount === 0) {
+      this.legCount = planDoors(this.x, this.y, this.seatX, this.seatY, this.legs);
+    }
+  }
+
+  /** True when the agent is close enough to their own seat to sit down. */
+  private nearSeat(epsilon: number): boolean {
+    const dx = this.seatX - this.x;
+    const dy = this.seatY - this.y;
     return dx * dx + dy * dy <= epsilon * epsilon;
   }
 
-  /** Moves along the current leg. Returns true once the target is reached. */
+  /** Walks the plan. Returns true once the last point is reached. */
   private moveTowardsTarget(dt: number): boolean {
-    const goalX = this.hasWaypoint ? this.wayX : this.targetX;
-    const goalY = this.hasWaypoint ? this.wayY : this.targetY;
+    if (this.legCount === 0) return true;
+    const leg = this.legs[this.legIndex];
 
-    const dx = goalX - this.x;
-    const dy = goalY - this.y;
+    const dx = leg.x - this.x;
+    const dy = leg.y - this.y;
     const dist = Math.sqrt(dx * dx + dy * dy);
     if (dist < 1.5) {
-      this.x = goalX;
-      this.y = goalY;
-      if (this.hasWaypoint) {
-        // First leg done; carry on to the real target.
-        this.hasWaypoint = false;
+      this.x = leg.x;
+      this.y = leg.y;
+      if (this.legIndex < this.legCount - 1) {
+        // Corner turned, or doorway crossed; on to the next one.
+        this.legIndex++;
         return false;
       }
+      this.legCount = 0;
       this.step = 0;
       return true;
     }
@@ -375,11 +613,7 @@ export class OfficeAgent {
         BOUNDS.maxY - AGENT_RADIUS,
       );
       if (!isWalkable(this.obstacles, x, y)) continue;
-      if (!pathIsClear(this.obstacles, this.x, this.y, x, y)) continue;
-      this.targetX = x;
-      this.targetY = y;
-      this.hasWaypoint = false;
-      return true;
+      if (this.headTo(x, y)) return true;
     }
     return false;
   }
