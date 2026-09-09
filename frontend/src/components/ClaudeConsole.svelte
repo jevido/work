@@ -14,6 +14,36 @@
   let promptEl: HTMLTextAreaElement | undefined = $state();
   let pinned = true;
 
+  /** True while the change review is on screen. */
+  let reviewing = $state(false);
+  /** The button that opened it, so closing hands focus back to it. */
+  let reviewOpener: HTMLElement | null = null;
+
+  /**
+   * What the header button says, and what a screen reader is told.
+   *
+   * The count is the whole label: "Changes" alone does not say whether there
+   * are any, and this button is the only trace the review leaves once the diff
+   * stops living in the transcript.
+   */
+  const changed = $derived(review.files.length);
+
+  function openReview(from: EventTarget | null) {
+    reviewOpener = from instanceof HTMLElement ? from : null;
+    // Opening it is reading the news, whatever is done next.
+    review.markSeen();
+    reviewing = true;
+  }
+
+  function closeReview() {
+    reviewing = false;
+    // Reverting the last file empties the list, which unmounts the button that
+    // opened this. Focus goes to the composer rather than nowhere.
+    const back = reviewOpener?.isConnected ? reviewOpener : promptEl;
+    reviewOpener = null;
+    back?.focus();
+  }
+
   const statusLabel: Record<RunStatus, string> = {
     idle: "Ready",
     planning: "Routing",
@@ -104,8 +134,44 @@
 <section class="console">
   <header>
     <div class="title">Claude</div>
+
+    <!-- The review's only trace in the console. It sits with the run status
+         because that is what it is: something the run did, alongside how the
+         run is going. Absent when nothing has changed -- an affordance for a
+         review of nothing is worse than none. -->
+    {#if changed > 0}
+      <button
+        class="changes"
+        class:unseen={review.unseen}
+        onclick={(event) => openReview(event.currentTarget)}
+        aria-haspopup="dialog"
+        aria-expanded={reviewing}
+        title="Review what the run changed on disk"
+      >
+        {#if review.unseen}<span class="pip" aria-hidden="true"></span>{/if}
+        <span class="n">{changed}</span>
+        changed {changed === 1 ? "file" : "files"}
+      </button>
+    {:else if !review.tracked}
+      <!-- Outside a git repository there is nothing to diff against and revert
+           cannot put a file back, so the count would sit at zero for the wrong
+           reason. Said once, quietly: a run still works, it just cannot be
+           reviewed afterwards. -->
+      <span class="untracked" title="Work reviews changes with git, and this folder is not a repository">
+        no change review — not a git repository
+      </span>
+    {/if}
+
     <div class="status" data-state={session.status}>{statusLabel[session.status]}</div>
   </header>
+
+  <!-- Lives outside the {#if} above so it exists before it has anything to
+       say: a region announced into being is a region nobody hears. -->
+  <p class="announce" role="status">
+    {#if review.unseen}
+      {changed} {changed === 1 ? "file" : "files"} changed on disk — review pending.
+    {/if}
+  </p>
 
   <div class="scroller" bind:this={scroller} onscroll={onScroll}>
     {#if session.isEmpty}
@@ -162,8 +228,6 @@
         </div>
       {/if}
     {/each}
-
-    <ChangeReview {review} />
   </div>
 
   <div class="composer">
@@ -196,6 +260,12 @@
   </div>
 </section>
 
+<!-- Fixed and centred on the window, so it is not held to the width of the
+     column it opens from. -->
+{#if reviewing}
+  <ChangeReview {review} onclose={closeReview} />
+{/if}
+
 <style>
   .console {
     display: flex;
@@ -211,15 +281,88 @@
   header {
     display: flex;
     align-items: center;
-    justify-content: space-between;
     gap: 8px;
     padding: 10px 12px;
     border-bottom: 1px solid var(--line);
+    /* Pinned to the height of a line of title text. The review button is the
+       only thing in here that comes and goes, and a header that grows when it
+       appears pushes the whole transcript down to announce itself -- which is
+       the interruption moving the review out of the transcript was meant to
+       end. */
+    min-height: 40px;
   }
 
   .title {
     font-weight: 600;
     letter-spacing: 0.01em;
+    /* Pushes the review button and the status to the right edge together, so
+       the status does not move as the button comes and goes. */
+    margin-right: auto;
+  }
+
+  /* Quiet by default: changes that have been looked at are a fact about the
+     run, not something being asked of you. */
+  .changes {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex: none;
+    /* Sized to sit inside the header's line box rather than to stretch it: at
+       the inherited line-height this pill is 23px tall against a 19.5px line,
+       and the 3px it gained was the header's to lose. */
+    padding: 3px 8px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--panel-2);
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1;
+    cursor: pointer;
+  }
+
+  .changes .n {
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .changes:hover {
+    border-color: #3a4250;
+    color: var(--text);
+  }
+
+  /* Until it has been opened once, it is news. Same accent the office uses for
+     work in progress, plus a dot -- the state survives a screenshot and a
+     reader who cannot see the colour. */
+  .changes.unseen {
+    border-color: var(--accent);
+    color: var(--text);
+  }
+
+  .changes.unseen .pip {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+
+  /* Not a button and not news: nothing here can be opened, so it must not look
+     like the pill it stands in for. */
+  .untracked {
+    flex: none;
+    color: var(--muted);
+    font-size: 11px;
+  }
+
+  /* Announced, never drawn: the button carries this on screen. */
+  .announce {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
 
   .status {

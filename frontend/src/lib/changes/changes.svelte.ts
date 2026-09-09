@@ -31,14 +31,38 @@ export class ChangeReview {
 
   isEmpty = $derived(this.files.length === 0);
 
+  /**
+   * Whether files have been touched since the review was last looked at.
+   *
+   * The diff lives behind a button now, so the button has to carry the news as
+   * well as the count: "3 files" that have been read is a different thing to
+   * "3 files" that landed while you were reading the conversation, and a bare
+   * number cannot tell them apart.
+   */
+  unseen = $state(false);
+
   listen(): () => void {
     return Events.On(RUN_CHANGES, (e) => {
       this.tracked = e.data.tracked ?? false;
-      this.files = (e.data.changes ?? []).map(toFileChange);
+      const next = (e.data.changes ?? []).map(toFileChange);
+      // A path that was not in the list before is news. A list that only lost
+      // paths is the revert that was just asked for, republished -- flagging
+      // that would light the button up in answer to your own click.
+      const known = new Set(this.files.map((f) => f.path));
+      if (next.some((f) => !known.has(f.path))) this.unseen = true;
+      // Nothing left to review is nothing left to be behind on.
+      if (next.length === 0) this.unseen = false;
+      this.files = next;
     });
   }
 
-  /** Reloads the list, for when the app starts mid-conversation. */
+  /**
+   * Reloads the list, for when the app starts mid-conversation.
+   *
+   * Deliberately not news: these are changes that were already on disk when
+   * the window opened, so the button shows the count without claiming
+   * something just happened.
+   */
   async refresh(): Promise<void> {
     try {
       const list = await Workbench.Changes();
@@ -46,6 +70,11 @@ export class ChangeReview {
     } catch {
       // The office already reports an unreachable backend.
     }
+  }
+
+  /** Called when the review is opened: the news has been read. */
+  markSeen(): void {
+    this.unseen = false;
   }
 
   /** Puts one file back the way it was before the run. */

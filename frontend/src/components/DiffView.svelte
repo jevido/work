@@ -1,12 +1,29 @@
 <script lang="ts">
   import type { DiffHunkLine } from "../lib/diff/diff";
 
-  let { lines, path = "" }: { lines: DiffHunkLine[]; path?: string } = $props();
+  let {
+    lines,
+    path = "",
+    capped = true,
+  }: {
+    lines: DiffHunkLine[];
+    path?: string;
+    /**
+     * Whether the diff gets its own scrollbar once it is tall.
+     *
+     * True where a diff appears inside something else being read -- a tool call
+     * in the transcript, where an unbounded diff would bury the conversation it
+     * is part of. False where reading the diff is the whole job and the
+     * container already scrolls: a 320px box inside a 640px window is a
+     * scroller inside a scroller, which traps the wheel and wastes the room.
+     */
+    capped?: boolean;
+  } = $props();
 </script>
 
 <div class="diff">
   {#if path}<div class="path">{path}</div>{/if}
-  <div class="lines">
+  <div class="lines" class:capped>
     {#each lines as line, i (i)}
       {#if line.skipped}
         <div class="gap">⋯ {line.skipped} unchanged</div>
@@ -42,12 +59,15 @@
   }
 
   .lines {
-    max-height: 320px;
-    overflow: auto;
     font-family: ui-monospace, "SF Mono", Menlo, monospace;
     font-size: 11px;
     line-height: 1.5;
     user-select: text;
+  }
+
+  .lines.capped {
+    max-height: 320px;
+    overflow: auto;
   }
 
   .line {

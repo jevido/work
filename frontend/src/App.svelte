@@ -55,6 +55,18 @@
     void roster.load();
   });
 
+  // Changes already on disk when the window opened.
+  //
+  // The review lives behind a button now, and a button is the only thing that
+  // says there is anything to review -- so it has to be right on a window that
+  // opened into the middle of a run, not just on one that watched the run
+  // happen. `run:changes` only fires when something changes, so without this a
+  // dev reload mid-run leaves the header claiming the run touched nothing.
+  $effect(() => {
+    if (!config.open) return;
+    void review.refresh();
+  });
+
   // The console labels turns and plan steps by agent, so it follows the roster
   // rather than being handed a copy of it at startup.
   $effect(() => session.setAgents(roster.identities));
