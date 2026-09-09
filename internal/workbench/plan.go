@@ -27,6 +27,12 @@ type PlanStep struct {
 	// so "put the renderer work back on T4" continues that task rather than
 	// duplicating it.
 	TaskID string `json:"taskId,omitempty"`
+	// Files are the paths this step owns for as long as it runs. Steps run at
+	// the same time in one working tree, so this is what stops two agents
+	// editing the same file: a step whose files are taken waits for them. A
+	// directory or a glob claims everything under it. Empty means the step
+	// needs nothing of its own, which is right for reading and answering.
+	Files []string `json:"files,omitempty"`
 }
 
 // BoardUpdate is Anton editing a card without running anything: closing a task
@@ -77,7 +83,15 @@ func (p *Plan) normalise(reg Registry, known func(taskID string) bool) {
 			taskID = ""
 		}
 		seen[id] = true
-		kept = append(kept, PlanStep{AgentID: id, Task: task, TaskID: taskID})
+		kept = append(kept, PlanStep{
+			AgentID: id,
+			Task:    task,
+			TaskID:  taskID,
+			// Overlapping claims are not dropped here. Two steps that both
+			// want a file are still both wanted work; delegate runs them one
+			// after the other instead of throwing one away.
+			Files: cleanPaths(step.Files),
+		})
 		if len(kept) == maxSteps {
 			break
 		}
@@ -158,8 +172,16 @@ func planSchema(reg Registry) (string, error) {
 							"description": "An existing board task this continues, " +
 								"e.g. T3. Omit to open a new task.",
 						},
+						"files": map[string]any{
+							"type":  "array",
+							"items": map[string]any{"type": "string"},
+							"description": "Repo-relative paths this step will edit, " +
+								"which it owns while it runs. A directory or a glob " +
+								"claims everything under it. No two steps may name " +
+								"the same file. Empty only if the step edits nothing.",
+						},
 					},
-					"required": []string{"agentId", "task"},
+					"required": []string{"agentId", "task", "files"},
 				},
 			},
 			"updates": map[string]any{
@@ -220,6 +242,21 @@ func planPrompt(reg Registry, task string, followUp bool, cards []board.Card) st
 	b.WriteString("another specialist's answer, since they work at the same time. ")
 	b.WriteString("Do not delegate for the sake of it.\n")
 
+	b.WriteString("\nThey share one working tree and they work at the same time, ")
+	b.WriteString("so split the task by file, not only by topic. Give every step a ")
+	b.WriteString("\"files\" list naming the paths it will edit, and do not let two ")
+	b.WriteString("steps name the same file, the same directory, or overlapping ")
+	b.WriteString("globs. Prefer whole files or whole directories over guesses at ")
+	b.WriteString("which lines somebody needs.\n")
+	b.WriteString("When the work cannot be cut along file lines -- two halves of one ")
+	b.WriteString("file, or a rename that reaches everywhere -- give the whole of it ")
+	b.WriteString("to one specialist rather than splitting it. Two agents in one ")
+	b.WriteString("file is worse than one agent doing more.\n")
+	b.WriteString("A step that only reads or only answers can leave \"files\" empty. ")
+	b.WriteString("A step whose files are taken waits for them and its card shows ")
+	b.WriteString("as blocked until they are free, so an overlap you leave in costs ")
+	b.WriteString("the run wall-clock time rather than losing an edit.\n")
+
 	b.WriteString("\nYou own the task board. It is the user's window into what ")
 	b.WriteString("you have assigned, and they refer to tasks by ID.\n")
 	if len(cards) == 0 {
@@ -256,6 +293,26 @@ func synthesisPrompt(task string, results []stepResult) string {
 
 	for _, r := range results {
 		fmt.Fprintf(&b, "\n--- %s was asked: %s\n", r.AgentName, r.Task)
+		if r.Waited != "" {
+			fmt.Fprintf(&b,
+				"%s had to queue behind %s for the files, so they ran one after "+
+					"the other rather than at the same time.\n",
+				r.AgentName, r.Waited)
+		}
+		if r.BlockedBy != "" {
+			fmt.Fprintf(&b,
+				"%s reported being blocked by %s on %s.\n",
+				r.AgentName, r.BlockedBy, strings.Join(r.BlockedOn, ", "))
+			if r.Retried {
+				fmt.Fprintf(&b,
+					"The files came free and %s was given the work again; "+
+						"what follows is that second attempt.\n", r.AgentName)
+			} else {
+				fmt.Fprintf(&b,
+					"%s did not get another run at it, so this share of the "+
+						"task is unfinished and you should say so.\n", r.AgentName)
+			}
+		}
 		if r.Err != "" {
 			fmt.Fprintf(&b, "%s failed: %s\n", r.AgentName, r.Err)
 			continue
@@ -276,6 +333,17 @@ type stepResult struct {
 	Task      string
 	Output    string
 	Err       string
+	// Waited names the agent this step queued behind before it could start,
+	// because its files were already taken.
+	Waited string
+	// BlockedBy names the agent this step stopped for after it had started:
+	// the specialist reported it could not finish because somebody else was
+	// in a file it needed. BlockedOn are the files it named.
+	BlockedBy string
+	BlockedOn []string
+	// Retried marks a step that was blocked, waited, and ran again. Its Output
+	// is the second attempt.
+	Retried bool
 }
 
 func specialistIDs(reg Registry) []string {
@@ -288,4 +356,112 @@ func specialistIDs(reg Registry) []string {
 		ids = append(ids, a.ID)
 	}
 	return ids
+}
+
+// blockedMarker is the line a specialist ends its reply with when it cannot
+// finish because somebody else is in a file it needs.
+//
+// A specialist's turn is prose, not schema-constrained like Anton's, so a
+// sentinel line is the only channel it has. It is read from the end of the
+// reply and only the paths are trusted: who holds them is answered by the
+// claims table, which knows, rather than by the agent, which is guessing.
+const blockedMarker = "BLOCKED:"
+
+// maxBlockedRetries is how many times one step may report itself blocked,
+// wait, and run again. One is enough for the case this exists for -- a file
+// held by a colleague who is about to finish -- and it bounds a pair of agents
+// who would otherwise take turns blocking each other for the whole run.
+const maxBlockedRetries = 1
+
+// stepPrompt is the task as the specialist receives it: their share of the
+// work, the files that are theirs while they run, and the way out if they find
+// somebody else in one.
+//
+// held lists what other agents are holding right now. It is a snapshot taken
+// as the step starts, so it is advice rather than a guarantee -- which is
+// exactly why the marker exists as well.
+func stepPrompt(task string, files, held []string) string {
+	var b strings.Builder
+	b.WriteString(task)
+
+	if len(files) > 0 {
+		b.WriteString("\n\nThese files are yours for this task, and nobody else ")
+		b.WriteString("is in them:\n")
+		for _, f := range files {
+			fmt.Fprintf(&b, "- %s\n", f)
+		}
+		b.WriteString("\nOther specialists are working in this tree at the same ")
+		b.WriteString("time, so do not edit anything outside that list. If the ")
+		b.WriteString("task turns out to need a file that is not yours, say so ")
+		b.WriteString("rather than taking it.\n")
+	} else {
+		b.WriteString("\n\nNo files are reserved for you on this task. Other ")
+		b.WriteString("specialists are editing this tree right now, so read ")
+		b.WriteString("freely but do not write without saying which file you need.\n")
+	}
+
+	if len(held) > 0 {
+		b.WriteString("\nHeld by other specialists right now:\n")
+		for _, f := range held {
+			fmt.Fprintf(&b, "- %s\n", f)
+		}
+	}
+
+	b.WriteString("\nIf you cannot finish because a file you need is held by ")
+	b.WriteString("someone else, stop there. Report what you did get done, then ")
+	b.WriteString("end your reply with one final line naming only the paths you ")
+	b.WriteString("are waiting on:\n\n    ")
+	b.WriteString(blockedMarker)
+	b.WriteString(" path/one.go path/two.ts\n\n")
+	b.WriteString("Anton watches for that line. He will hold your task until the ")
+	b.WriteString("files are free and then hand it back to you, so stopping is ")
+	b.WriteString("cheaper than working around it. Do not use that line for ")
+	b.WriteString("anything else: not for a question, not for a missing file, ")
+	b.WriteString("not for work you simply chose not to do.\n")
+	return b.String()
+}
+
+// retryPrompt hands a blocked step back once its files are free.
+func retryPrompt(task string, files, freed []string) string {
+	var b strings.Builder
+	b.WriteString("You stopped this task because these files were held by ")
+	b.WriteString("another specialist:\n")
+	for _, f := range freed {
+		fmt.Fprintf(&b, "- %s\n", f)
+	}
+	b.WriteString("\nThey are free now and they are yours. Pick the task back up ")
+	b.WriteString("from where you stopped and finish it. Re-read the files before ")
+	b.WriteString("you edit them: somebody else has been in them since you looked, ")
+	b.WriteString("so what you remember of them is out of date.\n\n")
+	b.WriteString("The task, again:\n")
+	b.WriteString(stepPrompt(task, files, nil))
+	return b.String()
+}
+
+// blockedPaths reads a specialist's reply for the blocked marker and returns
+// the paths it named. Nothing found means the step ran to a normal end.
+//
+// Only the last marker in the reply counts, and only when it is the last
+// non-empty line: an agent explaining the convention mid-answer, or quoting a
+// previous turn, is not reporting itself blocked.
+func blockedPaths(output string) []string {
+	lines := strings.Split(output, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		line = strings.Trim(line, "`*_ ")
+		if line == "" {
+			continue
+		}
+		if !strings.HasPrefix(strings.ToUpper(line), blockedMarker) {
+			return nil
+		}
+		rest := strings.TrimSpace(line[len(blockedMarker):])
+		if rest == "" {
+			return nil
+		}
+		// Written as a list as often as a space-separated line.
+		rest = strings.NewReplacer(",", " ", ";", " ").Replace(rest)
+		return cleanPaths(strings.Fields(rest))
+	}
+	return nil
 }

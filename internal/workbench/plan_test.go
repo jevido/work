@@ -277,3 +277,141 @@ func TestPlanPromptSaysWhenTheBoardIsEmpty(t *testing.T) {
 		t.Errorf("prompt does not mention the empty board:\n%s", got)
 	}
 }
+
+// TestNormaliseCleansFileClaims checks the paths a model wrote are made
+// comparable before anything is scheduled on them.
+func TestNormaliseCleansFileClaims(t *testing.T) {
+	p := Plan{Mode: ModeTeam, Steps: []PlanStep{
+		{AgentID: "ada", Task: "profile", Files: []string{
+			" ./internal/a.go ", "internal/a.go", "/internal/b.go", "", "../outside.go",
+		}},
+	}}
+	p.normalise(testRegistry(), noCards)
+
+	want := []string{"internal/a.go", "internal/b.go"}
+	if got := p.Steps[0].Files; !strings.EqualFold(
+		strings.Join(got, ","), strings.Join(want, ",")) {
+		t.Fatalf("files = %q, want %q", got, want)
+	}
+}
+
+// TestNormaliseKeepsOverlappingClaims is deliberate: an overlap is still work
+// somebody asked for, so it is scheduled one step after the other rather than
+// thrown away.
+func TestNormaliseKeepsOverlappingClaims(t *testing.T) {
+	p := Plan{Mode: ModeTeam, Steps: []PlanStep{
+		{AgentID: "ada", Task: "one half", Files: []string{"shared.go"}},
+		{AgentID: "grace", Task: "other half", Files: []string{"shared.go"}},
+	}}
+	p.normalise(testRegistry(), noCards)
+
+	if len(p.Steps) != 2 {
+		t.Fatalf("got %d steps, want both kept: %+v", len(p.Steps), p.Steps)
+	}
+}
+
+func TestPlanSchemaRequiresFileClaims(t *testing.T) {
+	raw, err := planSchema(testRegistry())
+	if err != nil {
+		t.Fatalf("planSchema: %v", err)
+	}
+	var schema struct {
+		Properties struct {
+			Steps struct {
+				Items struct {
+					Properties map[string]any `json:"properties"`
+					Required   []string       `json:"required"`
+				} `json:"items"`
+			} `json:"steps"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal([]byte(raw), &schema); err != nil {
+		t.Fatalf("unmarshal schema: %v", err)
+	}
+	if _, ok := schema.Properties.Steps.Items.Properties["files"]; !ok {
+		t.Fatal("step schema has no files property")
+	}
+	if !slicesContain(schema.Properties.Steps.Items.Required, "files") {
+		t.Fatalf("files is not required: %q", schema.Properties.Steps.Items.Required)
+	}
+}
+
+func TestPlanPromptAsksForAFilePartition(t *testing.T) {
+	got := planPrompt(testRegistry(), "do the thing", false, nil)
+	for _, want := range []string{"files", "same file", "one specialist"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("planPrompt does not mention %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestStepPromptNamesTheFilesAndTheWayOut(t *testing.T) {
+	got := stepPrompt("tidy the renderer",
+		[]string{"frontend/renderer.ts"}, []string{"internal/a.go"})
+
+	for _, want := range []string{
+		"tidy the renderer",
+		"frontend/renderer.ts",
+		"internal/a.go",
+		blockedMarker,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("stepPrompt does not mention %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestStepPromptWithoutFilesStillForbidsBlindWrites(t *testing.T) {
+	got := stepPrompt("answer this", nil, nil)
+	if strings.Contains(got, "These files are yours") {
+		t.Error("a step owning nothing was told it owns something")
+	}
+	if !strings.Contains(got, blockedMarker) {
+		t.Error("a step owning nothing was not told how to report a block")
+	}
+}
+
+func TestRetryPromptSaysTheFilesAreFreeAndStale(t *testing.T) {
+	got := retryPrompt("tidy the renderer",
+		[]string{"frontend/renderer.ts"}, []string{"frontend/renderer.ts"})
+
+	for _, want := range []string{"free now", "out of date", "tidy the renderer"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("retryPrompt does not mention %q:\n%s", want, got)
+		}
+	}
+}
+
+func TestSynthesisPromptReportsWaitsAndBlocks(t *testing.T) {
+	got := synthesisPrompt("do the thing", []stepResult{
+		{AgentName: "Ada", Task: "one", Output: "done", Waited: "Grace"},
+		{
+			AgentName: "Grace", Task: "two", Output: "half done",
+			BlockedBy: "Ada", BlockedOn: []string{"shared.go"},
+		},
+		{
+			AgentName: "Kim", Task: "three", Output: "done on the retry",
+			BlockedBy: "Ada", BlockedOn: []string{"shared.go"}, Retried: true,
+		},
+	})
+
+	for _, want := range []string{
+		"queue behind Grace",
+		"Grace reported being blocked by Ada on shared.go",
+		"unfinished",
+		"second attempt",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("synthesisPrompt does not mention %q:\n%s", want, got)
+		}
+	}
+}
+
+func slicesContain(in []string, want string) bool {
+	for _, s := range in {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}

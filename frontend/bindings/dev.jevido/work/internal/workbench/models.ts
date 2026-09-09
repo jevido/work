@@ -254,6 +254,15 @@ export interface PlanStep {
      * duplicating it.
      */
     "taskId"?: string;
+
+    /**
+     * Files are the paths this step owns for as long as it runs. Steps run at
+     * the same time in one working tree, so this is what stops two agents
+     * editing the same file: a step whose files are taken waits for them. A
+     * directory or a glob claims everything under it. Empty means the step
+     * needs nothing of its own, which is right for reading and answering.
+     */
+    "files"?: string[] | null;
 }
 
 /**

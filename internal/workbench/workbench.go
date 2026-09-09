@@ -571,6 +571,12 @@ func (w *Workbench) plan(ctx context.Context, r *run, lead agents.Agent) (Plan, 
 
 // delegate runs every step of a plan at the same time and collects the answers.
 //
+// "At the same time" is bounded by file ownership. Steps whose files do not
+// overlap run together, as they always have. A step whose files are already
+// taken sits on the board as blocked, naming who has them, and starts the
+// moment they come free -- so an overlap Anton left in the plan costs the run
+// time rather than losing somebody's edit.
+//
 // A specialist failing does not fail the run: its error is recorded and handed
 // to synthesis, so a partial answer still reaches the user. Only cancellation
 // stops the whole run.
@@ -595,6 +601,8 @@ func (w *Workbench) delegate(ctx context.Context, r *run, plan Plan) ([]stepResu
 		cards[i] = w.addCard(r.id, step.AgentID, step.Task)
 	}
 
+	held := newClaims(plan.Steps)
+
 	var wg sync.WaitGroup
 	for i, step := range plan.Steps {
 		agent, ok := w.registry.Get(step.AgentID)
@@ -604,14 +612,10 @@ func (w *Workbench) delegate(ctx context.Context, r *run, plan Plan) ([]stepResu
 		results[i] = stepResult{AgentID: agent.ID, AgentName: agent.Name, Task: step.Task}
 
 		wg.Add(1)
-		go func(i int, agent agents.Agent, task, card string) {
+		go func(i int, agent agents.Agent, step PlanStep, card string) {
 			defer wg.Done()
-			output, err := w.executeStep(ctx, r, agent, PhaseWork, task, card)
-			results[i].Output = output
-			if err != nil && !errors.Is(err, context.Canceled) {
-				results[i].Err = err.Error()
-			}
-		}(i, agent, step.Task, cards[i])
+			w.runStep(ctx, r, agent, step, card, held, &results[i])
+		}(i, agent, step, cards[i])
 	}
 	wg.Wait()
 
@@ -619,6 +623,126 @@ func (w *Workbench) delegate(ctx context.Context, r *run, plan Plan) ([]stepResu
 		return nil, err
 	}
 	return results, nil
+}
+
+// runStep is one specialist's share of a plan, from queueing for its files to
+// the answer it hands back.
+//
+// Two things can hold a step up, and they are not the same thing. Before it
+// starts, its files may already be taken -- Anton left an overlap in the plan,
+// and the step simply queues. After it starts, the specialist may find itself
+// needing a file it was not given, and report that; then the step gives its own
+// files back, waits for the colleague, and is handed the task again. Both show
+// on the board as blocked, with a note naming who is in the way.
+func (w *Workbench) runStep(
+	ctx context.Context,
+	r *run,
+	agent agents.Agent,
+	step PlanStep,
+	cardID string,
+	held *claims,
+	out *stepResult,
+) {
+	// finish rather than release: the step is over, so anybody queueing on the
+	// files this step declared can stop waiting for them even if it never
+	// managed to take them.
+	defer held.finish(agent.ID)
+
+	waited, ok := w.awaitFiles(ctx, agent.ID, step.Files, cardID, held)
+	if !ok {
+		return
+	}
+	out.Waited = waited
+
+	prompt := stepPrompt(step.Task, step.Files, held.heldByOthers(agent.ID))
+	for attempt := 0; ; attempt++ {
+		output, err := w.executeStep(ctx, r, agent, PhaseWork, prompt, cardID)
+		out.Output = output
+		if err != nil {
+			if !errors.Is(err, context.Canceled) {
+				out.Err = err.Error()
+			}
+			return
+		}
+
+		// A clean answer with no marker is the ordinary case.
+		paths := blockedPaths(output)
+		if len(paths) == 0 {
+			return
+		}
+
+		out.BlockedOn = paths
+		blocker := held.pending(agent.ID, paths)
+		if blocker != "" {
+			out.BlockedBy = blocker
+		}
+		exhausted := attempt >= maxBlockedRetries
+		// Nobody is in the files it named, and it has already had a run since
+		// it first said so, which makes this a misused marker rather than a
+		// queue. Another attempt would produce the same reply.
+		nothingToWaitFor := blocker == "" && attempt > 0
+		if exhausted || nothingToWaitFor {
+			w.moveCard(cardID, board.StatusBlocked, blockedNote(blocker, paths))
+			return
+		}
+
+		// Give up our own files first. A step that held while it waited could
+		// be the thing its colleague is waiting for.
+		held.wait(agent.ID)
+		w.moveCard(cardID, board.StatusBlocked, blockedNote(blocker, paths))
+
+		// Wait for the reported files as well as our own, then take both: the
+		// second attempt needs to own what it stopped for.
+		want := append(append([]string{}, step.Files...), paths...)
+		if _, ok := w.awaitFiles(ctx, agent.ID, want, cardID, held); !ok {
+			return
+		}
+		out.Retried = true
+		prompt = retryPrompt(step.Task, want, paths)
+	}
+}
+
+// awaitFiles queues until every path is the agent's, and reports who it queued
+// behind. ok is false only when the run was cancelled while waiting.
+//
+// The card is moved to blocked while the step waits, so the reason a
+// specialist is standing still is on the board rather than nowhere.
+func (w *Workbench) awaitFiles(
+	ctx context.Context,
+	agentID string,
+	paths []string,
+	cardID string,
+	held *claims,
+) (waited string, ok bool) {
+	for {
+		// Take the waiter before testing, or a release between the two is
+		// missed and the step waits for one that has already happened.
+		next := held.waiter()
+		blocker, got := held.take(agentID, paths)
+		if got {
+			return waited, true
+		}
+		if waited == "" {
+			waited = blocker
+			w.moveCard(cardID, board.StatusBlocked, blockedNote(blocker, paths))
+		}
+		select {
+		case <-next:
+		case <-ctx.Done():
+			return waited, false
+		}
+	}
+}
+
+// blockedNote is the line the board carries while a step is held up. It names
+// the colleague when there is one, because "blocked" without a who is not
+// something the user can act on.
+func blockedNote(blocker string, paths []string) string {
+	files := strings.Join(paths, ", ")
+	if blocker == "" {
+		return "waiting on " + files
+	}
+	return "waiting on " + blocker + " to finish with " + files
 }
 
 // executeStep runs one Claude call as one agent and returns its final answer.

@@ -213,7 +213,22 @@ func Default() *Registry {
 				"whether to answer the task yourself or to split it between the " +
 				"ones whose specialties it genuinely spans. Never assume a " +
 				"colleague who is not on the roster, and do not delegate for the " +
-				"sake of it. Be direct and concrete.",
+				"sake of it. Be direct and concrete.\n\n" +
+				"Your specialists share one working tree and they work at the " +
+				"same time, so you own the files as well as the work. Split a " +
+				"task by file, not only by topic: every step you hand out names " +
+				"the paths it will edit, and no two steps name the same file, " +
+				"directory, or overlapping glob. When the work will not cut along " +
+				"file lines, give the whole of it to one specialist instead of " +
+				"splitting it -- two agents in one file is worse than one agent " +
+				"doing more.\n\n" +
+				"A specialist that stops because a file it needs is held by a " +
+				"colleague reports back blocked rather than working around it. " +
+				"That is the system working, not a failure: watch for it, keep " +
+				"the task, and hand it back to that specialist once the colleague " +
+				"is finished with the files. Say plainly in your answer when a " +
+				"share of the work waited, and when a share never got its second " +
+				"run and is therefore unfinished.",
 		},
 	)
 }
