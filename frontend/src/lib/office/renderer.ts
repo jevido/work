@@ -1,4 +1,5 @@
 import { OfficeAgent, type VisualState } from "./agent";
+import { avatarImage } from "./avatars";
 import { PerfSampler, type FrameStats } from "./perf";
 import {
   AGENT_RADIUS,
@@ -36,6 +37,12 @@ export interface AgentSpec {
   deskY: number;
   seatX: number;
   seatY: number;
+  /**
+   * Where to fetch this agent's picture, if they have one. Absent is the
+   * ordinary case: an agent whose folder holds no avatar is drawn as the
+   * coloured figure they always were.
+   */
+  avatar?: string;
   /**
    * What the agent was already doing when the roster was read. Events carry
    * every change after that, but a page that loads mid-run has missed the ones
@@ -208,10 +215,48 @@ export class OfficeRenderer {
     // walked there: the office should open in the state the backend is in, not
     // in the state a fresh page would be in.
     for (const spec of specs) if (spec.state) this.byId.get(spec.id)?.resume(spec.state);
+    // A rebuilt cast keeps its faces: the images are cached by URL, so this
+    // usually costs a map lookup and no fetch.
+    for (let i = 0; i < specs.length; i++) this.applyAvatar(this.agents[i], specs[i].avatar ?? "");
 
     this.paintLayer();
     this.needsFullRepaint = true;
     if (!this.running) this.draw(performance.now());
+  }
+
+  /**
+   * Renames one agent, without rebuilding the office around them.
+   *
+   * Deliberately not part of setAgents: that allocates a new cast and puts
+   * everybody back where they started, which for a rename would stop a walk
+   * mid-stride and blank a monitor that is still being typed on. The name is
+   * baked into the static layer as a nameplate, so that is repainted -- once,
+   * and only when the name actually changed.
+   */
+  setAgentName(agentId: string, name: string): void {
+    const agent = this.byId.get(agentId);
+    if (!agent || agent.name === name) return;
+    agent.name = name;
+    this.paintLayer();
+    this.needsFullRepaint = true;
+    if (!this.running) this.draw(performance.now());
+  }
+
+  /**
+   * Points one agent at their picture, or at nothing.
+   *
+   * Deliberately not part of setAgents, for the same reason a rename is not:
+   * an avatar appearing is not a reason to rebuild the office around it and
+   * put everybody back at their opening position. An empty url is an agent
+   * with no avatar, which is most of them.
+   *
+   * The picture on screen is kept until a new one has actually decoded, so
+   * re-reading an unchanged file -- which is what every Reload config does --
+   * does not blink the office through the fallback and back.
+   */
+  setAgentAvatar(agentId: string, url: string | null): void {
+    const agent = this.byId.get(agentId);
+    if (agent) this.applyAvatar(agent, url ?? "");
   }
 
   /** Queues a coarse state change. Cheap enough to call from an event handler. */
@@ -438,6 +483,49 @@ export class OfficeRenderer {
   }
 
   /** Paints the static background: floor, grid, wall and unlit desks. */
+  /**
+   * Resolves a url into something drawable for one agent.
+   *
+   * Everything asynchronous about an avatar stops here: by the time a frame
+   * runs, an agent either holds a decoded image or it does not.
+   */
+  private applyAvatar(agent: OfficeAgent, url: string): void {
+    if (agent.avatarUrl === url) return;
+    agent.avatarUrl = url;
+
+    if (!url) {
+      if (agent.avatar) {
+        agent.avatar = null;
+        this.repaint();
+      }
+      return;
+    }
+
+    const ready = avatarImage(url, (image) => {
+      // The agent may have been pointed somewhere else, or dropped from the
+      // cast, while this was in flight.
+      if (agent.avatarUrl !== url) return;
+      agent.avatar = image;
+      this.repaint();
+    });
+    // undefined is "still loading", and leaves whatever is on screen alone.
+    if (ready !== undefined) {
+      agent.avatar = ready;
+      this.repaint();
+    }
+  }
+
+  /**
+   * Redraws the whole canvas at the next opportunity.
+   *
+   * For rare, non-motion changes -- a name, a new avatar -- where working out
+   * the affected rectangle is more code than repainting one frame is cost.
+   */
+  private repaint(): void {
+    this.needsFullRepaint = true;
+    if (!this.running) this.draw(performance.now());
+  }
+
   private paintLayer(): void {
     if (this.layer.width === 0 || this.layer.height === 0) return;
 
@@ -482,7 +570,9 @@ export class OfficeRenderer {
     ctx.font = LABEL_FONT;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    for (const agent of this.agents) this.drawDesk(ctx, agent, false);
+    // Never hot: a highlight baked into the layer would outlive the pointer
+    // that caused it, and only another paintLayer would take it off again.
+    for (const agent of this.agents) this.drawDesk(ctx, agent, false, false);
   }
 
   private draw(now: number): void {
@@ -541,7 +631,14 @@ export class OfficeRenderer {
 
     const list = this.agents;
     for (let i = 0; i < list.length; i++) {
-      if (isLit(list[i].state)) this.drawDesk(ctx, list[i], true);
+      const a = list[i];
+      const hot = a.id === this.hoverId;
+      if (isLit(a.state)) this.drawDesk(ctx, a, true, hot);
+      // A dark desk is part of the static layer, so hovering one means drawing
+      // it again on top -- the same desk, with the highlight added. Every desk
+      // opens its owner's panel now, whether or not they are busy, so every
+      // desk answers the pointer.
+      else if (hot) this.drawDesk(ctx, a, false, true);
     }
     for (let i = 0; i < list.length; i++) this.drawAgent(ctx, list[i], now);
   }
@@ -639,8 +736,17 @@ export class OfficeRenderer {
   /**
    * Draws one desk. `lit` draws only the parts that change with state, so the
    * static layer can hold the rest.
+   *
+   * `hot` comes from the caller rather than being read off `hoverId` here,
+   * because the same routine paints the static layer, which must never be told
+   * about a pointer that will have moved on by the time it is next painted.
    */
-  private drawDesk(ctx: CanvasRenderingContext2D, a: OfficeAgent, lit: boolean): void {
+  private drawDesk(
+    ctx: CanvasRenderingContext2D,
+    a: OfficeAgent,
+    lit: boolean,
+    hot: boolean,
+  ): void {
     const x = a.deskX - DESK_WIDTH / 2;
     const y = a.deskY - DESK_HEIGHT / 2;
 
@@ -658,16 +764,17 @@ export class OfficeRenderer {
       ctx.fill();
     }
 
-    // Monitor, tinted with the owner's colour when they are working, and
-    // brightened further while the pointer is over it. The highlight stays
-    // inside the monitor's own outline so it needs no extra dirty rectangle.
+    // Monitor, tinted with the owner's colour when they are working and
+    // brightened further while the pointer is over it. A dark monitor lifts to
+    // a neutral grey instead: colour in this office means somebody is doing
+    // something, and a hover is not that. The highlight stays inside the
+    // monitor's own outline so it needs no extra dirty rectangle.
     const m = monitorRect(a.deskX, a.deskY, this.scratchMonitor);
-    const hot = lit && a.id === this.hoverId;
-    ctx.fillStyle = hot ? a.colour : "#151920";
+    ctx.fillStyle = hot ? (lit ? a.colour : "#2f3744") : "#151920";
     ctx.beginPath();
     ctx.roundRect(m.x, m.y, m.w, m.h, 4);
     ctx.fill();
-    ctx.fillStyle = lit ? (hot ? a.colourSoft : a.colourDim) : "#1d232c";
+    ctx.fillStyle = lit ? (hot ? a.colourSoft : a.colourDim) : hot ? "#252c37" : "#1d232c";
     ctx.beginPath();
     ctx.roundRect(m.x + MONITOR_BEZEL, m.y + MONITOR_BEZEL, m.w - MONITOR_BEZEL * 2, m.h - MONITOR_BEZEL * 2, 3);
     ctx.fill();
@@ -678,8 +785,9 @@ export class OfficeRenderer {
     if (lit && a.state === "working" && a.tail.active) this.drawReadout(ctx, a, m, hot);
 
     if (!lit) {
-      // Nameplate.
-      ctx.fillStyle = "#5f6878";
+      // Nameplate, which comes up to full strength under the pointer: the
+      // thing a click opens is a person, so their name is the affordance.
+      ctx.fillStyle = hot ? "#c2c9d6" : "#5f6878";
       ctx.fillText(a.name, a.deskX, a.deskY + 2);
     }
   }
@@ -784,17 +892,17 @@ export class OfficeRenderer {
     );
     ctx.fill();
 
-    // Head.
-    ctx.fillStyle = a.colourSoft;
-    ctx.beginPath();
-    ctx.arc(
-      a.x + a.facing * 1.5,
-      bodyY - bob - AGENT_RADIUS * 0.42,
-      AGENT_RADIUS * 0.52,
-      0,
-      Math.PI * 2,
-    );
-    ctx.fill();
+    // Head, or the agent's own face where their folder holds one.
+    const headX = a.x + a.facing * 1.5;
+    const headY = bodyY - bob - AGENT_RADIUS * 0.42;
+    if (a.avatar) {
+      this.drawPortrait(ctx, a, headX, headY);
+    } else {
+      ctx.fillStyle = a.colourSoft;
+      ctx.beginPath();
+      ctx.arc(headX, headY, AGENT_RADIUS * 0.52, 0, Math.PI * 2);
+      ctx.fill();
+    }
 
     // Name tag, so a wandering agent is still identifiable away from the desk.
     if (!seated) {
@@ -819,6 +927,52 @@ export class OfficeRenderer {
         );
         break;
     }
+  }
+
+  /**
+   * An agent's avatar, in place of the head.
+   *
+   * A little larger than the head it replaces, because a face at head size is
+   * twenty pixels of nothing, and clipped to a circle with a ring in the
+   * agent's colour: the office is read by colour at a glance, and a portrait
+   * has to stay the same person as the nameplate and the desk panel dot.
+   *
+   * Pictures are centre-cropped to a square rather than squashed into one, so
+   * an avatar somebody grabbed at whatever aspect ratio still shows a face.
+   */
+  private drawPortrait(
+    ctx: CanvasRenderingContext2D,
+    a: OfficeAgent,
+    x: number,
+    y: number,
+  ): void {
+    const image = a.avatar;
+    if (!image) return;
+    const radius = AGENT_RADIUS * 0.66;
+    const side = Math.min(image.naturalWidth, image.naturalHeight);
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.drawImage(
+      image,
+      (image.naturalWidth - side) / 2,
+      (image.naturalHeight - side) / 2,
+      side,
+      side,
+      x - radius,
+      y - radius,
+      radius * 2,
+      radius * 2,
+    );
+    ctx.restore();
+
+    ctx.strokeStyle = a.colourSoft;
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.stroke();
   }
 
   private drawTypingDots(ctx: CanvasRenderingContext2D, a: OfficeAgent, now: number): void {

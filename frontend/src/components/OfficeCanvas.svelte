@@ -1,15 +1,26 @@
 <script lang="ts">
-  import { connectOffice } from "../lib/bridge/office";
+  import { untrack } from "svelte";
+  import { avatarUrl } from "../lib/agents/avatar";
+  import type { Roster } from "../lib/agents/roster.svelte";
+  import { connectOffice, visualStateOf } from "../lib/bridge/office";
   import type { ClaudeSession, TextPart } from "../lib/claude/session.svelte";
+  import type { Config } from "../lib/config/config.svelte";
   import { OfficeRenderer, type AgentSpec } from "../lib/office/renderer";
   import AgentDialog from "./AgentDialog.svelte";
   import PerfOverlay from "./PerfOverlay.svelte";
 
   let {
-    agents,
+    roster,
     session,
+    config,
     showPerf = false,
-  }: { agents: AgentSpec[]; session: ClaudeSession; showPerf?: boolean } = $props();
+  }: {
+    roster: Roster;
+    session: ClaudeSession;
+    /** Passed straight through to the desk panel's profile view. */
+    config: Config;
+    showPerf?: boolean;
+  } = $props();
 
   let canvas: HTMLCanvasElement;
   let host: HTMLDivElement;
@@ -17,14 +28,34 @@
 
   /** The desk whose panel is open, if any. */
   let openId = $state<string | null>(null);
-  /** A one-off line explaining a click that did nothing. */
-  let cue = $state<string | null>(null);
-  let cueHandle = 0;
 
-  /** True while the pointer is over a monitor you can actually open. */
+  /** True while the pointer is over a desk. */
   let hot = $state(false);
 
-  const openAgent = $derived(agents.find((a) => a.id === openId) ?? null);
+  const openAgent = $derived(openId ? roster.find(openId) : null);
+
+  /** The open desk's portrait, for the profile view inside its panel. */
+  const openAvatar = $derived(openAgent ? avatarUrl(openAgent, roster.revision) : null);
+
+  /**
+   * Who is in the office, and where they sit.
+   *
+   * The renderer's cast is rebuilt from this and nothing else. Building it
+   * allocates a new set of agents and puts everybody back at their opening
+   * position, which is right when the team changes and wrong for a rename: it
+   * would stop a walk mid-stride and blank a monitor still being typed on.
+   * Names are pushed at the renderer on their own, below.
+   *
+   * Desks are in the key as well as ids, because reloading the config folder
+   * can lay the room out again for the same people -- add one agent's folder
+   * and the seating is re-dealt. An id list alone would leave everybody drawn
+   * at the desk they used to have.
+   */
+  const castKey = $derived(
+    roster.list
+      .map((a) => `${a.id}:${a.desk.x},${a.desk.y},${a.desk.seatX},${a.desk.seatY}`)
+      .join("\u0000"),
+  );
 
   $effect(() => {
     const r = new OfficeRenderer(canvas);
@@ -51,7 +82,56 @@
   // The cast can change (agents loaded, or reconfigured later) without
   // rebuilding the renderer.
   $effect(() => {
-    renderer?.setAgents(agents);
+    void castKey;
+    const r = renderer;
+    if (!r) return;
+    r.setAgents(
+      untrack(() =>
+        roster.list.map(
+          (a): AgentSpec => ({
+            id: a.id,
+            name: a.name,
+            colour: a.colour,
+            deskX: a.desk.x,
+            deskY: a.desk.y,
+            seatX: a.desk.seatX,
+            seatY: a.desk.seatY,
+            // Carried in the spec as well as pushed below, so a cast rebuilt
+            // for a seating change does not open faceless and fill in after.
+            avatar: avatarUrl(a, roster.revision) ?? undefined,
+            // A run can outlive the page: dev reloads happen mid-stream, and
+            // the office has to open showing the work already underway.
+            state: visualStateOf(a.state),
+          }),
+        ),
+      ),
+    );
+  });
+
+  /**
+   * The faces on the desks.
+   *
+   * Separate from the cast for the same reason a rename is: an avatar added to
+   * a folder is not a reason to re-seat the room and stop everybody
+   * mid-stride. It follows the roster's revision as well as its list, because
+   * a picture can be replaced with the roster otherwise unchanged -- same
+   * folder, same filename -- and that is exactly the case a reload has to
+   * pick up. Each call is a no-op unless the URL actually changed.
+   */
+  $effect(() => {
+    const r = renderer;
+    if (!r) return;
+    const revision = roster.revision;
+    for (const a of roster.list) r.setAgentAvatar(a.id, avatarUrl(a, revision));
+  });
+
+  // A rename, which is the one part of an agent the office has to be able to
+  // take while it is running. One call each, and each one is a no-op unless
+  // that nameplate actually changed.
+  $effect(() => {
+    const r = renderer;
+    if (!r) return;
+    for (const a of roster.list) r.setAgentName(a.id, a.name);
   });
 
   /**
@@ -68,38 +148,36 @@
   $effect(() => {
     const r = renderer;
     if (!r) return;
-    for (const spec of agents) {
-      const live = liveTextFor(session, spec.id);
-      r.setMonitorText(spec.id, live?.id ?? "", live?.text ?? "");
+    for (const agent of roster.list) {
+      const live = liveTextFor(session, agent.id);
+      r.setMonitorText(agent.id, live?.id ?? "", live?.text ?? "");
     }
   });
 
   // An agent who leaves the roster cannot keep a panel open.
   $effect(() => {
-    if (openId && !agents.some((a) => a.id === openId)) openId = null;
+    if (openId && !roster.list.some((a) => a.id === openId)) openId = null;
   });
 
-  $effect(() => () => clearTimeout(cueHandle));
-
   /**
-   * The agent under a pointer event, and whether their desk is open to
-   * visitors. Only a working agent has anything to show, and that judgement is
-   * the frontend's: it is the same animation state the monitor is lit from.
+   * The agent whose desk is under a pointer event.
+   *
+   * Every desk answers, whatever its owner is up to. A desk panel is that
+   * agent's whole side of the conversation and the profile that says who they
+   * are, and neither of those waits for them to be busy -- an idle desk is
+   * exactly where you go to read what somebody is for.
    */
-  function monitorAt(event: PointerEvent | MouseEvent): { id: string; working: boolean } | null {
+  function deskAt(event: PointerEvent | MouseEvent): string | null {
     const r = renderer;
     if (!r) return null;
     const box = canvas.getBoundingClientRect();
-    const id = r.hitTestMonitor(event.clientX - box.left, event.clientY - box.top);
-    if (!id) return null;
-    return { id, working: r.stateOf(id) === "working" };
+    return r.hitTestMonitor(event.clientX - box.left, event.clientY - box.top);
   }
 
   function onPointerMove(event: PointerEvent) {
-    const hit = monitorAt(event);
-    // Only a working monitor lights up, so the cursor and the glow always agree
-    // with each other and with what a click will do.
-    const target = hit?.working ? hit.id : null;
+    // The cursor and the highlight are set from the same hit test as the
+    // click, so what lights up is always what will open.
+    const target = deskAt(event);
     renderer?.setHover(target);
     hot = target !== null;
   }
@@ -110,17 +188,9 @@
   }
 
   function onClick(event: MouseEvent) {
-    const hit = monitorAt(event);
-    if (!hit) return;
-    if (hit.working) {
-      showCue(null);
-      openId = hit.id;
-      return;
-    }
-    // Clicking a dark monitor is a fair thing to try. Silence would read as a
-    // broken control, so say why nothing opened.
-    const name = agents.find((a) => a.id === hit.id)?.name ?? "This agent";
-    showCue(`${name} isn’t working on anything right now.`);
+    const id = deskAt(event);
+    if (!id) return;
+    openId = id;
   }
 
   /**
@@ -150,11 +220,6 @@
     return null;
   }
 
-  function showCue(text: string | null) {
-    clearTimeout(cueHandle);
-    cue = text;
-    if (text) cueHandle = setTimeout(() => (cue = null), 2600);
-  }
 </script>
 
 <div class="office" bind:this={host}>
@@ -166,16 +231,12 @@
     onclick={onClick}
   ></canvas>
 
-  {#if cue}
-    <div class="cue" role="status">{cue}</div>
-  {/if}
-
   {#if openAgent}
     <AgentDialog
       {session}
-      agentId={openAgent.id}
-      name={openAgent.name}
-      colour={openAgent.colour}
+      {config}
+      agent={openAgent}
+      avatar={openAvatar}
       onclose={() => (openId = null)}
     />
   {/if}
@@ -200,23 +261,5 @@
 
   canvas.hot {
     cursor: pointer;
-  }
-
-  .cue {
-    position: absolute;
-    z-index: 3;
-    left: 50%;
-    /* Above the panel and clear of the load-error in the corner, so a cue
-       never lands on top of what it is explaining. */
-    top: 12px;
-    transform: translateX(-50%);
-    padding: 6px 11px;
-    border: 1px solid var(--line);
-    border-radius: 999px;
-    background: var(--panel);
-    color: var(--muted);
-    font-size: 12px;
-    white-space: nowrap;
-    pointer-events: none;
   }
 </style>

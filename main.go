@@ -21,6 +21,7 @@ import (
 
 	"dev.jevido/work/internal/agents"
 	"dev.jevido/work/internal/claude"
+	"dev.jevido/work/internal/config"
 	"dev.jevido/work/internal/workbench"
 	"dev.jevido/work/services"
 )
@@ -76,6 +77,18 @@ func main() {
 		workDir,
 	)
 
+	// The saved config folder is applied before the window opens, so the office
+	// draws the user's own team rather than the built-in one and then swapping.
+	// A folder that has gone missing is a warning, not a fatal error: Work
+	// falls back to the built-in team and the user can pick a folder again.
+	if cfg, cfgErr := config.Load(); cfgErr != nil {
+		log.Printf("config: %v", cfgErr)
+	} else if cfg.Root != "" {
+		if _, err := wb.UseConfigRoot(cfg.Root); err != nil {
+			log.Printf("agents: %v", err)
+		}
+	}
+
 	app := application.New(application.Options{
 		Name:        "Work",
 		Description: "AI development workbench",
@@ -84,6 +97,11 @@ func main() {
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),
+			// Avatars are files in the user's own agent folders, so they
+			// cannot be embedded like the rest of the frontend: the middleware
+			// serves them off disk, from whichever folder is in use now. See
+			// avatars.go.
+			Middleware: avatarMiddleware(wb.ConfigRoot),
 		},
 	})
 

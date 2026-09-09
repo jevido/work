@@ -8,6 +8,8 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/wailsapp/wails/v3/pkg/application"
+
 	"dev.jevido/work/internal/board"
 	"dev.jevido/work/internal/changes"
 	"dev.jevido/work/internal/workbench"
@@ -33,6 +35,57 @@ func (s *WorkbenchService) ServiceName() string { return "WorkbenchService" }
 // Agents returns the team and each member's current state.
 func (s *WorkbenchService) Agents() []workbench.AgentStatus {
 	return s.wb.Agents()
+}
+
+// GetConfigPath returns the folder Work loads agents from, or an empty string
+// if the user has not picked one yet. An empty result is the first-run signal.
+func (s *WorkbenchService) GetConfigPath() string {
+	return s.wb.ConfigRoot()
+}
+
+// SelectConfigFolder asks the user for a config folder with the platform's own
+// folder picker, then loads the team from it and remembers the choice.
+//
+// A cancelled dialog returns an empty path and no error: the user declining is
+// not a failure, and the caller can tell the two apart by the empty string.
+func (s *WorkbenchService) SelectConfigFolder() (string, error) {
+	app := application.Get()
+	if app == nil {
+		return "", errors.New("no application")
+	}
+
+	dialog := app.Dialog.OpenFile().
+		SetTitle("Choose the folder Work keeps your agents in").
+		CanChooseDirectories(true).
+		CanChooseFiles(false).
+		CanCreateDirectories(true).
+		// Empty on a first run, which the platform reads as "no preference".
+		SetDirectory(s.wb.ConfigRoot())
+	// Parenting the picker on the office window makes it modal over Work
+	// rather than a loose window the user can lose behind it.
+	if window := app.Window.Current(); window != nil {
+		dialog = dialog.AttachToWindow(window)
+	}
+
+	path, err := dialog.PromptForSingleSelection()
+	if err != nil {
+		return "", err
+	}
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", nil
+	}
+
+	if _, err := s.wb.SetConfigRoot(path); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// ReloadAgents rescans the config folder and rebuilds the team, so an agent
+// folder added outside Work shows up without a restart.
+func (s *WorkbenchService) ReloadAgents() ([]workbench.AgentStatus, error) {
+	return s.wb.ReloadAgents()
 }
 
 // Submit starts a run. An empty agentID gives the task to the coordinator, who

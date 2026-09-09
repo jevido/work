@@ -1,22 +1,40 @@
 <script lang="ts">
-  import * as Workbench from "../bindings/dev.jevido/work/services/workbenchservice.js";
   import ClaudeConsole from "./components/ClaudeConsole.svelte";
+  import ConfigSetup from "./components/ConfigSetup.svelte";
   import KanbanBoard from "./components/KanbanBoard.svelte";
   import OfficeCanvas from "./components/OfficeCanvas.svelte";
+  import SettingsMenu from "./components/SettingsMenu.svelte";
+  import { Roster } from "./lib/agents/roster.svelte";
   import { TaskBoard } from "./lib/board/board.svelte";
-  import { visualStateOf } from "./lib/bridge/office";
   import { ChangeReview } from "./lib/changes/changes.svelte";
   import { ClaudeSession } from "./lib/claude/session.svelte";
-  import type { AgentIdentity } from "./lib/claude/session.svelte";
-  import type { AgentSpec } from "./lib/office/renderer";
+  import { Config } from "./lib/config/config.svelte";
 
   const session = new ClaudeSession();
   const board = new TaskBoard();
   const review = new ChangeReview();
+  /**
+   * The team. Read from the config folder at startup and again on every
+   * reload, so it is held whole here rather than mapped into a snapshot per
+   * consumer: a folder edited on disk has to change every label that names
+   * whoever is in it.
+   */
+  const roster = new Roster();
 
-  let agents = $state<AgentSpec[]>([]);
-  let identities = $state<AgentIdentity[]>([]);
-  let loadError = $state<string | null>(null);
+  /**
+   * Where the agent folders are.
+   *
+   * Agents are read off disk now, so this has to be answered before there is
+   * an office to draw -- and re-reading the folder is re-reading the team,
+   * which is why the roster is what a reload refreshes.
+   */
+  const config = new Config(async () => {
+    await roster.load();
+    if (roster.loadError) throw new Error(roster.loadError);
+    const n = roster.list.length;
+    return `${n} ${n === 1 ? "agent" : "agents"}`;
+  });
+
   let showPerf = $state(false);
 
   // Backend events are wired once for the lifetime of the app.
@@ -24,37 +42,22 @@
   $effect(() => board.listen());
   $effect(() => review.listen());
 
+  // Reads nothing reactive, so this runs once.
   $effect(() => {
-    let cancelled = false;
-    Workbench.Agents()
-      .then((list) => {
-        if (cancelled) return;
-        // A Go nil slice arrives as null, so an empty team is not an error.
-        const roster = list ?? [];
-        // The console and the board label things by agent, so they need the
-        // roster too.
-        identities = roster.map((a) => ({ id: a.id, name: a.name, colour: a.colour }));
-        session.setAgents(identities);
-        agents = roster.map((a) => ({
-          id: a.id,
-          name: a.name,
-          colour: a.colour,
-          deskX: a.desk.x,
-          deskY: a.desk.y,
-          seatX: a.desk.seatX,
-          seatY: a.desk.seatY,
-          // A run can outlive the page: dev reloads happen mid-stream, and the
-          // office has to open showing the work that is already underway.
-          state: visualStateOf(a.state),
-        }));
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) loadError = err instanceof Error ? err.message : String(err);
-      });
-    return () => {
-      cancelled = true;
-    };
+    void config.probe();
   });
+
+  // The team is only worth asking for once the folder it lives in is settled.
+  // `config.open` goes true once and stays true, so this reads as "load the
+  // roster when we are allowed to" and runs a single time.
+  $effect(() => {
+    if (!config.open) return;
+    void roster.load();
+  });
+
+  // The console labels turns and plan steps by agent, so it follows the roster
+  // rather than being handed a copy of it at startup.
+  $effect(() => session.setAgents(roster.identities));
 
   function onKeydown(event: KeyboardEvent) {
     // Ctrl/Cmd+P toggles the performance overlay. Deliberately cheap and
@@ -68,20 +71,34 @@
 
 <svelte:window onkeydown={onKeydown} />
 
-<main>
-  <div class="work">
-    <KanbanBoard {board} agents={identities} />
-    <div class="office">
-      {#if loadError}
-        <div class="load-error">{loadError}</div>
-      {/if}
-      <OfficeCanvas {agents} {session} {showPerf} />
+<!-- Nothing is drawn while the folder is being looked up. It is one call, and
+     the alternative is a flash of either the setup screen or an empty office,
+     each of which says something untrue about how this app is configured. -->
+{#if config.status === "missing"}
+  <ConfigSetup {config} />
+{:else if config.open}
+  <main>
+    <div class="work">
+      <KanbanBoard {board} agents={roster.identities} />
+      <div class="office">
+        <!-- Top-right of the office, which is what config changes: the desks in
+             it are the folder, redrawn. The roster's own failure sits in the
+             same row rather than under the wrench, so neither covers the
+             other. -->
+        <div class="overlay">
+          {#if roster.loadError}
+            <div class="load-error">{roster.loadError}</div>
+          {/if}
+          <SettingsMenu {config} />
+        </div>
+        <OfficeCanvas {roster} {session} {config} {showPerf} />
+      </div>
     </div>
-  </div>
-  <aside>
-    <ClaudeConsole {session} {review} />
-  </aside>
-</main>
+    <aside>
+      <ClaudeConsole {session} {review} />
+    </aside>
+  </main>
+{/if}
 
 <style>
   main {
@@ -115,11 +132,20 @@
     min-height: 0;
   }
 
-  .load-error {
+  .overlay {
     position: absolute;
-    z-index: 1;
+    /* Above the desk panel, which is bottom-left and cannot reach this corner
+       -- but can be dragged there. */
+    z-index: 3;
     top: 10px;
     right: 10px;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .load-error {
+    max-width: min(340px, 50vw);
     padding: 6px 10px;
     border: 1px solid #4a2b2b;
     border-radius: 6px;

@@ -73,6 +73,9 @@ export interface PlanUpdate {
 export interface PlanEntry {
   kind: "plan";
   id: string;
+  /** Whoever did the routing, kept so the entry can be relabelled if they are
+      renamed from their desk. */
+  agentId: string;
   agentName: string;
   colour: string;
   mode: "self" | "team";
@@ -156,6 +159,20 @@ export class ClaudeSession {
   /** Tells the console who the agents are. Safe to call again on a change. */
   setAgents(list: readonly AgentIdentity[]): void {
     this.roster = new Map(list.map((a) => [a.id, a]));
+
+    // An agent renamed from their desk is still the same agent, so the turns
+    // they have already taken are relabelled too. Leaving them alone would
+    // read as two people having answered one question.
+    for (const entry of this.entries) {
+      if (entry.kind === "agent") {
+        entry.agentName = this.identify(entry.agentId).name;
+      } else if (entry.kind === "plan") {
+        entry.agentName = this.identify(entry.agentId).name;
+        for (const step of entry.steps) {
+          step.agentName = this.identify(step.agentId).name;
+        }
+      }
+    }
   }
 
   /** An agent's display name, falling back to their ID if they are unknown. */
@@ -177,6 +194,7 @@ export class ClaudeSession {
         this.entries.push({
           kind: "plan",
           id: this.mintId("plan"),
+          agentId: who.id,
           agentName: who.name,
           colour: who.colour,
           mode: e.data.mode === "team" ? "team" : "self",

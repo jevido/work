@@ -210,7 +210,7 @@ func planPrompt(reg Registry, task string, followUp bool, cards []board.Card) st
 		if a.Role == agents.RoleCoordinator {
 			continue
 		}
-		fmt.Fprintf(&b, "- %s (id: %s) — %s\n", a.Name, a.ID, strings.Join(a.Specialties, ", "))
+		fmt.Fprintf(&b, "- %s (id: %s) — %s\n", a.Name, a.ID, a.Blurb())
 	}
 	b.WriteString("\nChoose \"self\" with no steps when the task is small, ")
 	b.WriteString("general, or outside every specialty, and you should simply answer it. ")

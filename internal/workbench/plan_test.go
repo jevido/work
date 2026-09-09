@@ -25,9 +25,9 @@ func testRegistry() *agents.Registry {
 	return agents.NewRegistry(
 		agents.Agent{ID: "anton", Name: "Anton", Role: agents.RoleCoordinator},
 		agents.Agent{ID: "jeff", Name: "Jeff", Role: agents.RoleSpecialist,
-			Specialties: []string{"Go", "performance"}},
+			Skillset: []string{"Go", "performance"}},
 		agents.Agent{ID: "chris", Name: "Chris", Role: agents.RoleSpecialist,
-			Specialties: []string{"UX", "Svelte"}},
+			Skillset: []string{"UX", "Svelte"}},
 	)
 }
 

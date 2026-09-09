@@ -57,11 +57,38 @@ export function ClearConversation(): $CancellablePromise<void> {
 }
 
 /**
+ * GetConfigPath returns the folder Work loads agents from, or an empty string
+ * if the user has not picked one yet. An empty result is the first-run signal.
+ */
+export function GetConfigPath(): $CancellablePromise<string> {
+    return $Call.ByID(4273611995);
+}
+
+/**
+ * ReloadAgents rescans the config folder and rebuilds the team, so an agent
+ * folder added outside Work shows up without a restart.
+ */
+export function ReloadAgents(): $CancellablePromise<workbench$0.AgentStatus[] | null> {
+    return $Call.ByID(1153881361);
+}
+
+/**
  * Revert undoes one of those file changes, restoring the content the run
  * started with rather than the last commit.
  */
 export function Revert(path: string): $CancellablePromise<void> {
     return $Call.ByID(261357752, path);
+}
+
+/**
+ * SelectConfigFolder asks the user for a config folder with the platform's own
+ * folder picker, then loads the team from it and remembers the choice.
+ * 
+ * A cancelled dialog returns an empty path and no error: the user declining is
+ * not a failure, and the caller can tell the two apart by the empty string.
+ */
+export function SelectConfigFolder(): $CancellablePromise<string> {
+    return $Call.ByID(3035609692);
 }
 
 /**

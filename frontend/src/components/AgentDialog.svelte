@@ -1,21 +1,38 @@
 <script lang="ts">
+  import { untrack } from "svelte";
+  import type { AgentStatus } from "../../bindings/dev.jevido/work/internal/workbench/models.js";
   import type { AgentEntry, ClaudeSession, UserEntry } from "../lib/claude/session.svelte";
+  import type { Config } from "../lib/config/config.svelte";
   import { PanelDrag, dragHandle } from "../lib/ui/drag.svelte";
+  import AgentProfile from "./AgentProfile.svelte";
   import AgentTurn from "./AgentTurn.svelte";
 
   let {
     session,
-    agentId,
-    name,
-    colour,
+    config,
+    agent,
+    avatar,
     onclose,
   }: {
     session: ClaudeSession;
-    agentId: string;
-    name: string;
-    colour: string;
+    /** Only so the profile view can say which folder to edit this agent in. */
+    config: Config;
+    agent: AgentStatus;
+    /**
+     * Where to fetch this agent's picture, or null if their folder holds none.
+     * Passed in rather than derived here: the office owns how a folder on disk
+     * becomes a URL, and this panel only ever shows one.
+     */
+    avatar: string | null;
     onclose: () => void;
   } = $props();
+
+  const agentId = $derived(agent.id);
+  const name = $derived(agent.name);
+  const colour = $derived(agent.colour);
+
+  /** True while the profile has replaced the thread. */
+  let showProfile = $state(false);
 
   let prompt = $state("");
   let root: HTMLDivElement | undefined = $state();
@@ -56,11 +73,26 @@
   // and hand the caret over so you can reply without clicking first.
   $effect(() => {
     void agentId;
-    prompt = "";
-    pinned = true;
-    // Focus lands inside the panel either way, so Escape closes it from the
-    // keyboard without having to click something first.
-    (promptEl ?? root)?.focus();
+    // Everything below is untracked on purpose, and the panel does not work
+    // without it. `promptEl` is bound to the composer, which only exists while
+    // the thread is showing. Reading it here made this effect depend on it, so
+    // opening the profile -- which unmounts the composer and sets promptEl to
+    // undefined -- re-ran this effect and set `showProfile` straight back to
+    // false. The button looked dead.
+    //
+    // Whether it bounced came down to effect flush order, so it reproduced in
+    // WebKitGTK, which is the engine Wails uses on Linux, and not in Chromium.
+    // This is a "the desk changed" effect: only the desk belongs above.
+    untrack(() => {
+      prompt = "";
+      pinned = true;
+      // Left open, it would now be showing somebody else's profile under this
+      // agent's name.
+      showProfile = false;
+      // Focus lands inside the panel either way, so Escape closes it from the
+      // keyboard without having to click something first.
+      (promptEl ?? root)?.focus();
+    });
   });
 
   // Follow the stream, but stop fighting the user once they scroll up.
@@ -94,12 +126,16 @@
   }
 
   function onKeydown(event: KeyboardEvent) {
-    // Escape closes the panel and nothing else. The run keeps going -- putting
-    // the window away is not a decision to throw the work out.
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
-      onclose();
+      // From the profile, Escape goes back to the thread rather than closing
+      // the window: it is a second view of the same desk, and nothing in it
+      // can be lost by leaving. From the thread it closes the panel and
+      // nothing else -- the run keeps going, since putting the window away is
+      // not a decision to throw the work out.
+      if (showProfile) showProfile = false;
+      else onclose();
       return;
     }
     // While a run is in progress there is nothing to send, so Enter goes back
@@ -130,11 +166,19 @@
     void prompt;
     fitComposer();
   });
+
+  // Coming back from the profile, the caret goes where it was: in the
+  // composer, ready to say something to the agent whose profile you were just
+  // reading.
+  $effect(() => {
+    if (showProfile) return;
+    (promptEl ?? root)?.focus();
+  });
 </script>
 
 <!-- Deliberately not a modal: the office behind it is the thing you are
-     watching, and clicking another working desk should just swap this panel
-     over rather than being swallowed by a backdrop. -->
+     watching, and clicking another desk should just swap this panel over
+     rather than being swallowed by a backdrop. -->
 <div
   class="dialog"
   bind:this={root}
@@ -152,53 +196,76 @@
     {#if streaming}
       <span class="live" style:color={colour}>working</span>
     {/if}
+    <!-- Next to Close because it is the same kind of thing: what this window
+         is showing, rather than anything the agent is doing. A person rather
+         than a pencil, because nothing in there can be typed into any more --
+         the folder on disk is where an agent is edited. -->
+    <button
+      class="edit"
+      class:on={showProfile}
+      onclick={() => (showProfile = !showProfile)}
+      aria-pressed={showProfile}
+      aria-label="Profile"
+      title={showProfile ? "Back to the conversation" : `${name}’s profile`}
+    >
+      <svg viewBox="0 0 16 16" aria-hidden="true">
+        <path
+          d="M8 8.4a3.1 3.1 0 1 0 0-6.2 3.1 3.1 0 0 0 0 6.2Zm0 1.3c-3 0-5.4 1.6-5.4 3.5 0 .4.3.7.7.7h9.4c.4 0 .7-.3.7-.7 0-1.9-2.4-3.5-5.4-3.5Z"
+          fill="currentColor"
+        />
+      </svg>
+    </button>
     <button class="close" onclick={onclose} aria-label="Close" title="Close (Esc)">
       ✕
     </button>
   </header>
 
-  <div class="scroller" bind:this={scroller} onscroll={onScroll}>
-    {#if thread.length === 0}
-      <p class="hint">
-        Nothing from {name} in this conversation yet. Ask him something below and
-        it goes straight to his desk.
-      </p>
-    {/if}
-
-    {#each thread as entry (entry.id)}
-      {#if entry.kind === "user"}
-        <div class="said">{entry.text}</div>
-      {:else}
-        <!-- The name is in the header; repeating it on every turn is noise in a
-             panel that only ever shows one person. -->
-        <AgentTurn {entry} showName={false} />
+  {#if showProfile}
+    <AgentProfile {agent} {config} {avatar} />
+  {:else}
+    <div class="scroller" bind:this={scroller} onscroll={onScroll}>
+      {#if thread.length === 0}
+        <p class="hint">
+          Nothing from {name} in this conversation yet. Ask them something below
+          and it goes straight to their desk.
+        </p>
       {/if}
-    {/each}
-  </div>
 
-  <div class="composer">
-    <textarea
-      bind:this={promptEl}
-      bind:value={prompt}
-      onkeydown={onKeydown}
-      oninput={fitComposer}
-      placeholder="Ask {name} directly…"
-      rows="1"
-      spellcheck="false"
-    ></textarea>
-    <div class="actions">
-      {#if session.busy}
-        <!-- One run at a time is the workbench's design. Say why Send is dark
-             rather than leaving a dead button to be poked at -- and leave the
-             box itself live, so a follow-up can be written while you watch.
-             It sends the moment the run ends. -->
-        <span class="note">Sends when this run ends</span>
-      {/if}
-      <button class="primary" onclick={send} disabled={session.busy || !prompt.trim()}>
-        Send
-      </button>
+      {#each thread as entry (entry.id)}
+        {#if entry.kind === "user"}
+          <div class="said">{entry.text}</div>
+        {:else}
+          <!-- The name is in the header; repeating it on every turn is noise in a
+               panel that only ever shows one person. -->
+          <AgentTurn {entry} showName={false} />
+        {/if}
+      {/each}
     </div>
-  </div>
+
+    <div class="composer">
+      <textarea
+        bind:this={promptEl}
+        bind:value={prompt}
+        onkeydown={onKeydown}
+        oninput={fitComposer}
+        placeholder="Ask {name} directly…"
+        rows="1"
+        spellcheck="false"
+      ></textarea>
+      <div class="actions">
+        {#if session.busy}
+          <!-- One run at a time is the workbench's design. Say why Send is dark
+               rather than leaving a dead button to be poked at -- and leave the
+               box itself live, so a follow-up can be written while you watch.
+               It sends the moment the run ends. -->
+          <span class="note">Sends when this run ends</span>
+        {/if}
+        <button class="primary" onclick={send} disabled={session.busy || !prompt.trim()}>
+          Send
+        </button>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -245,8 +312,38 @@
     letter-spacing: 0.06em;
   }
 
-  .close {
+  /* Sits where the close button used to start, so Close stays the last thing
+     in the header and does not move as the toggle appears. */
+  .edit {
     margin-left: auto;
+    display: flex;
+    padding: 3px 6px;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    background: none;
+    color: var(--muted);
+    cursor: pointer;
+  }
+
+  .edit svg {
+    width: 13px;
+    height: 13px;
+  }
+
+  .edit:hover {
+    border-color: var(--line);
+    color: var(--text);
+  }
+
+  /* Held down while the profile is up: the header says which of the two things
+     this panel can show you is on screen. */
+  .edit.on {
+    border-color: var(--line);
+    background: var(--panel);
+    color: var(--accent);
+  }
+
+  .close {
     padding: 2px 7px;
     border: 1px solid transparent;
     border-radius: 5px;

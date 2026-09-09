@@ -1,0 +1,74 @@
+[
+  {
+    "id": "anton",
+    "name": "Anton",
+    "role": "coordinator",
+    "title": "Lead",
+    "skillset": [
+      "task intake",
+      "planning",
+      "delegation",
+      "synthesis"
+    ],
+    "colour": "#f2b544",
+    "desk": {
+      "x": 500,
+      "y": 140,
+      "seatX": 500,
+      "seatY": 208
+    },
+    "model": "",
+    "planModel": "sonnet",
+    "state": "idle"
+  },
+  {
+    "id": "jeff",
+    "name": "Jeff",
+    "role": "specialist",
+    "title": "Systems",
+    "skillset": [
+      "Go",
+      "infrastructure",
+      "architecture",
+      "performance",
+      "memory",
+      "CPU",
+      "concurrency",
+      "systems integration",
+      "dependency restraint"
+    ],
+    "colour": "#5bc8a0",
+    "desk": {
+      "x": 320,
+      "y": 430,
+      "seatX": 320,
+      "seatY": 498
+    },
+    "model": "",
+    "state": "idle"
+  },
+  {
+    "id": "chris",
+    "name": "Chris",
+    "role": "specialist",
+    "title": "Experience",
+    "skillset": [
+      "UX",
+      "usability",
+      "interaction design",
+      "Svelte",
+      "information hierarchy",
+      "visual clarity",
+      "reducing friction"
+    ],
+    "colour": "#7aa7ff",
+    "desk": {
+      "x": 680,
+      "y": 430,
+      "seatX": 680,
+      "seatY": 498
+    },
+    "model": "",
+    "state": "idle"
+  }
+]

@@ -48,9 +48,40 @@ export interface AgentStatus {
     "name": string;
     "role": agents$0.Role;
     "title": string;
-    "specialties": string[] | null;
+
+    /**
+     * Skillset is what this agent is good at, one skill per entry. The
+     * coordinator's routing prompt is built from these, so they are the part
+     * of an agent's identity that changes where work goes.
+     */
+    "skillset": string[] | null;
+
+    /**
+     * Personality is a short description of how the agent behaves: the traits
+     * that colour an answer without changing what it knows.
+     */
+    "personality"?: string;
+
+    /**
+     * Experience is a short backstory or seniority note.
+     */
+    "experience"?: string;
     "colour": string;
     "desk": agents$0.Desk;
+
+    /**
+     * Avatar is the path to the agent's avatar image, if the folder has one.
+     * It is a filesystem path, not a URL: what to do with it is the
+     * frontend's problem, and an agent without one is normal.
+     */
+    "avatar"?: string;
+
+    /**
+     * Summary is the opening line of PERSONALITY.md as of the last scan. It
+     * stands in for Skillset in the coordinator's roster when a folder-defined
+     * agent lists no skills, so a new folder is routable the moment it exists.
+     */
+    "summary"?: string;
 
     /**
      * Model is the Claude model alias this agent runs on. Empty means "let the

@@ -14,6 +14,7 @@ import (
 	"dev.jevido/work/internal/board"
 	"dev.jevido/work/internal/changes"
 	"dev.jevido/work/internal/claude"
+	"dev.jevido/work/internal/config"
 )
 
 // Emitter delivers a named event with a payload to the frontend. main wires
@@ -82,6 +83,10 @@ type Workbench struct {
 	// review holds the working tree as it was before the last run, so its file
 	// changes can be listed and reverted afterwards.
 	review *changes.Snapshot
+	// root is the config folder agents are loaded from, empty until the user
+	// picks one. Until then the built-in team stands in, so Work is usable
+	// before it is configured.
+	root string
 }
 
 // run is one top-level request, from prompt to final answer.
@@ -282,7 +287,17 @@ func (w *Workbench) Cancel(runID string) error {
 }
 
 // executeRouted runs the full coordinator flow: plan, delegate, synthesise.
+//
+// A one-agent office -- the state right after setup, before any specialist
+// folder exists -- has nobody to route to, so the planning turn is skipped
+// and the coordinator answers directly rather than failing the task.
 func (w *Workbench) executeRouted(ctx context.Context, r *run, lead agents.Agent) error {
+	if len(specialistIDs(w.registry)) == 0 {
+		card := w.addCard(r.id, lead.ID, r.prompt)
+		_, err := w.executeStep(ctx, r, lead, PhaseWork, r.prompt, card)
+		return err
+	}
+
 	plan, err := w.plan(ctx, r, lead)
 	if err != nil {
 		return err
@@ -341,7 +356,7 @@ func (w *Workbench) plan(ctx context.Context, r *run, lead agents.Agent) (Plan, 
 	err = w.runner.Run(ctx, claude.Request{
 		Prompt:             planPrompt(w.registry, r.prompt, r.followUp, w.board.Snapshot()),
 		Model:              model,
-		AppendSystemPrompt: lead.SystemPrompt,
+		AppendSystemPrompt: w.systemPrompt(lead),
 		WorkDir:            w.workDir,
 		JSONSchema:         schema,
 		// Routing is a judgement call on the text of the task, not an
@@ -499,7 +514,7 @@ func (w *Workbench) streamStep(
 	err = w.runner.Run(ctx, claude.Request{
 		Prompt:             prompt,
 		Model:              agent.Model,
-		AppendSystemPrompt: agent.SystemPrompt,
+		AppendSystemPrompt: w.systemPrompt(agent),
 		WorkDir:            w.workDir,
 		AllowedTools:       agent.AllowedTools,
 		PermissionMode:     agent.PermissionMode,
@@ -603,6 +618,124 @@ func (w *Workbench) finishRun(ctx context.Context, r *run, err error) {
 	default:
 		w.emit(EventRunFinished, RunEvent{RunID: r.id})
 	}
+}
+
+// ConfigRoot returns the folder agents are loaded from, or empty if the user
+// has not picked one yet. The frontend uses the empty case to decide that this
+// is a first run.
+func (w *Workbench) ConfigRoot() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.root
+}
+
+// SetConfigRoot points Work at a config folder, loads the team from it and
+// remembers the choice for next time.
+//
+// The team is loaded before the choice is persisted, so a folder Work cannot
+// use is reported rather than saved.
+func (w *Workbench) SetConfigRoot(root string) ([]AgentStatus, error) {
+	list, err := w.UseConfigRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	if err := config.Save(config.Config{Root: root}); err != nil {
+		return nil, err
+	}
+	return list, nil
+}
+
+// UseConfigRoot loads the team from a config folder without persisting the
+// choice. Startup uses it to apply the folder already saved in the config.
+func (w *Workbench) UseConfigRoot(root string) ([]AgentStatus, error) {
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return nil, errors.New("workbench: empty config folder")
+	}
+	return w.loadAgents(root)
+}
+
+// ReloadAgents rescans the config folder and rebuilds the team.
+//
+// This is the path for an agent added outside Work: a new folder under agents/
+// becomes a colleague here, with no restart and nothing to fill in twice.
+func (w *Workbench) ReloadAgents() ([]AgentStatus, error) {
+	root := w.ConfigRoot()
+	if root == "" {
+		return nil, errors.New("workbench: no config folder selected")
+	}
+	return w.loadAgents(root)
+}
+
+// loadAgents repairs the folder layout, rescans it and swaps in the result.
+//
+// Reloading during a run is refused. Agents already dispatched hold their own
+// copy of their definition, so a swap mid-run would not corrupt anything, but
+// it would leave the board and the office describing a team that no longer
+// matches the work in flight. The check is a guard against the user's own
+// click, not against a concurrent caller; there is one window.
+func (w *Workbench) loadAgents(root string) ([]AgentStatus, error) {
+	w.mu.Lock()
+	running := w.active != nil
+	w.mu.Unlock()
+	if running {
+		return nil, errors.New("workbench: stop the run before reloading agents")
+	}
+
+	if err := agents.Ensure(root); err != nil {
+		return nil, err
+	}
+	list, err := agents.Scan(root)
+	if err != nil {
+		return nil, err
+	}
+	w.registry.Replace(list)
+
+	w.mu.Lock()
+	w.root = root
+	// Per-agent bookkeeping is reconciled rather than reset: an agent who
+	// survived the rescan keeps the session they have been talking in, and one
+	// whose folder is gone stops costing memory.
+	state := make(map[string]AgentState, len(list))
+	for _, a := range list {
+		if s, ok := w.state[a.ID]; ok {
+			state[a.ID] = s
+		} else {
+			state[a.ID] = StateIdle
+		}
+	}
+	w.state = state
+	for id := range w.current {
+		if _, ok := state[id]; !ok {
+			delete(w.current, id)
+		}
+	}
+	for id := range w.sessions {
+		if _, ok := state[id]; !ok {
+			delete(w.sessions, id)
+		}
+	}
+	w.mu.Unlock()
+
+	return w.Agents(), nil
+}
+
+// systemPrompt is what an agent is told about themselves for one turn: Work's
+// own definition of the role, followed by the PERSONALITY.md in their folder as
+// it reads right now.
+//
+// The file is read here rather than held in the registry so that editing it in
+// an editor takes effect on the very next task. A file that cannot be read is
+// not worth failing a task over; the built-in prompt still describes the agent.
+func (w *Workbench) systemPrompt(a agents.Agent) string {
+	personality, err := agents.ReadPersonality(a.Dir)
+	if err != nil || personality == "" {
+		return a.SystemPrompt
+	}
+	if a.SystemPrompt == "" {
+		return personality
+	}
+	return a.SystemPrompt + "\n\n" + personality
 }
 
 // sessionFor returns the agent's session in this conversation, if any.

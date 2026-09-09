@@ -7,6 +7,11 @@
 // fields from the start than to reshape the registry later.
 package agents
 
+import (
+	"strings"
+	"sync"
+)
+
 // Role marks what an agent is for. Anton coordinates; the others specialise.
 type Role string
 
@@ -36,13 +41,35 @@ type Desk struct {
 // internal/workbench, deliberately separate, so this can eventually be loaded
 // from user configuration without touching the state machine.
 type Agent struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Role        Role     `json:"role"`
-	Title       string   `json:"title"`
-	Specialties []string `json:"specialties"`
-	Colour      string   `json:"colour"`
-	Desk        Desk     `json:"desk"`
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Role  Role   `json:"role"`
+	Title string `json:"title"`
+	// Skillset is what this agent is good at, one skill per entry. The
+	// coordinator's routing prompt is built from these, so they are the part
+	// of an agent's identity that changes where work goes.
+	Skillset []string `json:"skillset"`
+	// Personality is a short description of how the agent behaves: the traits
+	// that colour an answer without changing what it knows.
+	Personality string `json:"personality,omitempty"`
+	// Experience is a short backstory or seniority note.
+	Experience string `json:"experience,omitempty"`
+	Colour     string `json:"colour"`
+	Desk       Desk   `json:"desk"`
+
+	// Dir is the agent's folder under <root>/agents, empty for a built-in
+	// agent with no folder behind it. PERSONALITY.md is read from here every
+	// time the agent is given work, so editing it in an editor takes effect on
+	// the next task rather than on the next restart.
+	Dir string `json:"-"`
+	// Avatar is the path to the agent's avatar image, if the folder has one.
+	// It is a filesystem path, not a URL: what to do with it is the
+	// frontend's problem, and an agent without one is normal.
+	Avatar string `json:"avatar,omitempty"`
+	// Summary is the opening line of PERSONALITY.md as of the last scan. It
+	// stands in for Skillset in the coordinator's roster when a folder-defined
+	// agent lists no skills, so a new folder is routable the moment it exists.
+	Summary string `json:"summary,omitempty"`
 
 	// Model is the Claude model alias this agent runs on. Empty means "let the
 	// local Claude installation decide".
@@ -65,8 +92,26 @@ type Agent struct {
 	PermissionMode string `json:"permissionMode,omitempty"`
 }
 
-// Registry is an ordered, immutable set of agents.
+// Blurb is the one-line description of an agent used to route work to them.
+//
+// The skillset is the better signal and is what the built-in team carries, but
+// an agent that arrived as a folder may only have a PERSONALITY.md; its first
+// line is a truthful, cheap substitute.
+func (a Agent) Blurb() string {
+	if len(a.Skillset) > 0 {
+		return strings.Join(a.Skillset, ", ")
+	}
+	return a.Summary
+}
+
+// Registry is an ordered set of agents, safe for concurrent use.
+//
+// An agent is a folder on disk, so nothing in here is edited in place: the
+// only write is Replace, which swaps the whole roster after a rescan. A single
+// mutex around two small copies is all the synchronisation that needs. Agents
+// are handed out by value, so a caller can never observe a half-applied swap.
 type Registry struct {
+	mu      sync.RWMutex
 	ordered []Agent
 	byID    map[string]Agent
 }
@@ -86,6 +131,9 @@ func NewRegistry(list ...Agent) *Registry {
 
 // All returns the agents in display order.
 func (r *Registry) All() []Agent {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
 	out := make([]Agent, len(r.ordered))
 	copy(out, r.ordered)
 	return out
@@ -93,12 +141,36 @@ func (r *Registry) All() []Agent {
 
 // Get looks an agent up by ID.
 func (r *Registry) Get(id string) (Agent, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
 	a, ok := r.byID[id]
 	return a, ok
 }
 
+// Replace swaps the whole roster, in display order.
+//
+// This is how a rescan of the agents folder lands: agents appear and disappear
+// as folders do, so the registry cannot treat its contents as fixed. Callers
+// that keep per-agent state of their own -- the workbench keeps two maps and a
+// session per agent -- have to reconcile it against the new list themselves.
+func (r *Registry) Replace(list []Agent) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.ordered = make([]Agent, len(list))
+	copy(r.ordered, list)
+	r.byID = make(map[string]Agent, len(list))
+	for _, a := range list {
+		r.byID[a.ID] = a
+	}
+}
+
 // Coordinator returns the agent that receives tasks first.
 func (r *Registry) Coordinator() (Agent, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
 	for _, a := range r.ordered {
 		if a.Role == RoleCoordinator {
 			return a, true
@@ -120,7 +192,7 @@ func Default() *Registry {
 			// Every routed task pays for a planning turn, so it runs on a
 			// cheaper, faster model than the work itself.
 			PlanModel: "sonnet",
-			Specialties: []string{
+			Skillset: []string{
 				"task intake", "planning", "delegation", "synthesis",
 			},
 			SystemPrompt: "You are Anton, the coordinating engineer of the Work " +
@@ -137,7 +209,7 @@ func Default() *Registry {
 			Title:  "Systems",
 			Colour: "#5bc8a0",
 			Desk:   Desk{X: 320, Y: 430, SeatX: 320, SeatY: 498},
-			Specialties: []string{
+			Skillset: []string{
 				"Go", "infrastructure", "architecture", "performance",
 				"memory", "CPU", "concurrency", "systems integration",
 				"dependency restraint",
@@ -155,7 +227,7 @@ func Default() *Registry {
 			Title:  "Experience",
 			Colour: "#7aa7ff",
 			Desk:   Desk{X: 680, Y: 430, SeatX: 680, SeatY: 498},
-			Specialties: []string{
+			Skillset: []string{
 				"UX", "usability", "interaction design", "Svelte",
 				"information hierarchy", "visual clarity", "reducing friction",
 			},

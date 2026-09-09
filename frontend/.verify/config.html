@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <link rel="stylesheet" href="/public/style.css" />
+    <title>verify config</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <!-- Imported first so window.__config exists before the app is mounted. -->
+    <script type="module" src="/.verify/config-bindings.ts"></script>
+    <script type="module" src="/.verify/harness-config.ts"></script>
+  </body>
+</html>

@@ -25,13 +25,32 @@ const BOX_BELOW = 46;
 /**
  * A worker in the office.
  *
- * Every field is a number or a string set once: instances are allocated when
- * the scene is built and then mutated in place, so the animation loop does not
- * allocate.
+ * Every field is a number or a string: instances are allocated when the scene
+ * is built and then mutated in place, so the animation loop does not allocate.
  */
 export class OfficeAgent {
   readonly id: string;
-  readonly name: string;
+
+  /**
+   * What the nameplate says. Editable from the agent's desk panel, so unlike
+   * everything else here it can change without the scene being rebuilt -- see
+   * the renderer's setAgentName.
+   */
+  name: string;
+
+  /**
+   * The agent's own picture, once it has been decoded, or null to draw the
+   * colour blob instead. Most agents have no avatar, so null is the normal
+   * case rather than a missing one.
+   */
+  avatar: HTMLImageElement | null = null;
+
+  /**
+   * The URL `avatar` was asked for. Held so a repeated push of the same URL is
+   * a no-op, and so a load that finishes after the agent was pointed at a
+   * different file can tell that it is no longer wanted.
+   */
+  avatarUrl = "";
 
   /** Body colour, and the two shades derived from it, computed once. */
   readonly colour: string;
