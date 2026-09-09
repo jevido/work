@@ -20,12 +20,16 @@ export interface Column {
   cards: Card[];
 }
 
-const COLUMNS: { status: CardStatus; label: string }[] = [
-  { status: "todo", label: "Assigned" },
-  { status: "doing", label: "In progress" },
-  { status: "done", label: "Done" },
-  { status: "blocked", label: "Blocked" },
-];
+/** What a status is called wherever it is shown, board or panel. */
+export const STATUS_LABELS: Record<CardStatus, string> = {
+  todo: "Assigned",
+  doing: "In progress",
+  done: "Done",
+  blocked: "Blocked",
+};
+
+/** Board order, left to right. */
+const COLUMNS: CardStatus[] = ["todo", "doing", "done", "blocked"];
 
 /**
  * The task board.
@@ -39,9 +43,10 @@ export class TaskBoard {
 
   /** Cards grouped into columns, in board order. */
   columns = $derived<Column[]>(
-    COLUMNS.map((c) => ({
-      ...c,
-      cards: this.cards.filter((card) => card.status === c.status),
+    COLUMNS.map((status) => ({
+      status,
+      label: STATUS_LABELS[status],
+      cards: this.cards.filter((card) => card.status === status),
     })),
   );
 

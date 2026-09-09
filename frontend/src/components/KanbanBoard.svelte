@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { AgentIdentity } from "../lib/claude/session.svelte";
-  import type { TaskBoard } from "../lib/board/board.svelte";
+  import type { Card, TaskBoard } from "../lib/board/board.svelte";
+  import TaskDialog from "./TaskDialog.svelte";
 
   let {
     board,
@@ -9,8 +10,52 @@
 
   const roster = $derived(new Map(agents.map((a) => [a.id, a])));
 
+  /** The card being read in full, if any. */
+  let openCard = $state<Card | null>(null);
+  /** The card that opened the panel, so closing it hands focus back. */
+  let opener: HTMLElement | null = null;
+
+  /**
+   * The open card as the board has it now.
+   *
+   * The board arrives as a whole snapshot, so the card object in `openCard` is
+   * a stale copy the moment anything changes. Reading it back by id keeps the
+   * panel telling the truth while it is open -- and closes it by itself if
+   * Anton drops the task.
+   */
+  const reading = $derived.by(() => {
+    const open = openCard;
+    if (!open) return null;
+    return board.cards.find((c) => c.id === open.id) ?? null;
+  });
+
   function who(agentId: string): AgentIdentity {
     return roster.get(agentId) ?? { id: agentId, name: agentId, colour: "#8b93a3" };
+  }
+
+  function open(card: Card, from: EventTarget | null) {
+    opener = from instanceof HTMLElement ? from : null;
+    openCard = card;
+  }
+
+  function close() {
+    openCard = null;
+    opener?.focus();
+    opener = null;
+  }
+
+  function onCardClick(card: Card, event: MouseEvent) {
+    // The id and the title are selectable on purpose, and selecting them ends
+    // in a click. Copying a task id should not also open a panel over it.
+    const selection = window.getSelection();
+    if (selection && !selection.isCollapsed && selection.toString().trim()) return;
+    open(card, event.currentTarget);
+  }
+
+  function onCardKeydown(card: Card, event: KeyboardEvent) {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    open(card, event.currentTarget);
   }
 </script>
 
@@ -23,7 +68,18 @@
       </div>
       <div class="cards">
         {#each column.cards as card (card.id)}
-          <article class="card" style:--agent={who(card.agentId).colour}>
+          <!-- A card is a button in everything but markup: it holds text that
+               is meant to stay selectable, which a real <button> would take
+               away. -->
+          <div
+            class="card"
+            role="button"
+            tabindex="0"
+            aria-label="Open task {card.id}"
+            style:--agent={who(card.agentId).colour}
+            onclick={(event) => onCardClick(card, event)}
+            onkeydown={(event) => onCardKeydown(card, event)}
+          >
             <div class="assignee">
               <span class="dot"></span>
               <span class="name">{who(card.agentId).name}</span>
@@ -33,7 +89,7 @@
             {#if card.note}
               <p class="note">{card.note}</p>
             {/if}
-          </article>
+          </div>
         {/each}
         {#if column.cards.length === 0}
           <div class="empty" aria-hidden="true"></div>
@@ -42,6 +98,10 @@
     </div>
   {/each}
 </section>
+
+{#if reading}
+  <TaskDialog card={reading} assignee={who(reading.agentId)} onclose={close} />
+{/if}
 
 <style>
   .board {
@@ -102,6 +162,18 @@
     border-left: 2px solid var(--agent);
     border-radius: 5px;
     background: var(--panel-2);
+    /* The whole card opens it, so the whole card has to look like it does. */
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .card:hover {
+    border-color: #3a4250;
+  }
+
+  .card:focus-visible {
+    outline: 1px solid var(--accent);
+    outline-offset: 1px;
   }
 
   .assignee {

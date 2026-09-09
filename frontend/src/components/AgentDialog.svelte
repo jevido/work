@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { AgentEntry, ClaudeSession, UserEntry } from "../lib/claude/session.svelte";
+  import { PanelDrag, dragHandle } from "../lib/ui/drag.svelte";
   import AgentTurn from "./AgentTurn.svelte";
 
   let {
@@ -21,6 +22,15 @@
   let promptEl: HTMLTextAreaElement | undefined = $state();
   let scroller: HTMLDivElement | undefined = $state();
   let pinned = $state(true);
+
+  /**
+   * Where this panel has been dragged to.
+   *
+   * Kept across desk switches on purpose: it is the same window in the same
+   * place, showing somebody else. Moving it out of the way of a desk you want
+   * to watch should not have to be done twice.
+   */
+  const drag = new PanelDrag();
 
   /**
    * This agent's side of the conversation, read straight off the live entries
@@ -131,9 +141,12 @@
   role="dialog"
   aria-label="{name}’s desk"
   tabindex="-1"
+  style:transform={drag.transform}
   onkeydown={onKeydown}
 >
-  <header>
+  <!-- Drag it by the header: the office underneath is the thing being watched,
+       and a panel parked over the desk you care about is worse than no panel. -->
+  <header {@attach dragHandle(drag)}>
     <span class="dot" style:background={colour}></span>
     <span class="name">{name}</span>
     {#if streaming}
