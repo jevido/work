@@ -12,6 +12,9 @@ import { Call as $Call, CancellablePromise as $CancellablePromise } from "@wails
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
+import * as agents$0 from "../internal/agents/models.js";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
 import * as board$0 from "../internal/board/models.js";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
@@ -19,6 +22,16 @@ import * as changes$0 from "../internal/changes/models.js";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
 import * as workbench$0 from "../internal/workbench/models.js";
+
+/**
+ * AgentProfile returns what one agent's folder says about them: the skills in
+ * skills/, their PERSONALITY.md and the line Anton routes them on. The profile
+ * view asks for this when it opens, rather than reading it out of the roster,
+ * because the roster is re-sent constantly and this is not small.
+ */
+export function AgentProfile(agentID: string): $CancellablePromise<agents$0.Profile> {
+    return $Call.ByID(663790700, agentID);
+}
 
 /**
  * Agents returns the team and each member's current state.

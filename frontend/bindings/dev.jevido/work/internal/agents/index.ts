@@ -6,5 +6,6 @@ export {
 } from "./models.js";
 
 export type {
-    Desk
+    Desk,
+    Profile
 } from "./models.js";

@@ -26,6 +26,51 @@ export interface Desk {
 }
 
 /**
+ * Profile is what an agent's folder currently says about them.
+ * 
+ * Everything here is read at call time rather than taken from the last scan:
+ * the panel that shows it is opened by someone who may have just edited the
+ * file, and stale text in the one view whose whole job is to show the file
+ * would read as a bug rather than as a cache.
+ */
+export interface Profile {
+    "id": string;
+
+    /**
+     * Dir is the folder this was read from, empty for a built-in agent that
+     * has no folder behind it.
+     */
+    "dir"?: string;
+
+    /**
+     * Skills are the names in skills/, one per skill folder or file.
+     */
+    "skills": string[] | null;
+
+    /**
+     * Skillset is the built-in skillset, if this agent has one. It is Work's
+     * rather than the folder's, which is why it is separate from Skills.
+     */
+    "skillset": string[] | null;
+
+    /**
+     * Blurb is the one line the coordinator routes this agent on, whichever of
+     * the two it comes from, so nothing has to work that rule out again.
+     */
+    "blurb"?: string;
+
+    /**
+     * Personality is PERSONALITY.md without its heading.
+     */
+    "personality"?: string;
+
+    /**
+     * Avatar is the picture in the folder, if it holds one.
+     */
+    "avatar"?: string;
+}
+
+/**
  * Role marks what an agent is for. Anton coordinates; the others specialise.
  */
 export enum Role {

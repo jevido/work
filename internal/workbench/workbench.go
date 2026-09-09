@@ -655,6 +655,21 @@ func (w *Workbench) UseConfigRoot(root string) ([]AgentStatus, error) {
 	return w.loadAgents(root)
 }
 
+// AgentProfile reads what one agent's folder currently says about them: the
+// skills in skills/, their PERSONALITY.md and the line the coordinator routes
+// them on.
+//
+// Read on demand rather than carried in AgentStatus. The roster goes to the
+// frontend on every reload and every state change, a personality file may run
+// to 32 KiB, and only the one panel that is open needs any of it.
+func (w *Workbench) AgentProfile(id string) (agents.Profile, error) {
+	a, ok := w.registry.Get(id)
+	if !ok {
+		return agents.Profile{}, fmt.Errorf("workbench: unknown agent %q", id)
+	}
+	return agents.ReadProfile(a)
+}
+
 // ReloadAgents rescans the config folder and rebuilds the team.
 //
 // This is the path for an agent added outside Work: a new folder under agents/

@@ -2,8 +2,8 @@ package agents
 
 // Agents live on disk, one folder each, under a root the user picks. The
 // folder is the definition: its name is the agent, PERSONALITY.md is who they
-// are, skills/ is what they will eventually know how to do. Nothing here
-// depends on the UI, so an agent added in an editor is a first-class agent.
+// are, skills/ is what they know how to do. Nothing here depends on the UI, so
+// an agent added in an editor is a first-class agent.
 
 import (
 	"errors"
@@ -25,8 +25,9 @@ const (
 	// PersonalityFileName is read and prepended to an agent's system prompt
 	// every time they are given work.
 	PersonalityFileName = "PERSONALITY.md"
-	// SkillsDirName is reserved for per-agent skill files. Work only
-	// guarantees it exists; nothing reads it yet.
+	// SkillsDirName holds an agent's skills, one folder or markdown file each.
+	// Work guarantees it exists and reads the names out of it for the profile
+	// view; nothing puts them in front of Claude yet.
 	SkillsDirName = "skills"
 	// CoordinatorFolder is the one agent Work insists on: without a
 	// coordinator there is nobody to hand a task to.
@@ -152,8 +153,10 @@ it in tokens.
 Optional, beside this file:
 
 - ` + "`avatar.webp`" + ` or ` + "`avatar.png`" + `, drawn at the desk in the office.
-- ` + "`skills/`" + `, for per-agent skill files. Work guarantees the folder exists;
-  nothing reads it yet.
+- ` + "`skills/`" + `, one folder or ` + "`.md`" + ` file per skill. A symlink into a shared
+  skills folder counts, which is the cheap way to share one between agents.
+  Their names show up in the agent's profile; nothing puts them in front of
+  Claude yet.
 `
 
 // writeTemplate keeps agents/_template present and current.

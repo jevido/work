@@ -10,6 +10,7 @@ import (
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 
+	"dev.jevido/work/internal/agents"
 	"dev.jevido/work/internal/board"
 	"dev.jevido/work/internal/changes"
 	"dev.jevido/work/internal/workbench"
@@ -35,6 +36,14 @@ func (s *WorkbenchService) ServiceName() string { return "WorkbenchService" }
 // Agents returns the team and each member's current state.
 func (s *WorkbenchService) Agents() []workbench.AgentStatus {
 	return s.wb.Agents()
+}
+
+// AgentProfile returns what one agent's folder says about them: the skills in
+// skills/, their PERSONALITY.md and the line Anton routes them on. The profile
+// view asks for this when it opens, rather than reading it out of the roster,
+// because the roster is re-sent constantly and this is not small.
+func (s *WorkbenchService) AgentProfile(agentID string) (agents.Profile, error) {
+	return s.wb.AgentProfile(strings.TrimSpace(agentID))
 }
 
 // GetConfigPath returns the folder Work loads agents from, or an empty string

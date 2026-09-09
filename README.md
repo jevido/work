@@ -188,8 +188,15 @@ prose is the blurb Anton routes on** — the only thing he knows about that
 agent when he decides who gets the work. Spend it on the specialty.
 
 Optionally drop an `avatar.webp` or `avatar.png` beside it for the office to
-draw, and skill files in `skills/` — Work guarantees that folder exists, but
-nothing reads it yet.
+draw, and skills in `skills/` — one folder or `.md` file per skill, and a
+symlink into a shared skills folder counts, which is the cheap way to give the
+same skill to two agents. Their names show up in the agent's profile; nothing
+puts them in front of Claude yet.
+
+Click the person icon in an agent's window for that profile: what Anton routes
+them on, the skills in their `skills/`, their personality file and the path to
+edit it. All of it is read off disk when you open it, so a file you just saved
+is what you see.
 
 Anton is not told in advance who works here. Every routing turn is handed the
 roster as it actually is, and the schema that turn must satisfy enumerates the
