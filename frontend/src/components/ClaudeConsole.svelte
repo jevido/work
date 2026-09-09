@@ -175,7 +175,7 @@
 
   <div class="scroller" bind:this={scroller} onscroll={onScroll}>
     {#if session.isEmpty}
-      <p class="hint">Give Anton work. He decides whether to bring in Jeff or Chris.</p>
+      <p class="hint">Give Anton work. He decides who on the team should take it.</p>
     {/if}
 
     {#each session.entries as entry (entry.id)}

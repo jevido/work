@@ -179,7 +179,13 @@ func (r *Registry) Coordinator() (Agent, bool) {
 	return Agent{}, false
 }
 
-// Default is the built-in team: Anton coordinates, Jeff and Chris specialise.
+// Default is the team Work insists on, which is the coordinator and nobody
+// else. Specialists are the user's to author: a folder under agents/ is an
+// agent, and agents/_template is there to be copied into one.
+//
+// Anton is here rather than on disk because Scan cannot assemble a team
+// without a coordinator, so his role, colour and planning model are Work's to
+// guarantee. His personality file is still the user's document.
 func Default() *Registry {
 	return NewRegistry(
 		Agent{
@@ -195,46 +201,17 @@ func Default() *Registry {
 			Skillset: []string{
 				"task intake", "planning", "delegation", "synthesis",
 			},
+			// Deliberately names no colleagues. The routing turn is handed the
+			// roster as it actually is, so a prompt that also listed a team
+			// would be a second, staler answer to the same question -- and it
+			// would invent absent specialists on a roster that had changed.
 			SystemPrompt: "You are Anton, the coordinating engineer of the Work " +
-				"workbench. You receive the task first. Decide whether to do it " +
-				"yourself or to hand parts to Jeff (Go, infrastructure, " +
-				"performance, concurrency, dependency restraint) or Chris (UX, " +
-				"interaction design, Svelte frontend, information hierarchy). " +
-				"Be direct and concrete.",
-		},
-		Agent{
-			ID:     "jeff",
-			Name:   "Jeff",
-			Role:   RoleSpecialist,
-			Title:  "Systems",
-			Colour: "#5bc8a0",
-			Desk:   Desk{X: 320, Y: 430, SeatX: 320, SeatY: 498},
-			Skillset: []string{
-				"Go", "infrastructure", "architecture", "performance",
-				"memory", "CPU", "concurrency", "systems integration",
-				"dependency restraint",
-			},
-			SystemPrompt: "You are Jeff. You own Go, infrastructure, " +
-				"architecture, performance, memory and CPU cost, concurrency and " +
-				"systems integration. You are sceptical of expensive or " +
-				"complicated solutions and of new dependencies; say so and " +
-				"propose the cheaper option.",
-		},
-		Agent{
-			ID:     "chris",
-			Name:   "Chris",
-			Role:   RoleSpecialist,
-			Title:  "Experience",
-			Colour: "#7aa7ff",
-			Desk:   Desk{X: 680, Y: 430, SeatX: 680, SeatY: 498},
-			Skillset: []string{
-				"UX", "usability", "interaction design", "Svelte",
-				"information hierarchy", "visual clarity", "reducing friction",
-			},
-			SystemPrompt: "You are Chris. You own UX, usability, interaction " +
-				"design, Svelte frontend work, information hierarchy and visual " +
-				"clarity. You question solutions that technically work but feel " +
-				"bad to use, and you say what to do instead.",
+				"workbench. You receive the task first. Every routing turn lists " +
+				"the specialists who currently exist; read that roster and decide " +
+				"whether to answer the task yourself or to split it between the " +
+				"ones whose specialties it genuinely spans. Never assume a " +
+				"colleague who is not on the roster, and do not delegate for the " +
+				"sake of it. Be direct and concrete.",
 		},
 	)
 }

@@ -157,14 +157,24 @@ func TestSystemPromptReadsPersonalityFresh(t *testing.T) {
 }
 
 // An agent with no folder behind them still runs on their built-in prompt.
+// Registering one directly is the point: it is the state of any agent Work
+// knows about but the config root has not been scanned for yet.
 func TestSystemPromptWithoutAFolder(t *testing.T) {
 	w := newTestWorkbench(t)
-	jeff, ok := w.registry.Get("jeff")
-	if !ok {
-		t.Fatal("no jeff")
+	a := agents.Agent{
+		ID:           "ada",
+		Name:         "Ada",
+		Role:         agents.RoleSpecialist,
+		SystemPrompt: "You are Ada. You own compilers.",
 	}
-	if got := w.systemPrompt(jeff); got != jeff.SystemPrompt {
-		t.Errorf("got %q, want the built-in prompt", got)
+	w.registry.Replace([]agents.Agent{a})
+
+	got, ok := w.registry.Get("ada")
+	if !ok {
+		t.Fatal("agent not registered")
+	}
+	if prompt := w.systemPrompt(got); prompt != a.SystemPrompt {
+		t.Errorf("got %q, want the built-in prompt", prompt)
 	}
 }
 

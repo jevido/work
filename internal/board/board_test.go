@@ -4,8 +4,8 @@ import "testing"
 
 func TestAddAndSnapshotPreserveOrder(t *testing.T) {
 	b := New()
-	first := b.Add("r1", "jeff", "profile the renderer")
-	second := b.Add("r1", "chris", "tidy the console")
+	first := b.Add("r1", "ada", "profile the renderer")
+	second := b.Add("r1", "grace", "tidy the console")
 
 	cards := b.Snapshot()
 	if len(cards) != 2 {
@@ -24,7 +24,7 @@ func TestAddAndSnapshotPreserveOrder(t *testing.T) {
 
 func TestSnapshotIsACopy(t *testing.T) {
 	b := New()
-	b.Add("r1", "jeff", "original")
+	b.Add("r1", "ada", "original")
 
 	cards := b.Snapshot()
 	cards[0].Title = "tampered"
@@ -36,7 +36,7 @@ func TestSnapshotIsACopy(t *testing.T) {
 
 func TestSetStatusKeepsNotesOnlyWhenBlocked(t *testing.T) {
 	b := New()
-	id := b.Add("r1", "jeff", "profile the renderer")
+	id := b.Add("r1", "ada", "profile the renderer")
 
 	b.SetStatus(id, StatusBlocked, "claude exploded")
 	if card := b.Snapshot()[0]; card.Status != StatusBlocked || card.Note != "claude exploded" {
@@ -51,7 +51,7 @@ func TestSetStatusKeepsNotesOnlyWhenBlocked(t *testing.T) {
 
 func TestSetStatusIgnoresUnknownCards(t *testing.T) {
 	b := New()
-	b.Add("r1", "jeff", "profile the renderer")
+	b.Add("r1", "ada", "profile the renderer")
 	b.SetStatus("nope", StatusDone, "")
 
 	if got := b.Snapshot()[0].Status; got != StatusTodo {
@@ -61,7 +61,7 @@ func TestSetStatusIgnoresUnknownCards(t *testing.T) {
 
 func TestClearEmptiesTheBoard(t *testing.T) {
 	b := New()
-	b.Add("r1", "jeff", "profile the renderer")
+	b.Add("r1", "ada", "profile the renderer")
 	b.Clear()
 
 	if got := b.Snapshot(); len(got) != 0 {
@@ -71,31 +71,31 @@ func TestClearEmptiesTheBoard(t *testing.T) {
 
 func TestCardIDsAreShortAndReferenceable(t *testing.T) {
 	b := New()
-	if got := b.Add("r1", "jeff", "one"); got != "T1" {
+	if got := b.Add("r1", "ada", "one"); got != "T1" {
 		t.Errorf("first card ID = %q, want T1", got)
 	}
-	if got := b.Add("r1", "chris", "two"); got != "T2" {
+	if got := b.Add("r1", "grace", "two"); got != "T2" {
 		t.Errorf("second card ID = %q, want T2", got)
 	}
 	// IDs keep counting across runs within a conversation.
-	if got := b.Add("r2", "jeff", "three"); got != "T3" {
+	if got := b.Add("r2", "ada", "three"); got != "T3" {
 		t.Errorf("third card ID = %q, want T3", got)
 	}
 }
 
 func TestUpdateLeavesEmptyFieldsAlone(t *testing.T) {
 	b := New()
-	id := b.Add("r1", "jeff", "original title")
+	id := b.Add("r1", "ada", "original title")
 
-	if !b.Update(id, "", "chris", StatusDoing) {
+	if !b.Update(id, "", "grace", StatusDoing) {
 		t.Fatal("Update reported the card missing")
 	}
 	card := b.Snapshot()[0]
 	if card.Title != "original title" {
 		t.Errorf("title = %q, want it untouched", card.Title)
 	}
-	if card.AgentID != "chris" {
-		t.Errorf("assignee = %q, want chris", card.AgentID)
+	if card.AgentID != "grace" {
+		t.Errorf("assignee = %q, want grace", card.AgentID)
 	}
 	if card.Status != StatusDoing {
 		t.Errorf("status = %q, want doing", card.Status)
@@ -104,7 +104,7 @@ func TestUpdateLeavesEmptyFieldsAlone(t *testing.T) {
 
 func TestUpdateRejectsUnknownStatus(t *testing.T) {
 	b := New()
-	id := b.Add("r1", "jeff", "one")
+	id := b.Add("r1", "ada", "one")
 	b.Update(id, "", "", Status("finished-ish"))
 
 	if got := b.Snapshot()[0].Status; got != StatusTodo {
@@ -121,7 +121,7 @@ func TestUpdateReportsMissingCards(t *testing.T) {
 
 func TestUpdateClearsTheNoteWhenUnblocked(t *testing.T) {
 	b := New()
-	id := b.Add("r1", "jeff", "one")
+	id := b.Add("r1", "ada", "one")
 	b.SetStatus(id, StatusBlocked, "it broke")
 	b.Update(id, "", "", StatusDone)
 

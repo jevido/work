@@ -169,13 +169,13 @@ func TestAvatarPathAllowsSymlinkInsideRoot(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlinks need privileges on Windows")
 	}
-	root := avatarRoot(t, "anton", "chris")
+	root := avatarRoot(t, "anton", "grace")
 	shared := writeAvatar(t, root, "anton", "avatar.png")
-	if err := os.Symlink(shared, filepath.Join(AgentsDir(root), "chris", "avatar.png")); err != nil {
+	if err := os.Symlink(shared, filepath.Join(AgentsDir(root), "grace", "avatar.png")); err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := AvatarPath(root, "chris")
+	got, err := AvatarPath(root, "grace")
 	if err != nil {
 		t.Fatalf("AvatarPath: %v", err)
 	}

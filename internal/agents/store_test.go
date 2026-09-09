@@ -3,6 +3,7 @@ package agents
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -26,12 +27,106 @@ func TestEnsureSeedsCoordinatorOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 {
-		names := make([]string, 0, len(entries))
-		for _, e := range entries {
-			names = append(names, e.Name())
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	// The template sits beside the agents without being one, so a fresh root
+	// holds the coordinator and something to copy.
+	if len(names) != 2 {
+		t.Errorf("seeded %v, want %s and %s", names, CoordinatorFolder, TemplateFolderName)
+	}
+	list, err := Scan(root)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(list) != 1 || list[0].ID != CoordinatorFolder {
+		t.Errorf("scanned %d agents, want only %s", len(list), CoordinatorFolder)
+	}
+}
+
+// The template is documentation of the layout as it currently is, so unlike a
+// personality it is Work's file rather than the user's: restored when deleted
+// and refreshed when stale. Anyone who wanted to keep an edit has copied the
+// folder, which is what it is for.
+func TestEnsureWritesACopyableTemplate(t *testing.T) {
+	root := t.TempDir()
+	if err := Ensure(root); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	dir := filepath.Join(root, AgentsDirName, TemplateFolderName)
+	path := filepath.Join(dir, PersonalityFileName)
+
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("no template personality: %v", err)
+	}
+	// The one thing someone copying it has to be told, since it is all Anton
+	// reads when he routes.
+	if !strings.Contains(string(body), "first line of prose") {
+		t.Error("template does not say what the first prose line is for")
+	}
+	// An unedited copy still gets routed, so its blurb has to say that it is
+	// unedited rather than leak a line of these instructions into the roster.
+	if got := summarise(string(body)); !strings.Contains(got, "Unedited template") {
+		t.Errorf("blurb of an unedited copy = %q", got)
+	}
+	if info, err := os.Stat(filepath.Join(dir, SkillsDirName)); err != nil || !info.IsDir() {
+		t.Errorf("no %s directory in the template: %v", SkillsDirName, err)
+	}
+
+	if err := os.WriteFile(path, []byte("stale"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Ensure(root); err != nil {
+		t.Fatalf("Ensure again: %v", err)
+	}
+	if body, err = os.ReadFile(path); err != nil {
+		t.Fatal(err)
+	} else if string(body) == "stale" {
+		t.Error("a stale template survived Ensure")
+	}
+}
+
+// Copying the template is the documented way to add an agent, so the copy has
+// to come back from Scan as an ordinary, routable specialist.
+func TestScanAcceptsACopiedTemplate(t *testing.T) {
+	root := t.TempDir()
+	if err := Ensure(root); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	dir := filepath.Join(root, AgentsDirName)
+	if err := os.MkdirAll(filepath.Join(dir, "ada", SkillsDirName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "# Ada\n\nOwns compilers and correctness proofs.\n"
+	if err := os.WriteFile(filepath.Join(dir, "ada", PersonalityFileName), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := Scan(root)
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	var ada Agent
+	for _, a := range list {
+		if a.ID == "ada" {
+			ada = a
 		}
-		t.Errorf("seeded %v, want only %s", names, CoordinatorFolder)
+	}
+	if ada.ID == "" {
+		t.Fatal("a copied template folder did not become an agent")
+	}
+	if ada.Role != RoleSpecialist {
+		t.Errorf("Role = %q, want %q", ada.Role, RoleSpecialist)
+	}
+	// With no built-in skillset the blurb is the personality's first prose
+	// line, which is the whole reason the template makes a point of it.
+	if ada.Blurb() != "Owns compilers and correctness proofs." {
+		t.Errorf("Blurb = %q", ada.Blurb())
+	}
+	if ada.Colour == "" {
+		t.Error("no fallback colour")
 	}
 }
 
@@ -121,15 +216,20 @@ func TestScanPicksUpHandMadeFolder(t *testing.T) {
 	}
 }
 
-// Built-in agents keep the structure Work gives them; the folder only supplies
-// the personality. Recreating one is therefore a mkdir -- the folder name is
-// enough to get Work's colour, skillset and prompt back.
-func TestScanKeepsBuiltInStructure(t *testing.T) {
+// Anton's role, colour, planning model and skillset are Work's rather than the
+// user's: Scan cannot assemble a team without a coordinator. Deleting his
+// folder and making it again therefore has to give the coordinator back, not a
+// fresh specialist who happens to be called Anton.
+func TestScanRestoresTheCoordinator(t *testing.T) {
 	root := t.TempDir()
 	if err := Ensure(root); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
-	if err := os.MkdirAll(filepath.Join(root, AgentsDirName, "jeff"), 0o755); err != nil {
+	dir := filepath.Join(root, AgentsDirName, CoordinatorFolder)
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := Ensure(root); err != nil {
@@ -144,17 +244,20 @@ func TestScanKeepsBuiltInStructure(t *testing.T) {
 	for _, a := range list {
 		byID[a.ID] = a
 	}
-	jeff := byID["jeff"]
-	if jeff.Colour != "#5bc8a0" {
-		t.Errorf("Colour = %q", jeff.Colour)
+	anton := byID[CoordinatorFolder]
+	if anton.Role != RoleCoordinator {
+		t.Errorf("Role = %q, want %q", anton.Role, RoleCoordinator)
 	}
-	if len(jeff.Skillset) == 0 || jeff.SystemPrompt == "" {
+	if anton.Colour != "#f2b544" {
+		t.Errorf("Colour = %q", anton.Colour)
+	}
+	if len(anton.Skillset) == 0 || anton.SystemPrompt == "" {
 		t.Error("built-in skillset or system prompt lost")
 	}
-	if jeff.Dir == "" {
+	if anton.Dir == "" {
 		t.Error("Dir not set, so PERSONALITY.md would never be read")
 	}
-	if byID["anton"].PlanModel != "sonnet" {
+	if anton.PlanModel != "sonnet" {
 		t.Error("coordinator lost its planning model")
 	}
 }
@@ -163,7 +266,7 @@ func TestScanKeepsBuiltInStructure(t *testing.T) {
 // finds none has to fail rather than return a team that cannot work.
 func TestScanRequiresCoordinator(t *testing.T) {
 	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, AgentsDirName, "jeff"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(root, AgentsDirName, "ada"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Scan(root); err == nil {
@@ -237,16 +340,22 @@ func TestReadPersonalityIsCapped(t *testing.T) {
 	}
 }
 
-// The generated layout has to reproduce the hand-placed office for the team
-// Work ships, or every existing screenshot and expectation shifts.
-func TestAssignDesksMatchesTheBuiltInOffice(t *testing.T) {
-	list := Default().All()
+// The generated layout has to reproduce the hand-placed office, or every
+// existing screenshot and expectation shifts. Default() is one agent now, so
+// the three-desk arrangement it was drawn for is spelled out here rather than
+// taken from the shipped team.
+func TestAssignDesksMatchesTheHandPlacedOffice(t *testing.T) {
+	list := []Agent{
+		{ID: "anton", Role: RoleCoordinator},
+		{ID: "first", Role: RoleSpecialist},
+		{ID: "second", Role: RoleSpecialist},
+	}
 	AssignDesks(list)
 
 	want := map[string]Desk{
-		"anton": {X: 500, Y: 140, SeatX: 500, SeatY: 208},
-		"jeff":  {X: 320, Y: 430, SeatX: 320, SeatY: 498},
-		"chris": {X: 680, Y: 430, SeatX: 680, SeatY: 498},
+		"anton":  {X: 500, Y: 140, SeatX: 500, SeatY: 208},
+		"first":  {X: 320, Y: 430, SeatX: 320, SeatY: 498},
+		"second": {X: 680, Y: 430, SeatX: 680, SeatY: 498},
 	}
 	for _, a := range list {
 		if got := a.Desk; got != want[a.ID] {

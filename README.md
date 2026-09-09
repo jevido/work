@@ -3,10 +3,12 @@
 An AI development workbench with a visual office.
 
 You give a task to **Anton**. Anton decides how to approach it and, when it
-helps, brings in specialists — **Jeff** for Go, infrastructure and performance,
-**Chris** for UX, interaction and frontend. The agents are drawn as workers in a
-small office: idle they wander, assigned they walk to their desk, working they
-sit down and get on with it.
+helps, splits it between your specialists — whoever those are. Anton is the
+only agent Work ships; the rest of the team is yours to write, one folder
+each, and he is handed the roster as it stands on every request rather than
+being told in advance who exists. The agents are drawn as workers in a small
+office: idle they wander, assigned they walk to their desk, working they sit
+down and get on with it.
 
 The office is not the product. It is a cheap, legible picture of what the AI
 system is doing, so understanding a run does not mean reading raw terminal
@@ -101,7 +103,7 @@ platforms.
 
 ```
 main.go                       Wails app: window, services, event registration
-internal/agents/              Static agent definitions: role, desk, prompt, model
+internal/agents/              The agents folder: scanning, avatars, desk layout
 internal/board/               The task board: cards, columns, assignment
 internal/changes/             What a run did to the working tree, and undoing it
 internal/claude/              Runs the local Claude CLI, parses its JSON stream
@@ -142,7 +144,7 @@ them as they run — Assigned, In progress, Done, Blocked. Nothing on it costs a
 extra Claude call.
 
 The board is Anton's to manage and yours to read. Every task carries a short ID
-— T1, T2 — because that is how you talk to him about it: "close T3", "put Chris
+— T1, T2 — because that is how you talk to him about it: "close T3", "put Ada
 on T4". He is shown the board on every request and can create tasks, close
 them, rename them or hand them to someone else, and any edit he makes appears in
 the conversation next to his reasoning. There is no drag-and-drop; the board
@@ -158,6 +160,48 @@ arguments and output. An edit opens as a diff rather than as two walls of text. 
 across turns, so a follow-up can lean on what was already said. "New chat"
 clears the screen, the board and the agents' memory in one gesture, because
 those three drifting apart would be worse than any of them being stale.
+
+## Your team
+
+Agents are folders. Pick a config root the first time Work starts and it
+creates this:
+
+```
+<root>/agents/
+  anton/            The coordinator. The one agent Work insists on.
+    PERSONALITY.md
+    skills/
+  _template/        Copy this to add someone.
+    PERSONALITY.md
+    skills/
+```
+
+Adding a colleague is `cp -r _template ada`. The folder name is the agent's
+id and Work capitalises it for the name on the desk, so `ada` becomes Ada.
+Folders beginning with `_` or `.` are skipped, which is how `_template` sits
+among the agents without being one — and how you park a half-written agent
+without moving it out.
+
+`PERSONALITY.md` is the agent. It is read fresh on every dispatch, so an edit
+lands on the next task rather than the next restart, and **its first line of
+prose is the blurb Anton routes on** — the only thing he knows about that
+agent when he decides who gets the work. Spend it on the specialty.
+
+Optionally drop an `avatar.webp` or `avatar.png` beside it for the office to
+draw, and skill files in `skills/` — Work guarantees that folder exists, but
+nothing reads it yet.
+
+Anton is not told in advance who works here. Every routing turn is handed the
+roster as it actually is, and the schema that turn must satisfy enumerates the
+agent ids that currently exist, so he can neither invent a colleague nor keep
+naming one you deleted. Nothing about the team is compiled in except Anton
+himself, who is guaranteed because a team with no coordinator has nobody to
+hand a task to.
+
+The wrench menu re-scans without a restart. `_template` is Work's file rather
+than yours: it is rewritten on every scan, because it documents the layout and
+a stale copy of it is worse than none. Your agents' personality files are never
+touched.
 
 ## Reviewing what an agent did
 

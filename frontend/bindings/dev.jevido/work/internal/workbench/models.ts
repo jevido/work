@@ -243,7 +243,8 @@ export interface PlanStep {
 
     /**
      * TaskID names an existing board card to run instead of opening a new one,
-     * so "get Jeff onto T4" continues that task rather than duplicating it.
+     * so "put the renderer work back on T4" continues that task rather than
+     * duplicating it.
      */
     "taskId"?: string;
 }

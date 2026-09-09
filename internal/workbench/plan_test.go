@@ -24,9 +24,9 @@ func theseCards(ids ...string) func(string) bool {
 func testRegistry() *agents.Registry {
 	return agents.NewRegistry(
 		agents.Agent{ID: "anton", Name: "Anton", Role: agents.RoleCoordinator},
-		agents.Agent{ID: "jeff", Name: "Jeff", Role: agents.RoleSpecialist,
+		agents.Agent{ID: "ada", Name: "Ada", Role: agents.RoleSpecialist,
 			Skillset: []string{"Go", "performance"}},
-		agents.Agent{ID: "chris", Name: "Chris", Role: agents.RoleSpecialist,
+		agents.Agent{ID: "grace", Name: "Grace", Role: agents.RoleSpecialist,
 			Skillset: []string{"UX", "Svelte"}},
 	)
 }
@@ -34,8 +34,8 @@ func testRegistry() *agents.Registry {
 // TestNormaliseKeepsUsableSteps checks the happy path is left alone.
 func TestNormaliseKeepsUsableSteps(t *testing.T) {
 	p := Plan{Mode: ModeTeam, Steps: []PlanStep{
-		{AgentID: "jeff", Task: "profile the renderer"},
-		{AgentID: "chris", Task: "tidy the console"},
+		{AgentID: "ada", Task: "profile the renderer"},
+		{AgentID: "grace", Task: "tidy the console"},
 	}}
 	p.normalise(testRegistry(), noCards)
 
@@ -52,11 +52,11 @@ func TestNormaliseKeepsUsableSteps(t *testing.T) {
 // blank tasks all have to be survivable.
 func TestNormaliseRejectsUnusableSteps(t *testing.T) {
 	p := Plan{Mode: ModeTeam, Steps: []PlanStep{
-		{AgentID: "jeff", Task: "  profile the renderer  "},
-		{AgentID: "jeff", Task: "again"},
+		{AgentID: "ada", Task: "  profile the renderer  "},
+		{AgentID: "ada", Task: "again"},
 		{AgentID: "anton", Task: "delegate to myself"},
 		{AgentID: "nobody", Task: "who?"},
-		{AgentID: "chris", Task: "   "},
+		{AgentID: "grace", Task: "   "},
 		{AgentID: "", Task: "nameless"},
 	}}
 	p.normalise(testRegistry(), noCards)
@@ -64,8 +64,8 @@ func TestNormaliseRejectsUnusableSteps(t *testing.T) {
 	if len(p.Steps) != 1 {
 		t.Fatalf("got %d steps, want 1: %+v", len(p.Steps), p.Steps)
 	}
-	if got := p.Steps[0]; got.AgentID != "jeff" || got.Task != "profile the renderer" {
-		t.Errorf("step = %+v, want jeff with a trimmed task", got)
+	if got := p.Steps[0]; got.AgentID != "ada" || got.Task != "profile the renderer" {
+		t.Errorf("step = %+v, want ada with a trimmed task", got)
 	}
 }
 
@@ -86,7 +86,7 @@ func TestNormaliseFallsBackToSelf(t *testing.T) {
 // TestNormalisePromotesSelfWithSteps covers the inverse: a "self" plan that
 // nonetheless names specialists should honour the steps.
 func TestNormalisePromotesSelfWithSteps(t *testing.T) {
-	p := Plan{Mode: ModeSelf, Steps: []PlanStep{{AgentID: "chris", Task: "the console"}}}
+	p := Plan{Mode: ModeSelf, Steps: []PlanStep{{AgentID: "grace", Task: "the console"}}}
 	p.normalise(testRegistry(), noCards)
 
 	if p.Mode != ModeTeam {
@@ -142,8 +142,8 @@ func TestPlanSchemaEnumeratesSpecialists(t *testing.T) {
 	}
 
 	got := schema.Properties.Steps.Items.Properties.AgentID.Enum
-	if len(got) != 2 || got[0] != "jeff" || got[1] != "chris" {
-		t.Errorf("agentId enum = %v, want [jeff chris]", got)
+	if len(got) != 2 || got[0] != "ada" || got[1] != "grace" {
+		t.Errorf("agentId enum = %v, want [ada grace]", got)
 	}
 }
 
@@ -160,7 +160,7 @@ func TestPlanSchemaNeedsSpecialists(t *testing.T) {
 func TestPlanPromptDescribesTheTeam(t *testing.T) {
 	got := planPrompt(testRegistry(), "make it faster", false, nil)
 
-	for _, want := range []string{"Jeff", "id: jeff", "performance", "Chris", "id: chris", "make it faster"} {
+	for _, want := range []string{"Ada", "id: ada", "performance", "Grace", "id: grace", "make it faster"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("prompt is missing %q:\n%s", want, got)
 		}
@@ -187,11 +187,11 @@ func TestPlanPromptFlagsFollowUps(t *testing.T) {
 // reaches synthesis, so a partial answer is possible.
 func TestSynthesisPromptCarriesEveryOutcome(t *testing.T) {
 	got := synthesisPrompt("ship the thing", []stepResult{
-		{AgentName: "Jeff", Task: "profile it", Output: "it is the grid"},
-		{AgentName: "Chris", Task: "polish it", Err: "claude exploded"},
+		{AgentName: "Ada", Task: "profile it", Output: "it is the grid"},
+		{AgentName: "Grace", Task: "polish it", Err: "claude exploded"},
 	})
 
-	for _, want := range []string{"ship the thing", "profile it", "it is the grid", "Chris failed: claude exploded"} {
+	for _, want := range []string{"ship the thing", "profile it", "it is the grid", "Grace failed: claude exploded"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("prompt is missing %q:\n%s", want, got)
 		}
@@ -203,8 +203,8 @@ func TestSynthesisPromptCarriesEveryOutcome(t *testing.T) {
 // not silently write nowhere.
 func TestNormaliseDropsInventedTaskIDs(t *testing.T) {
 	p := Plan{Mode: ModeTeam, Steps: []PlanStep{
-		{AgentID: "jeff", Task: "carry on", TaskID: "T2"},
-		{AgentID: "chris", Task: "start fresh", TaskID: "T99"},
+		{AgentID: "ada", Task: "carry on", TaskID: "T2"},
+		{AgentID: "grace", Task: "start fresh", TaskID: "T99"},
 	}}
 	p.normalise(testRegistry(), theseCards("T2"))
 
@@ -222,7 +222,7 @@ func TestNormaliseDropsInventedTaskIDs(t *testing.T) {
 func TestNormaliseKeepsOnlyUsableUpdates(t *testing.T) {
 	p := Plan{Mode: ModeSelf, Updates: []BoardUpdate{
 		{TaskID: " T1 ", Status: board.StatusDone},
-		{TaskID: "T2", AgentID: "chris"},
+		{TaskID: "T2", AgentID: "grace"},
 		{TaskID: "T3", Status: board.Status("nearly")}, // invalid status, no other change
 		{TaskID: "T99", Status: board.StatusDone},      // no such card
 		{TaskID: "", Status: board.StatusDone},         // no card named
@@ -236,8 +236,8 @@ func TestNormaliseKeepsOnlyUsableUpdates(t *testing.T) {
 	if p.Updates[0].TaskID != "T1" || p.Updates[0].Status != board.StatusDone {
 		t.Errorf("update 0 = %+v, want T1 to done with the ID trimmed", p.Updates[0])
 	}
-	if p.Updates[1].TaskID != "T2" || p.Updates[1].AgentID != "chris" {
-		t.Errorf("update 1 = %+v, want T2 reassigned to chris", p.Updates[1])
+	if p.Updates[1].TaskID != "T2" || p.Updates[1].AgentID != "grace" {
+		t.Errorf("update 1 = %+v, want T2 reassigned to grace", p.Updates[1])
 	}
 }
 
@@ -261,10 +261,10 @@ func TestNormaliseAllowsUpdatesWithoutSteps(t *testing.T) {
 // mention, since he cannot act on a task he cannot name.
 func TestPlanPromptListsTheBoard(t *testing.T) {
 	got := planPrompt(testRegistry(), "close T1", false, []board.Card{
-		{ID: "T1", Status: board.StatusDoing, AgentID: "jeff", Title: "profile the renderer"},
+		{ID: "T1", Status: board.StatusDoing, AgentID: "ada", Title: "profile the renderer"},
 	})
 
-	for _, want := range []string{"T1", "doing", "jeff", "profile the renderer", "updates"} {
+	for _, want := range []string{"T1", "doing", "ada", "profile the renderer", "updates"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("prompt is missing %q:\n%s", want, got)
 		}

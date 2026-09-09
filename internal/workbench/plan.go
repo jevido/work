@@ -24,7 +24,8 @@ type PlanStep struct {
 	AgentID string `json:"agentId"`
 	Task    string `json:"task"`
 	// TaskID names an existing board card to run instead of opening a new one,
-	// so "get Jeff onto T4" continues that task rather than duplicating it.
+	// so "put the renderer work back on T4" continues that task rather than
+	// duplicating it.
 	TaskID string `json:"taskId,omitempty"`
 }
 

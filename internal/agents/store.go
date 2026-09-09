@@ -31,6 +31,10 @@ const (
 	// CoordinatorFolder is the one agent Work insists on: without a
 	// coordinator there is nobody to hand a task to.
 	CoordinatorFolder = "anton"
+	// TemplateFolderName is a ready-made agent folder to copy. It lives among
+	// the agents because that is where a copy of it belongs, and it is skipped
+	// by the scan on the underscore rule below.
+	TemplateFolderName = "_template"
 )
 
 // avatarNames are the avatar filenames looked for in an agent's folder, in
@@ -96,6 +100,10 @@ func Ensure(root string) error {
 		}
 	}
 
+	if err := writeTemplate(filepath.Join(dir, TemplateFolderName)); err != nil {
+		return err
+	}
+
 	// Anything the user added by hand is completed rather than rejected: a
 	// bare folder with a name in it is a reasonable way to ask for an agent.
 	entries, err := os.ReadDir(dir)
@@ -109,6 +117,58 @@ func Ensure(root string) error {
 		if err := writeAgentFolder(filepath.Join(dir, e.Name()), displayName(e.Name()), ""); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// templatePersonality is the document copied into every new agent. It is
+// written to be read in an editor by someone who has never seen Work's layout,
+// so it says what the folder name does, what the first prose line is used for,
+// and what else may sit beside it.
+const templatePersonality = `# Template
+
+Unedited template -- replace this line with what this agent owns.
+
+Copy this folder to make an agent:
+
+    cp -r _template ada
+
+The folder name is the agent's id, and Work capitalises it for the name on the
+desk -- ` + "`ada`" + ` becomes Ada. Folders starting with ` + "`_`" + ` or ` + "`.`" + ` are skipped, which
+is why this one is not on the team. Change the heading above to the new name.
+
+Then replace the line under it with the agent itself: what they own, how they
+work, what they push back on.
+
+**The first line of prose is the blurb Anton routes on.** It is the only thing
+he knows about this agent when he decides who gets a task, so spend it on the
+specialty rather than on a greeting -- and edit it, or the placeholder above is
+what he reads.
+
+This file is read fresh every time the agent is given work, so an edit lands on
+the next task rather than the next restart. Keep it short: every task pays for
+it in tokens.
+
+Optional, beside this file:
+
+- ` + "`avatar.webp`" + ` or ` + "`avatar.png`" + `, drawn at the desk in the office.
+- ` + "`skills/`" + `, for per-agent skill files. Work guarantees the folder exists;
+  nothing reads it yet.
+`
+
+// writeTemplate keeps agents/_template present and current.
+//
+// Unlike an agent's personality this file is Work's, not the user's, so it is
+// rewritten rather than preserved: it is documentation of the current layout,
+// and a stale copy of it is worse than none. Anyone wanting to keep an edited
+// version has already copied the folder, which is the whole point of it.
+func writeTemplate(dir string) error {
+	if err := os.MkdirAll(filepath.Join(dir, SkillsDirName), 0o755); err != nil {
+		return fmt.Errorf("agents: create %s: %w", dir, err)
+	}
+	path := filepath.Join(dir, PersonalityFileName)
+	if err := os.WriteFile(path, []byte(templatePersonality), 0o644); err != nil {
+		return fmt.Errorf("agents: write %s: %w", path, err)
 	}
 	return nil
 }
@@ -237,10 +297,15 @@ func ReadPersonality(dir string) (string, error) {
 	return strings.TrimSpace(string(data)), nil
 }
 
-// isAgentFolder reports whether a directory entry describes an agent. Hidden
-// folders are skipped so a .git or .DS_Store cannot become a colleague.
+// isAgentFolder decides whether a directory under agents/ describes an agent.
+//
+// A leading dot or underscore means it does not. Dot keeps version-control and
+// editor directories out; underscore is the escape hatch that lets _template
+// sit among the agents without becoming one, and lets a user park a
+// half-written agent by renaming rather than moving it.
 func isAgentFolder(e fs.DirEntry) bool {
-	return e.IsDir() && !strings.HasPrefix(e.Name(), ".")
+	name := e.Name()
+	return e.IsDir() && !strings.HasPrefix(name, ".") && !strings.HasPrefix(name, "_")
 }
 
 // avatarIn returns the agent's avatar path, or empty if the folder has none.
