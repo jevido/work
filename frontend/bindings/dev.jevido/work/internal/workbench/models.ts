@@ -212,6 +212,13 @@ export enum Phase {
      * PhaseSynthesis is Anton turning the specialists' answers into one.
      */
     PhaseSynthesis = "synthesis",
+
+    /**
+     * PhaseChat is the coordinator answering on the side channel, while a run
+     * is in flight. It is grouped separately in the console because it is not
+     * part of the work: it is a question about it.
+     */
+    PhaseChat = "chat",
 };
 
 /**

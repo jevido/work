@@ -5,11 +5,14 @@
   let { entry, showName = true }: { entry: AgentEntry; showName?: boolean } = $props();
 
   // Only the synthesis turn is worth labelling: a plain work turn is obvious
-  // from the agent's name, and routing has an entry of its own.
+  // from the agent's name, and routing has an entry of its own. A side-channel
+  // answer is labelled because it is the one turn that is not the work: read
+  // unlabelled next to a run, it would look like part of it.
   const phaseLabel: Record<Phase, string> = {
     plan: "",
     work: "",
     synthesis: "bringing it together",
+    chat: "answering while the work runs",
   };
 
   const phase = $derived(phaseLabel[entry.phase]);

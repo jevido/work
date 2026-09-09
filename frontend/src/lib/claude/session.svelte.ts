@@ -2,6 +2,8 @@ import { Events } from "@wailsio/runtime";
 import * as Workbench from "../../../bindings/dev.jevido/work/services/workbenchservice.js";
 import { describeTool, type ToolCall } from "../diff/tools";
 import {
+  CHAT_FINISHED,
+  CHAT_STARTED,
   CLAUDE_CANCELLED,
   CLAUDE_ERROR,
   CLAUDE_RESULT,
@@ -24,9 +26,15 @@ export type RunStatus =
   | "cancelled"
   | "error";
 
-export type Phase = "plan" | "work" | "synthesis";
+export type Phase = "plan" | "work" | "synthesis" | "chat";
 
 export type TurnStatus = "streaming" | "done" | "error" | "cancelled";
+
+/** Narrows the backend's phase string, defaulting to ordinary work. */
+function phaseOf(phase: string | undefined): Phase {
+  if (phase === "synthesis" || phase === "chat" || phase === "plan") return phase;
+  return "work";
+}
 
 /** A run of prose inside a turn. */
 export interface TextPart {
@@ -139,14 +147,31 @@ export class ClaudeSession {
   status = $state<RunStatus>("idle");
   runId = $state<string | null>(null);
 
+  /**
+   * The coordinator's side channel, tracked apart from the run.
+   *
+   * A question asked while specialists are working is answered concurrently,
+   * so it needs its own status: sharing the run's would make the composer
+   * think the work had finished the moment an answer came back.
+   */
+  chatStatus = $state<RunStatus>("idle");
+  chatId = $state<string | null>(null);
+
   /** True while the run can still be cancelled. */
   busy = $derived(this.status === "planning" || this.status === "working");
+
+  /** True while the coordinator is answering a question on the side. */
+  chatBusy = $derived(
+    this.chatStatus === "planning" || this.chatStatus === "working",
+  );
 
   /** True when there is nothing on screen to clear. */
   isEmpty = $derived(this.entries.length === 0);
 
   /** What the run in progress has cost, planning turn included. */
   private runCostUsd = 0;
+  /** What the side channel has cost, kept out of the run's total. */
+  private chatCostUsd = 0;
   private nextId = 0;
 
   /** Agent identities, for labelling turns and plan steps. */
@@ -222,15 +247,15 @@ export class ClaudeSession {
       Events.On(RUN_FINISHED, (e) => {
         this.flush();
         if (e.data.cancelled) {
-          this.closeOpenTurns("cancelled");
+          this.closeOpenTurns("cancelled", "run");
           this.notice("Stopped.", "info");
           this.status = "cancelled";
         } else if (e.data.message) {
-          this.closeOpenTurns("error");
+          this.closeOpenTurns("error", "run");
           this.notice(e.data.message, "error");
           this.status = "error";
         } else {
-          this.closeOpenTurns("done");
+          this.closeOpenTurns("done", "run");
           if (this.runCostUsd > 0) {
             this.notice(`Run cost $${this.runCostUsd.toFixed(4)}`, "info");
           }
@@ -278,7 +303,11 @@ export class ClaudeSession {
 
       Events.On(CLAUDE_RESULT, (e) => {
         this.flush();
-        this.runCostUsd += e.data.costUsd ?? 0;
+        if (e.data.phase === "chat") {
+          this.chatCostUsd += e.data.costUsd ?? 0;
+        } else {
+          this.runCostUsd += e.data.costUsd ?? 0;
+        }
         // The routing turn has no entry of its own -- the plan stands in for it
         // -- but its cost still belongs to the run.
         if (e.data.phase === "plan") return;
@@ -305,7 +334,33 @@ export class ClaudeSession {
       // A run-wide cancellation, distinct from a failure: nothing went wrong.
       Events.On(CLAUDE_CANCELLED, () => {
         this.flush();
-        this.closeOpenTurns("cancelled");
+        this.closeOpenTurns("cancelled", "run");
+      }),
+
+      // The side channel: the coordinator answering while work is in flight.
+      Events.On(CHAT_STARTED, (e) => {
+        this.chatId = e.data.runId;
+        this.chatCostUsd = 0;
+        this.chatStatus = "working";
+      }),
+
+      Events.On(CHAT_FINISHED, (e) => {
+        this.flush();
+        if (e.data.cancelled) {
+          this.closeOpenTurns("cancelled", "chat");
+          this.chatStatus = "cancelled";
+        } else if (e.data.message) {
+          this.closeOpenTurns("error", "chat");
+          this.notice(e.data.message, "error");
+          this.chatStatus = "error";
+        } else {
+          this.closeOpenTurns("done", "chat");
+          if (this.chatCostUsd > 0) {
+            this.notice(`Question cost $${this.chatCostUsd.toFixed(4)}`, "info");
+          }
+          this.chatStatus = "done";
+        }
+        this.chatId = null;
       }),
     ];
 
@@ -321,7 +376,16 @@ export class ClaudeSession {
    */
   async submit(prompt: string, agentId = ""): Promise<void> {
     const text = prompt.trim();
-    if (!text || this.busy) return;
+    if (!text) return;
+
+    // Work is already in flight, so this is a question about it rather than a
+    // second run. Asking beats being told to wait, which is what the disabled
+    // composer used to say.
+    if (this.busy) {
+      await this.ask(text);
+      return;
+    }
+    if (this.chatBusy) return;
 
     this.entries.push({ kind: "user", id: this.mintId("you"), text, agentId });
     this.status = "planning";
@@ -333,6 +397,29 @@ export class ClaudeSession {
       this.notice(messageOf(err), "error");
       this.status = "error";
       this.runId = null;
+    }
+  }
+
+  /**
+   * Puts a question to the coordinator without starting a run.
+   *
+   * This is what the composer does while specialists are working. The answer
+   * arrives in its own lane, so the run's output is not interleaved with it.
+   */
+  async ask(prompt: string): Promise<void> {
+    const text = prompt.trim();
+    if (!text || this.chatBusy) return;
+
+    this.entries.push({ kind: "user", id: this.mintId("you"), text, agentId: "" });
+    this.chatStatus = "planning";
+
+    try {
+      const task = await Workbench.Chat(text);
+      this.chatId = task.id;
+    } catch (err) {
+      this.notice(messageOf(err), "error");
+      this.chatStatus = "error";
+      this.chatId = null;
     }
   }
 
@@ -348,6 +435,18 @@ export class ClaudeSession {
     }
   }
 
+  /** Stops the coordinator answering, leaving the run untouched. */
+  async cancelChat(): Promise<void> {
+    const id = this.chatId;
+    if (!id) return;
+    try {
+      await Workbench.Cancel(id);
+    } catch (err) {
+      this.notice(messageOf(err), "error");
+      this.chatStatus = "error";
+    }
+  }
+
   /**
    * Empties the console and starts a new conversation. The agents forget the
    * exchange too, so clearing the screen and clearing their memory are the same
@@ -360,6 +459,9 @@ export class ClaudeSession {
     this.status = "idle";
     this.runId = null;
     this.runCostUsd = 0;
+    this.chatStatus = "idle";
+    this.chatId = null;
+    this.chatCostUsd = 0;
     try {
       await Workbench.ClearConversation();
     } catch {
@@ -405,7 +507,7 @@ export class ClaudeSession {
       agentId: who.id,
       agentName: who.name,
       colour: who.colour,
-      phase: data.phase === "synthesis" ? "synthesis" : "work",
+      phase: phaseOf(data.phase),
       parts: [],
       status: "streaming",
       error: null,
@@ -424,7 +526,9 @@ export class ClaudeSession {
     if (!text) return;
     const turn = this.turnFor(data);
     if (!turn) return;
-    if (this.status === "planning") this.status = "working";
+    if (turn.phase !== "chat" && this.status === "planning") {
+      this.status = "working";
+    }
 
     this.pending.set(turn.id, (this.pending.get(turn.id) ?? "") + text);
 
@@ -466,10 +570,18 @@ export class ClaudeSession {
     return null;
   }
 
-  /** Closes out any turn still marked streaming when the run ends. */
-  private closeOpenTurns(status: TurnStatus): void {
+  /**
+   * Closes out turns still marked streaming when their lane ends.
+   *
+   * The two lanes are closed separately because they end separately: a run
+   * finishing must not mark the answer you are still reading as cancelled,
+   * and stopping a question must not close the work.
+   */
+  private closeOpenTurns(status: TurnStatus, lane: "run" | "chat"): void {
     for (const entry of this.entries) {
-      if (entry.kind === "agent" && entry.status === "streaming") entry.status = status;
+      if (entry.kind !== "agent" || entry.status !== "streaming") continue;
+      if ((entry.phase === "chat") !== (lane === "chat")) continue;
+      entry.status = status;
     }
   }
 

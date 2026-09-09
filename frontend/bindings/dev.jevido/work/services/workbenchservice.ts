@@ -66,6 +66,14 @@ export function Changes(): $CancellablePromise<changes$0.Change[] | null> {
 }
 
 /**
+ * Chat asks the coordinator a question without starting a run, so the input
+ * stays usable while specialists are working.
+ */
+export function Chat(prompt: string): $CancellablePromise<workbench$0.Task> {
+    return $Call.ByID(3317554920, prompt);
+}
+
+/**
  * ClearConversation starts a new conversation: the agents forget the previous
  * exchange, and the next request opens a fresh session for each of them.
  */

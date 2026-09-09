@@ -24,4 +24,8 @@ export const RUN_PLAN = "run:plan";
 export const RUN_FINISHED = "run:finished";
 export const RUN_CHANGES = "run:changes";
 
+/** The coordinator's side channel: a question answered alongside a run. */
+export const CHAT_STARTED = "chat:started";
+export const CHAT_FINISHED = "chat:finished";
+
 export const BOARD_UPDATED = "board:updated";

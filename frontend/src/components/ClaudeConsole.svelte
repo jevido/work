@@ -74,7 +74,9 @@
 
   function submit() {
     const text = prompt;
-    if (!text.trim() || session.busy) return;
+    // Only the side channel blocks the composer now: while a run is going,
+    // submit puts the question to Anton instead of starting a second run.
+    if (!text.trim() || session.chatBusy) return;
     prompt = "";
     pinned = true;
     void session.submit(text);
@@ -261,14 +263,19 @@
       bind:value={prompt}
       onkeydown={onKeydown}
       oninput={fitComposer}
-      placeholder="Give Anton work…   (Shift+Enter for a new line)"
+      placeholder={session.busy
+        ? "Ask Anton about the work in progress…   (Shift+Enter for a new line)"
+        : "Give Anton work…   (Shift+Enter for a new line)"}
       rows="2"
       spellcheck="false"
     ></textarea>
     <div class="actions">
+      {#if session.chatBusy}
+        <button class="ghost" onclick={() => session.cancelChat()}>Stop answer</button>
+      {/if}
       {#if session.busy}
         <button class="ghost" onclick={() => session.cancel()}>Cancel</button>
-      {:else}
+      {:else if !session.chatBusy}
         <button
           class="ghost"
           onclick={() => session.clear()}
@@ -278,8 +285,8 @@
           New chat
         </button>
       {/if}
-      <button class="primary" onclick={submit} disabled={session.busy || !prompt.trim()}>
-        Send
+      <button class="primary" onclick={submit} disabled={session.chatBusy || !prompt.trim()}>
+        {session.busy ? "Ask" : "Send"}
       </button>
     </div>
   </div>

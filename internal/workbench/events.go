@@ -53,6 +53,12 @@ const (
 	// work can be reviewed and reverted.
 	EventRunChanges = "run:changes"
 
+	// EventChatStarted announces a question put to the coordinator on the side
+	// channel, which is answered alongside a run rather than instead of it.
+	EventChatStarted = "chat:started"
+	// EventChatFinished closes a side-channel answer, successfully or not.
+	EventChatFinished = "chat:finished"
+
 	// EventBoardUpdated carries the whole task board after any change. The
 	// board is small and changes a handful of times per run, so publishing a
 	// snapshot is cheaper than reconciling deltas and cannot drift.
@@ -71,6 +77,10 @@ const (
 	PhaseWork Phase = "work"
 	// PhaseSynthesis is Anton turning the specialists' answers into one.
 	PhaseSynthesis Phase = "synthesis"
+	// PhaseChat is the coordinator answering on the side channel, while a run
+	// is in flight. It is grouped separately in the console because it is not
+	// part of the work: it is a question about it.
+	PhaseChat Phase = "chat"
 )
 
 // AgentState is the coarse-grained lifecycle state of an agent. The renderer

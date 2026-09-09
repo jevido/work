@@ -321,7 +321,9 @@ Delegation, the conversation, the board, tool visibility and change review all
 work end to end. Still missing: nothing is persisted across restarts except the
 config folder and the permission mode, thinking output is streamed but not
 displayed, there is no pre-write approval (the CLI exposes no hook for one),
-only one run can be active at a time, and the frontend has no test runner — the
+only one run can be active at a time (though Anton answers questions on a side
+channel while one is, so the composer is never locked), and the frontend has no
+test runner — the
 differ and the diff parser were verified by hand against real `git diff` output
 rather than by a suite.
 

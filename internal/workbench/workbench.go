@@ -51,6 +51,12 @@ type AgentStatus struct {
 // One run is active at a time. That is a deliberate limit: the console shows a
 // single conversation, and a second concurrent run would make both the output
 // and the office unreadable. Within a run, specialists do work in parallel.
+//
+// The coordinator's side channel is the one exception. Chat runs alongside an
+// active run so the user is never locked out of asking what is going on, and it
+// earns that by touching nothing the run owns: no board card, no working-tree
+// snapshot, no agent state, and its own Claude session. It talks; it does not
+// take over. Redirecting the work is still Cancel and a new run.
 type Workbench struct {
 	registry *agents.Registry
 	runner   *claude.Runner
@@ -58,7 +64,8 @@ type Workbench struct {
 	workDir  string
 	board    *board.Board
 
-	nextRun atomic.Uint64
+	nextRun  atomic.Uint64
+	nextChat atomic.Uint64
 
 	// admit serialises the decision to start a run. It is held for the whole
 	// of Submit, and by Redirect across cancel-wait-start, so no other caller
@@ -67,19 +74,32 @@ type Workbench struct {
 	// it cannot deadlock.
 	admit sync.Mutex
 
+	// chatAdmit serialises the decision to start a side-channel answer, the
+	// same way admit does for runs. It is a separate lock on purpose: a
+	// question to the coordinator must not queue behind the run it is about.
+	chatAdmit sync.Mutex
+
 	mu      sync.Mutex
 	state   map[string]AgentState
 	current map[string]string // agentID -> taskID
 	// active is the running run, or nil. Guarded by mu.
 	active *run
+	// chat is the side-channel answer in flight, or nil. Guarded by mu. It is
+	// deliberately not the same slot as active: the two are independent, and
+	// one finishing must never release the other.
+	chat *run
 
 	// sessions is each agent's Claude session for the current conversation,
 	// so a follow-up turn continues where the last one left off instead of
 	// starting from nothing. Keyed by agent ID.
-	sessions map[string]string
+	sessions map[sessionKey]string
 	// turns counts user requests in this conversation. Anton is told when he
 	// is answering a follow-up rather than an opening question.
 	turns int
+	// chatTurns counts side-channel questions, separately: the side channel is
+	// its own conversation with its own history, so its follow-ups are not the
+	// run's follow-ups.
+	chatTurns int
 	// review holds the working tree as it was before the last run, so its file
 	// changes can be listed and reverted afterwards.
 	review *changes.Snapshot
@@ -109,6 +129,11 @@ type run struct {
 	// emitted its last event. Redirect waits on it, so cancelling and starting
 	// again is a single ordered handover rather than a race.
 	done chan struct{}
+	// chat marks a side-channel answer. It suppresses the agent:* state
+	// changes a normal turn emits: the office seats an agent per task, and the
+	// coordinator answering a question while also leading a run would
+	// otherwise fight himself over one desk and one entry in current.
+	chat bool
 }
 
 // taskID mints a stable, readable ID for one Claude call inside the run.
@@ -126,7 +151,7 @@ func New(reg *agents.Registry, runner *claude.Runner, emit Emitter, workDir stri
 		board:    board.New(),
 		state:    make(map[string]AgentState),
 		current:  make(map[string]string),
-		sessions: make(map[string]string),
+		sessions: make(map[sessionKey]string),
 		// Something has to be chosen. Inheriting the user's own Claude
 		// configuration was the old behaviour and it meant agents that could
 		// not act, since nothing here can answer a permission prompt.
@@ -233,6 +258,129 @@ func (w *Workbench) Submit(agentID, prompt string) (Task, error) {
 	return Task{ID: r.id, Prompt: prompt, AgentID: lead.ID, Routed: routed}, nil
 }
 
+// Chat asks the coordinator a question on the side channel.
+//
+// This is the path that stays open while specialists work. It runs concurrently
+// with the active run and shares none of its state: no card is added, no
+// snapshot is taken, no agent is seated, and the coordinator answers in a
+// session of his own so two Claude processes never resume the same one.
+//
+// One question is answered at a time, for the same reason one run is: a second
+// concurrent answer would interleave into the first. A question asked with
+// nothing running is still a question, not a run -- the caller decides which
+// it wants, and Submit remains the way to start work.
+func (w *Workbench) Chat(prompt string) (Task, error) {
+	prompt = strings.TrimSpace(prompt)
+	if prompt == "" {
+		return Task{}, errors.New("workbench: empty prompt")
+	}
+	if _, err := w.runner.Available(); err != nil {
+		return Task{}, fmt.Errorf("workbench: local claude CLI not found on PATH: %w", err)
+	}
+
+	w.chatAdmit.Lock()
+	defer w.chatAdmit.Unlock()
+
+	lead, ok := w.registry.Coordinator()
+	if !ok {
+		return Task{}, errors.New("workbench: no coordinator configured")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	r := &run{
+		id:      "c" + strconv.FormatUint(w.nextChat.Add(1), 10),
+		prompt:  prompt,
+		cancel:  cancel,
+		agentID: lead.ID,
+		chat:    true,
+	}
+
+	w.mu.Lock()
+	if w.chat != nil {
+		w.mu.Unlock()
+		cancel()
+		return Task{}, errors.New("workbench: still answering the last question")
+	}
+	w.chat = r
+	w.chatTurns++
+	r.followUp = w.chatTurns > 1
+	// What the run is working on, read while the lock is held so the answer
+	// describes the run that was live when the question was asked.
+	var about string
+	if w.active != nil {
+		about = w.active.prompt
+	}
+	w.mu.Unlock()
+
+	w.emit(EventChatStarted, RunEvent{RunID: r.id, AgentID: lead.ID, Prompt: prompt})
+
+	go func() {
+		defer cancel()
+		err := w.answer(ctx, r, lead, about)
+
+		w.mu.Lock()
+		if w.chat == r {
+			w.chat = nil
+		}
+		w.mu.Unlock()
+
+		switch {
+		case errors.Is(err, context.Canceled) || ctx.Err() != nil:
+			w.emit(EventChatFinished, RunEvent{RunID: r.id, AgentID: lead.ID, Cancelled: true})
+		case err != nil:
+			w.emit(EventChatFinished, RunEvent{RunID: r.id, AgentID: lead.ID, Message: err.Error()})
+		default:
+			w.emit(EventChatFinished, RunEvent{RunID: r.id, AgentID: lead.ID})
+		}
+	}()
+
+	return Task{ID: r.id, Prompt: prompt, AgentID: lead.ID}, nil
+}
+
+// answer is one side-channel turn, with the same bad-session retry executeStep
+// uses and none of its bookkeeping.
+func (w *Workbench) answer(ctx context.Context, r *run, lead agents.Agent, about string) error {
+	key := chatSession(lead.ID)
+	taskID := r.taskID(lead.ID)
+	prompt := chatPrompt(r.prompt, about)
+
+	resume := w.sessionFor(key)
+	_, produced, err := w.streamChat(ctx, r, lead, taskID, prompt, resume)
+	if err != nil && resume != "" && !produced && ctx.Err() == nil {
+		w.forgetSession(key)
+		_, _, err = w.streamChat(ctx, r, lead, taskID, prompt, "")
+	}
+	return err
+}
+
+// streamChat runs the coordinator's side-channel turn, recording its session
+// under the chat key so it never collides with the run's.
+func (w *Workbench) streamChat(
+	ctx context.Context,
+	r *run,
+	lead agents.Agent,
+	taskID string,
+	prompt string,
+	resume string,
+) (string, bool, error) {
+	return w.streamStep(ctx, r, lead, PhaseChat, taskID, prompt, resume)
+}
+
+// chatPrompt tells the coordinator what he is being asked about.
+//
+// Without this he would be answering "how is it going" with no idea what "it"
+// is: his side-channel session has never seen the run's prompt.
+func chatPrompt(question, about string) string {
+	if about == "" {
+		return question
+	}
+	return "The user is asking you something while work is already in flight. " +
+		"The request being worked on right now is:\n\n" + about +
+		"\n\nYou are on a side channel: answer the question, and do not start " +
+		"or reassign work. If the answer is that the work should change course, " +
+		"say so and let the user stop the run.\n\nTheir question:\n\n" + question
+}
+
 // Board returns the current task board.
 func (w *Workbench) Board() []board.Card {
 	return w.board.Snapshot()
@@ -242,8 +390,9 @@ func (w *Workbench) Board() []board.Card {
 // next request starts a new conversation rather than continuing this one.
 func (w *Workbench) ClearConversation() {
 	w.mu.Lock()
-	w.sessions = make(map[string]string)
+	w.sessions = make(map[sessionKey]string)
 	w.turns = 0
+	w.chatTurns = 0
 	w.mu.Unlock()
 
 	w.board.Clear()
@@ -288,9 +437,15 @@ func (w *Workbench) publishBoard() {
 func (w *Workbench) Cancel(runID string) error {
 	w.mu.Lock()
 	active := w.active
+	chat := w.chat
 	w.mu.Unlock()
 	if active != nil && active.id == runID {
 		active.cancel()
+	}
+	// A side-channel answer is stoppable on its own, and only on its own:
+	// stopping a question must never stop the work it was asking about.
+	if chat != nil && chat.id == runID {
+		chat.cancel()
 	}
 	return nil
 }
@@ -488,11 +643,11 @@ func (w *Workbench) executeStep(
 	w.beginTask(r, agent.ID, taskID, phase)
 	w.moveCard(cardID, board.StatusDoing, "")
 
-	resume := w.sessionFor(agent.ID)
+	resume := w.sessionFor(runSession(agent.ID))
 	out, produced, err := w.streamStep(ctx, r, agent, phase, taskID, prompt, resume)
 
 	if err != nil && resume != "" && !produced && ctx.Err() == nil {
-		w.forgetSession(agent.ID)
+		w.forgetSession(runSession(agent.ID))
 		out, _, err = w.streamStep(ctx, r, agent, phase, taskID, prompt, "")
 	}
 
@@ -525,6 +680,13 @@ func (w *Workbench) streamStep(
 	var text strings.Builder
 	working := false
 
+	// A side-channel turn continues its own conversation, not the agent's, so
+	// two live Claude processes never resume the same session.
+	key := runSession(agent.ID)
+	if r.chat {
+		key = chatSession(agent.ID)
+	}
+
 	err = w.runner.Run(ctx, claude.Request{
 		Prompt:             prompt,
 		Model:              agent.Model,
@@ -535,8 +697,10 @@ func (w *Workbench) streamStep(
 		Resume:             resume,
 	}, func(e claude.Event) {
 		// The first sign of real output promotes the agent from assigned to
-		// working. The frontend uses this to seat them at their desk.
-		if !working && e.Kind != claude.KindError {
+		// working. The frontend uses this to seat them at their desk. A
+		// side-channel turn skips it: the office is showing what the run is
+		// doing, and answering a question is not a change to that.
+		if !working && e.Kind != claude.KindError && !r.chat {
 			working = true
 			w.setState(agent.ID, StateWorking)
 			w.emitAgent(EventAgentWorking, r, agent.ID, taskID, phase, StateWorking, "")
@@ -544,7 +708,7 @@ func (w *Workbench) streamStep(
 
 		switch e.Kind {
 		case claude.KindSession:
-			w.rememberSession(agent.ID, e.SessionID)
+			w.rememberSession(key, e.SessionID)
 			w.emitClaude(EventClaudeSession, r, agent.ID, taskID, phase, ClaudeEvent{
 				SessionID: e.SessionID, Model: e.Model,
 			})
@@ -758,7 +922,7 @@ func (w *Workbench) ReloadAgents() ([]AgentStatus, error) {
 // click, not against a concurrent caller; there is one window.
 func (w *Workbench) loadAgents(root string) ([]AgentStatus, error) {
 	w.mu.Lock()
-	running := w.active != nil
+	running := w.active != nil || w.chat != nil
 	w.mu.Unlock()
 	if running {
 		return nil, errors.New("workbench: stop the run before reloading agents")
@@ -792,9 +956,9 @@ func (w *Workbench) loadAgents(root string) ([]AgentStatus, error) {
 			delete(w.current, id)
 		}
 	}
-	for id := range w.sessions {
-		if _, ok := state[id]; !ok {
-			delete(w.sessions, id)
+	for k := range w.sessions {
+		if _, ok := state[k.agentID]; !ok {
+			delete(w.sessions, k)
 		}
 	}
 	w.mu.Unlock()
@@ -820,29 +984,52 @@ func (w *Workbench) systemPrompt(a agents.Agent) string {
 	return a.SystemPrompt + "\n\n" + personality
 }
 
-// sessionFor returns the agent's session in this conversation, if any.
-func (w *Workbench) sessionFor(agentID string) string {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.sessions[agentID]
+// sessionKey identifies one conversation an agent is holding.
+//
+// It is a struct rather than a decorated string because an agent ID is just a
+// folder name: any separator a suffix could use is a legal thing to call a
+// folder, so a suffix could be forged by naming one. There is nothing to
+// collide with here.
+type sessionKey struct {
+	agentID string
+	// chat marks the coordinator's side-channel conversation, which is kept
+	// apart from the run's so the two never resume each other.
+	chat bool
 }
 
-// rememberSession records the session an agent's turn ran in, so the next turn
-// can continue it.
-func (w *Workbench) rememberSession(agentID, sessionID string) {
+// runSession is the key for an agent's conversation inside runs.
+func runSession(agentID string) sessionKey {
+	return sessionKey{agentID: agentID}
+}
+
+// chatSession is the key for the coordinator's side-channel conversation.
+func chatSession(agentID string) sessionKey {
+	return sessionKey{agentID: agentID, chat: true}
+}
+
+// sessionFor returns the session held under key in this conversation, if any.
+func (w *Workbench) sessionFor(key sessionKey) string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.sessions[key]
+}
+
+// rememberSession records the session a turn ran in, so the next turn can
+// continue it.
+func (w *Workbench) rememberSession(key sessionKey, sessionID string) {
 	if sessionID == "" {
 		return
 	}
 	w.mu.Lock()
-	w.sessions[agentID] = sessionID
+	w.sessions[key] = sessionID
 	w.mu.Unlock()
 }
 
-// forgetSession drops an agent's session after it proves unusable, so the next
-// attempt starts clean.
-func (w *Workbench) forgetSession(agentID string) {
+// forgetSession drops a session after it proves unusable, so the next attempt
+// starts clean.
+func (w *Workbench) forgetSession(key sessionKey) {
 	w.mu.Lock()
-	delete(w.sessions, agentID)
+	delete(w.sessions, key)
 	w.mu.Unlock()
 }
 
