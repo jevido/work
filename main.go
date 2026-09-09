@@ -83,9 +83,19 @@ func main() {
 	// falls back to the built-in team and the user can pick a folder again.
 	if cfg, cfgErr := config.Load(); cfgErr != nil {
 		log.Printf("config: %v", cfgErr)
-	} else if cfg.Root != "" {
-		if _, err := wb.UseConfigRoot(cfg.Root); err != nil {
-			log.Printf("agents: %v", err)
+	} else {
+		// A mode saved by a later version of Work, or edited by hand into
+		// something the CLI does not accept, falls back to the default rather
+		// than taking the window down with it.
+		if mode, err := claude.ParsePermissionMode(cfg.PermissionMode); err != nil {
+			log.Printf("permissions: %v", err)
+		} else {
+			wb.UsePermissionMode(mode)
+		}
+		if cfg.Root != "" {
+			if _, err := wb.UseConfigRoot(cfg.Root); err != nil {
+				log.Printf("agents: %v", err)
+			}
 		}
 	}
 

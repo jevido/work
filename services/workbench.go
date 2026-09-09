@@ -13,6 +13,7 @@ import (
 	"dev.jevido/work/internal/agents"
 	"dev.jevido/work/internal/board"
 	"dev.jevido/work/internal/changes"
+	"dev.jevido/work/internal/claude"
 	"dev.jevido/work/internal/workbench"
 )
 
@@ -36,6 +37,48 @@ func (s *WorkbenchService) ServiceName() string { return "WorkbenchService" }
 // Agents returns the team and each member's current state.
 func (s *WorkbenchService) Agents() []workbench.AgentStatus {
 	return s.wb.Agents()
+}
+
+// Permissions is what agents are allowed to do, the modes that could be
+// chosen instead, and whether the local CLI will honour the dangerous one.
+//
+// One call rather than three: the toggle needs all of it to draw a single row,
+// and a mode without its label or its warning is not something a person can
+// choose between.
+type Permissions struct {
+	// Mode is the mode in force now.
+	Mode claude.PermissionMode `json:"mode"`
+	// Choices are the modes on offer, least powerful first.
+	Choices []claude.PermissionChoice `json:"choices"`
+	// BypassAccepted is whether the local Claude CLI has had its
+	// skip-permissions disclaimer accepted. When it has not, the CLI silently
+	// ignores the dangerous mode, so the UI says so rather than letting a run
+	// come back having done nothing.
+	BypassAccepted bool `json:"bypassAccepted"`
+	// AcceptCommand is the one command that accepts it, for the UI to show.
+	AcceptCommand string `json:"acceptCommand"`
+}
+
+// Permissions returns the current mode and everything needed to describe it.
+func (s *WorkbenchService) Permissions() Permissions {
+	return Permissions{
+		Mode:           s.wb.PermissionMode(),
+		Choices:        claude.PermissionChoices(),
+		BypassAccepted: claude.BypassAccepted(),
+		AcceptCommand:  claude.AcceptBypassCommand,
+	}
+}
+
+// SetPermissionMode changes what agents may do, for this session and the next.
+//
+// It answers with the whole setting rather than nothing, so the toggle draws
+// from what the backend actually holds instead of assuming its own click won.
+// An unknown mode is an error and changes nothing.
+func (s *WorkbenchService) SetPermissionMode(mode string) (Permissions, error) {
+	if _, err := s.wb.SetPermissionMode(mode); err != nil {
+		return s.Permissions(), err
+	}
+	return s.Permissions(), nil
 }
 
 // AgentProfile returns what one agent's folder says about them: the skills in

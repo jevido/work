@@ -1,9 +1,10 @@
 // Package config stores the small amount of state Work keeps between runs.
 //
-// There is exactly one thing worth persisting so far -- where the user's agent
-// folders live -- so this is a single JSON file rather than a settings system.
-// Everything else about an agent is on disk under that root, which makes the
-// config file cheap to lose: pick the folder again and the team comes back.
+// There is very little worth persisting -- where the user's agent folders live
+// and what those agents are allowed to do -- so this is a single JSON file
+// rather than a settings system. Everything else about an agent is on disk
+// under that root, which makes the config file cheap to lose: pick the folder
+// again and the team comes back.
 package config
 
 import (
@@ -21,6 +22,10 @@ type Config struct {
 	// Root is the folder the user picked. It contains agents/. Empty means the
 	// user has not chosen one yet, which is the first-run state.
 	Root string `json:"root,omitempty"`
+	// PermissionMode is what agents are allowed to do, as one of the modes in
+	// internal/claude. Empty means the default, which is what a config file
+	// written before this field existed says.
+	PermissionMode string `json:"permissionMode,omitempty"`
 }
 
 // Path returns the config file location, honouring XDG_CONFIG_HOME so a user
@@ -55,6 +60,21 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("config: parse %s: %w", path, err)
 	}
 	return c, nil
+}
+
+// Update reads the config, applies mutate and writes the result back.
+//
+// This is how a single setting is changed: Save writes the whole file, so a
+// caller that built a Config out of the one field it knows about would erase
+// the others. Not atomic against a second process, which is not a case Work
+// has -- one window, one config.
+func Update(mutate func(*Config)) error {
+	c, err := Load()
+	if err != nil {
+		return err
+	}
+	mutate(&c)
+	return Save(c)
 }
 
 // Save writes the config, creating the directory if needed.

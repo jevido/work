@@ -8,6 +8,7 @@ import (
 
 	"dev.jevido/work/internal/agents"
 	"dev.jevido/work/internal/claude"
+	"dev.jevido/work/internal/config"
 )
 
 // newTestWorkbench builds a workbench that never runs anything: these tests
@@ -195,5 +196,103 @@ func TestExecuteRoutedWithNoSpecialists(t *testing.T) {
 	}
 	if got := specialistIDs(w.registry); len(got) != 0 {
 		t.Fatalf("specialistIDs = %v, want none", got)
+	}
+}
+
+// isolateConfig points config.Load and config.Save at a temporary home, so a
+// test that changes the permission mode does not rewrite the developer's own
+// config file.
+func isolateConfig(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	// Both are set because os.UserConfigDir consults XDG_CONFIG_HOME on Linux
+	// and derives from HOME everywhere else.
+	t.Setenv("HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(dir, ".config"))
+}
+
+// A fresh workbench runs in a mode that lets agents act. Inheriting the user's
+// own Claude configuration was the old behaviour, and headless it meant an
+// agent that could read a project and change nothing in it.
+func TestDefaultPermissionModeCanAct(t *testing.T) {
+	w := newTestWorkbench(t)
+	if got := w.PermissionMode(); got != claude.DefaultPermission {
+		t.Errorf("PermissionMode = %q, want %q", got, claude.DefaultPermission)
+	}
+	if got := w.PermissionMode(); got == "" {
+		t.Error("empty mode inherits the user's own config, which cannot act")
+	}
+}
+
+// The mode is what a dispatch runs under, and it survives being changed.
+func TestSetPermissionMode(t *testing.T) {
+	isolateConfig(t)
+	w := newTestWorkbench(t)
+
+	if _, err := w.SetPermissionMode(string(claude.PermissionRead)); err != nil {
+		t.Fatalf("SetPermissionMode: %v", err)
+	}
+	if got := w.PermissionMode(); got != claude.PermissionRead {
+		t.Errorf("PermissionMode = %q, want %q", got, claude.PermissionRead)
+	}
+	// Persisted, so the next window opens in the mode this one was left in.
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if cfg.PermissionMode != string(claude.PermissionRead) {
+		t.Errorf("saved mode = %q, want %q", cfg.PermissionMode, claude.PermissionRead)
+	}
+
+	// A mode nothing accepts changes nothing.
+	if _, err := w.SetPermissionMode("dontAsk"); err == nil {
+		t.Error("want an error for a mode Work does not offer")
+	}
+	if got := w.PermissionMode(); got != claude.PermissionRead {
+		t.Errorf("mode changed on a rejected value: %q", got)
+	}
+}
+
+// Choosing a config folder must not drop the permission mode: both live in the
+// same file, and Save writes the whole of it.
+func TestSetConfigRootKeepsPermissionMode(t *testing.T) {
+	isolateConfig(t)
+	w := newTestWorkbench(t)
+	if _, err := w.SetPermissionMode(string(claude.PermissionAll)); err != nil {
+		t.Fatalf("SetPermissionMode: %v", err)
+	}
+
+	root := t.TempDir()
+	if err := agents.Ensure(root); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	if _, err := w.SetConfigRoot(root); err != nil {
+		t.Fatalf("SetConfigRoot: %v", err)
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+	if cfg.Root != root {
+		t.Errorf("saved root = %q, want %q", cfg.Root, root)
+	}
+	if cfg.PermissionMode != string(claude.PermissionAll) {
+		t.Errorf("saved mode = %q, want it kept", cfg.PermissionMode)
+	}
+}
+
+// An agent whose own definition sets a mode keeps it: the toggle is the answer
+// for everybody who has not been narrowed by hand.
+func TestPermissionForAgentOverride(t *testing.T) {
+	w := newTestWorkbench(t)
+	w.UsePermissionMode(claude.PermissionAll)
+
+	if got := w.permissionFor(agents.Agent{ID: "anton"}); got != string(claude.PermissionAll) {
+		t.Errorf("permissionFor = %q, want the workbench mode", got)
+	}
+	narrowed := agents.Agent{ID: "chris", PermissionMode: string(claude.PermissionRead)}
+	if got := w.permissionFor(narrowed); got != string(claude.PermissionRead) {
+		t.Errorf("permissionFor = %q, want the agent's own mode", got)
 	}
 }

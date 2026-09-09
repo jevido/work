@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { Snippet } from "svelte";
   import type { ClaudeSession, RunStatus } from "../lib/claude/session.svelte";
   import type { ChangeReview as ChangeReviewState } from "../lib/changes/changes.svelte";
   import AgentTurn from "./AgentTurn.svelte";
@@ -7,7 +8,19 @@
   let {
     session,
     review,
-  }: { session: ClaudeSession; review: ChangeReviewState } = $props();
+    controls,
+  }: {
+    session: ClaudeSession;
+    review: ChangeReviewState;
+    /**
+     * The app's own controls, rendered at the left of the header row.
+     *
+     * Passed in rather than built here: what they change -- the permission
+     * mode, the config folder -- is nothing to do with the conversation. This
+     * component owns the row they sit in and nothing about what is in them.
+     */
+    controls?: Snippet;
+  } = $props();
 
   let prompt = $state("");
   let scroller: HTMLDivElement | undefined = $state();
@@ -133,7 +146,19 @@
 
 <section class="console">
   <header>
-    <div class="title">Claude</div>
+    <!-- The app's controls, then what the run is doing, at opposite ends of the
+         one strip in this column that is not the conversation itself.
+
+         "Claude" used to head this row. It named the panel to somebody who had
+         already worked out that the right-hand side is where Claude answers,
+         and the space is better spent on the two things that change. -->
+    {#if controls}
+      <div class="controls">{@render controls()}</div>
+    {:else}
+      <!-- Keeps the status against the right edge when nothing was handed in,
+           which is every use of this component except the app's own. -->
+      <div class="controls"></div>
+    {/if}
 
     <!-- The review's only trace in the console. It sits with the run status
          because that is what it is: something the run did, alongside how the
@@ -279,22 +304,29 @@
   }
 
   header {
+    /* The menus in .controls hang out of this row and over the transcript, so
+       it has to be a positioned ancestor that stacks above what it covers. */
+    position: relative;
+    z-index: 2;
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 10px 12px;
+    /* Padding trimmed from 10px to keep the row at the same 40px it was: the
+       controls are taller than the line of text that used to be here, and a
+       header that changed height would push the whole transcript down. */
+    padding: 7px 12px;
     border-bottom: 1px solid var(--line);
-    /* Pinned to the height of a line of title text. The review button is the
-       only thing in here that comes and goes, and a header that grows when it
-       appears pushes the whole transcript down to announce itself -- which is
-       the interruption moving the review out of the transcript was meant to
-       end. */
+    /* The review button is the only thing in here that comes and goes, and a
+       header that grows when it appears pushes the whole transcript down to
+       announce itself -- which is the interruption moving the review out of the
+       transcript was meant to end. */
     min-height: 40px;
   }
 
-  .title {
-    font-weight: 600;
-    letter-spacing: 0.01em;
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     /* Pushes the review button and the status to the right edge together, so
        the status does not move as the button comes and goes. */
     margin-right: auto;

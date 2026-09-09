@@ -23,6 +23,10 @@ import * as changes$0 from "../internal/changes/models.js";
 // @ts-ignore: Unused imports
 import * as workbench$0 from "../internal/workbench/models.js";
 
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
+import * as $models from "./models.js";
+
 /**
  * AgentProfile returns what one agent's folder says about them: the skills in
  * skills/, their PERSONALITY.md and the line Anton routes them on. The profile
@@ -78,6 +82,13 @@ export function GetConfigPath(): $CancellablePromise<string> {
 }
 
 /**
+ * Permissions returns the current mode and everything needed to describe it.
+ */
+export function Permissions(): $CancellablePromise<$models.Permissions> {
+    return $Call.ByID(228874366);
+}
+
+/**
  * ReloadAgents rescans the config folder and rebuilds the team, so an agent
  * folder added outside Work shows up without a restart.
  */
@@ -102,6 +113,17 @@ export function Revert(path: string): $CancellablePromise<void> {
  */
 export function SelectConfigFolder(): $CancellablePromise<string> {
     return $Call.ByID(3035609692);
+}
+
+/**
+ * SetPermissionMode changes what agents may do, for this session and the next.
+ * 
+ * It answers with the whole setting rather than nothing, so the toggle draws
+ * from what the backend actually holds instead of assuming its own click won.
+ * An unknown mode is an error and changes nothing.
+ */
+export function SetPermissionMode(mode: string): $CancellablePromise<$models.Permissions> {
+    return $Call.ByID(3586272062, mode);
 }
 
 /**

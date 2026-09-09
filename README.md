@@ -24,11 +24,9 @@ output.
 Work talks to your local `claude` binary, so it never handles credentials of its
 own. Point it at a specific installation with `CLAUDE_BIN=/path/to/claude`.
 
-Agents run in Work's working directory and inherit your local Claude
-installation's own permission configuration — Work passes no permission flags of
-its own. Whatever your `claude` setup already allows without asking, an agent can
-do here, and there is no approval prompt in the UI yet. Start Work from a
-directory you are happy for it to work in.
+Agents run in Work's working directory. **Start Work from a directory you are
+happy for it to change**, because in the default mode they change it without
+asking — see [What agents may do](#what-agents-may-do).
 
 ## Building
 
@@ -161,6 +159,34 @@ across turns, so a follow-up can lean on what was already said. "New chat"
 clears the screen, the board and the agents' memory in one gesture, because
 those three drifting apart would be worse than any of them being stale.
 
+## What agents may do
+
+The top-right toggle, left of the wrench, is what a run is allowed to do. It
+says the current mode on its face, because it is the one setting here that
+decides whether a task can change your project.
+
+| Mode | What an agent can do |
+| --- | --- |
+| **Read only** | Read the project and answer about it. Edits and shell commands are refused before they run. |
+| **Edit files** | Change files and run commands, no asking. Everything touched lands in the change review, with a revert. The default. |
+| **No limits** | Every permission check off, including the ones that stop something destructive. |
+
+Work used to pass no permission flag at all and inherit whatever your own
+Claude installation allowed. That reads as the cautious choice and is not one:
+Work runs `claude -p`, so there is nobody at a prompt to approve anything, and
+a mode that asks does not pause — it refuses. Agents could read a repository,
+could change nothing in it, and said so on every run. So Work picks a mode and
+this is where you pick which.
+
+The choice is remembered between runs, applies to Anton and every specialist,
+and takes effect on the next task rather than on one already in flight. Anton's
+routing turn is always read-only whatever the toggle says: deciding who does
+the work is not the turn that does it.
+
+**No limits** needs the Claude CLI's own disclaimer accepted once, or the CLI
+ignores the mode without saying so. Work checks and tells you the command to
+run: `claude --dangerously-skip-permissions`.
+
 ## Your team
 
 Agents are folders. Pick a config root the first time Work starts and it
@@ -292,8 +318,16 @@ Compare only samples taken at the same window size with the window on top.
 ## Status
 
 Delegation, the conversation, the board, tool visibility and change review all
-work end to end. Still missing: nothing is persisted across restarts, thinking
-output is streamed but not displayed, there is no pre-write approval (the CLI
-exposes no hook for one), only one run can be active at a time, and the frontend
-has no test runner — the differ and the diff parser were verified by hand
-against real `git diff` output rather than by a suite.
+work end to end. Still missing: nothing is persisted across restarts except the
+config folder and the permission mode, thinking output is streamed but not
+displayed, there is no pre-write approval (the CLI exposes no hook for one),
+only one run can be active at a time, and the frontend has no test runner — the
+differ and the diff parser were verified by hand against real `git diff` output
+rather than by a suite.
+
+The working directory is the one thing still not a setting: agents run wherever
+Work was started from, which for a packaged app launched from a desktop entry
+is whatever the launcher happened to pass — usually your home directory. That
+is also where the change review looks for a git repository, and outside one
+there is no review and no revert. Until it is a setting, launch Work from the
+project you want it working on.

@@ -3,12 +3,14 @@
   import ConfigSetup from "./components/ConfigSetup.svelte";
   import KanbanBoard from "./components/KanbanBoard.svelte";
   import OfficeCanvas from "./components/OfficeCanvas.svelte";
+  import PermissionMenu from "./components/PermissionMenu.svelte";
   import SettingsMenu from "./components/SettingsMenu.svelte";
   import { Roster } from "./lib/agents/roster.svelte";
   import { TaskBoard } from "./lib/board/board.svelte";
   import { ChangeReview } from "./lib/changes/changes.svelte";
   import { ClaudeSession } from "./lib/claude/session.svelte";
   import { Config } from "./lib/config/config.svelte";
+  import { Permissions } from "./lib/permissions/permissions.svelte";
 
   const session = new ClaudeSession();
   const board = new TaskBoard();
@@ -20,6 +22,16 @@
    * whoever is in it.
    */
   const roster = new Roster();
+
+  /**
+   * What the agents are allowed to do.
+   *
+   * Work chooses a permission mode rather than inheriting whatever the local
+   * Claude installation allows: nothing here can answer a permission prompt,
+   * so a mode that asks is a mode that refuses. This is the user's say over
+   * which one, and it is read before the office is drawn.
+   */
+  const permissions = new Permissions();
 
   /**
    * Where the agent folders are.
@@ -45,6 +57,12 @@
   // Reads nothing reactive, so this runs once.
   $effect(() => {
     void config.probe();
+  });
+
+  // The mode does not depend on the config folder -- it is about what a run
+  // may do, not about who is on the team -- so it is asked for straight away.
+  $effect(() => {
+    void permissions.load();
   });
 
   // The team is only worth asking for once the folder it lives in is settled.
@@ -93,21 +111,34 @@
     <div class="work">
       <KanbanBoard {board} agents={roster.identities} />
       <div class="office">
-        <!-- Top-right of the office, which is what config changes: the desks in
-             it are the folder, redrawn. The roster's own failure sits in the
-             same row rather than under the wrench, so neither covers the
-             other. -->
-        <div class="overlay">
-          {#if roster.loadError}
-            <div class="load-error">{roster.loadError}</div>
-          {/if}
-          <SettingsMenu {config} />
-        </div>
+        <!-- Why the office is empty, over the office it is empty in. It stayed
+             here when the controls moved out: an agent folder that would not
+             load is the explanation for the desks that are missing, and it
+             belongs with them rather than in the corner of the conversation. -->
+        {#if roster.loadError}
+          <div class="load-error">{roster.loadError}</div>
+        {/if}
         <OfficeCanvas {roster} {session} {config} {showPerf} />
       </div>
     </div>
     <aside>
-      <ClaudeConsole {session} {review} />
+      <!-- The app's own controls live in the console's header row, which is the
+           only strip in the window that is neither the work nor the watching.
+
+           They sat over the office and had to be read against a moving canvas.
+           Handed to the console as a snippet rather than placed above it: the
+           row also carries what the run is doing, and that state belongs to the
+           console -- two rows, one holding the controls and one holding the
+           status, would be a box drawn around nothing.
+
+           The permission mode comes before the wrench: what a run is allowed
+           to do is looked at far more often than the folder agents load from. -->
+      <ClaudeConsole {session} {review}>
+        {#snippet controls()}
+          <PermissionMenu {permissions} />
+          <SettingsMenu {config} />
+        {/snippet}
+      </ClaudeConsole>
     </aside>
   </main>
 {/if}
@@ -144,19 +175,13 @@
     min-height: 0;
   }
 
-  .overlay {
+  .load-error {
     position: absolute;
     /* Above the desk panel, which is bottom-left and cannot reach this corner
        -- but can be dragged there. */
     z-index: 3;
     top: 10px;
     right: 10px;
-    display: flex;
-    align-items: flex-start;
-    gap: 8px;
-  }
-
-  .load-error {
     max-width: min(340px, 50vw);
     padding: 6px 10px;
     border: 1px solid #4a2b2b;

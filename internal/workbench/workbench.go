@@ -87,6 +87,11 @@ type Workbench struct {
 	// picks one. Until then the built-in team stands in, so Work is usable
 	// before it is configured.
 	root string
+	// permission is what every agent is allowed to do, unless their own
+	// definition narrows it. Held here rather than on each agent because it is
+	// one answer for the whole workbench: the toggle that changes it is about
+	// this session's appetite for risk, not about who Anton is.
+	permission claude.PermissionMode
 }
 
 // run is one top-level request, from prompt to final answer.
@@ -122,6 +127,10 @@ func New(reg *agents.Registry, runner *claude.Runner, emit Emitter, workDir stri
 		state:    make(map[string]AgentState),
 		current:  make(map[string]string),
 		sessions: make(map[string]string),
+		// Something has to be chosen. Inheriting the user's own Claude
+		// configuration was the old behaviour and it meant agents that could
+		// not act, since nothing here can answer a permission prompt.
+		permission: claude.DefaultPermission,
 	}
 	for _, a := range reg.All() {
 		w.state[a.ID] = StateIdle
@@ -360,9 +369,14 @@ func (w *Workbench) plan(ctx context.Context, r *run, lead agents.Agent) (Plan, 
 		WorkDir:            w.workDir,
 		JSONSchema:         schema,
 		// Routing is a judgement call on the text of the task, not an
-		// investigation, so the planning turn gets no tools. It keeps the turn
-		// fast and cheap, which matters because every run pays for it.
-		AllowedTools: []string{},
+		// investigation, and it is not the turn that does the work -- so it
+		// runs read-only whatever the workbench is set to. The CLI has no way
+		// to say "no tools at all" (an empty --allowed-tools is the same as
+		// omitting it), but this refuses every edit and every command before
+		// it runs, which is the part that matters: the mode the user chose
+		// applies to the agents who were given the task, not to the turn that
+		// decided who they are.
+		PermissionMode: string(claude.PermissionRead),
 	}, func(e claude.Event) {
 		switch e.Kind {
 		case claude.KindSession:
@@ -517,7 +531,7 @@ func (w *Workbench) streamStep(
 		AppendSystemPrompt: w.systemPrompt(agent),
 		WorkDir:            w.workDir,
 		AllowedTools:       agent.AllowedTools,
-		PermissionMode:     agent.PermissionMode,
+		PermissionMode:     w.permissionFor(agent),
 		Resume:             resume,
 	}, func(e claude.Event) {
 		// The first sign of real output promotes the agent from assigned to
@@ -629,6 +643,57 @@ func (w *Workbench) ConfigRoot() string {
 	return w.root
 }
 
+// PermissionMode returns what agents are currently allowed to do.
+func (w *Workbench) PermissionMode() claude.PermissionMode {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.permission
+}
+
+// SetPermissionMode changes what agents are allowed to do and remembers it.
+//
+// It takes effect on the next Claude process rather than on one already
+// running: a mode is an argument to a process that has already started, so
+// tightening this mid-run does not reach back into the turn in flight.
+//
+// The mode is applied before it is persisted, and a config file that cannot be
+// written is reported without undoing the change. A user whose config folder
+// is read-only should still be able to work in the mode they picked; what they
+// lose is having it remembered, and that is what the error says.
+func (w *Workbench) SetPermissionMode(mode string) (claude.PermissionMode, error) {
+	parsed, err := claude.ParsePermissionMode(mode)
+	if err != nil {
+		return w.PermissionMode(), err
+	}
+	w.UsePermissionMode(parsed)
+	if err := config.Update(func(c *config.Config) {
+		c.PermissionMode = string(parsed)
+	}); err != nil {
+		return parsed, err
+	}
+	return parsed, nil
+}
+
+// UsePermissionMode applies a mode without persisting it. Startup uses it for
+// the mode already in the config file, which does not need writing back.
+func (w *Workbench) UsePermissionMode(mode claude.PermissionMode) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.permission = mode
+}
+
+// permissionFor is the mode one dispatch runs under.
+//
+// An agent's own definition wins when it sets one, so a specialist can be kept
+// narrower than the workbench; nothing on disk sets it yet, which is why the
+// toggle is the answer for everybody in practice.
+func (w *Workbench) permissionFor(a agents.Agent) string {
+	if a.PermissionMode != "" {
+		return a.PermissionMode
+	}
+	return string(w.PermissionMode())
+}
+
 // SetConfigRoot points Work at a config folder, loads the team from it and
 // remembers the choice for next time.
 //
@@ -639,7 +704,9 @@ func (w *Workbench) SetConfigRoot(root string) ([]AgentStatus, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := config.Save(config.Config{Root: root}); err != nil {
+	// Read-modify-write rather than Save: the file holds the permission mode
+	// too, and writing a fresh Config here would drop it.
+	if err := config.Update(func(c *config.Config) { c.Root = root }); err != nil {
 		return nil, err
 	}
 	return list, nil
