@@ -18,7 +18,6 @@ output.
 - Node 22+ and npm
 - [Wails v3](https://v3.wails.io) CLI: `go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.18`
 - The Claude Code CLI, already signed in: `claude`
-- Linux: GTK4 and WebKitGTK 6.0 (`gtk4`, `webkitgtk-6.0`)
 
 Work talks to your local `claude` binary, so it never handles credentials of its
 own. Point it at a specific installation with `CLAUDE_BIN=/path/to/claude`.
@@ -29,7 +28,32 @@ its own. Whatever your `claude` setup already allows without asking, an agent ca
 do here, and there is no approval prompt in the UI yet. Start Work from a
 directory you are happy for it to work in.
 
-## Running
+## Building
+
+The webview binding is CGO, so each OS needs its own native toolchain and
+webview runtime before anything will link.
+
+**Linux** — GTK4 and WebKitGTK 6.0, plus a C compiler:
+
+```sh
+# Arch
+sudo pacman -S gtk4 webkitgtk-6.0 base-devel
+# Debian/Ubuntu
+sudo apt install libgtk-4-dev libwebkitgtk-6.0-dev build-essential
+```
+
+**macOS** — Xcode Command Line Tools only (WebKit is part of the OS):
+
+```sh
+xcode-select --install
+```
+
+**Windows** — a C compiler (MSVC via [Visual Studio Build
+Tools](https://visualstudio.microsoft.com/downloads/#build-tools-for-visual-studio-2022),
+or `mingw-w64`/TDM-GCC) and the WebView2 runtime, which ships with Windows
+11 and current Windows 10 out of the box.
+
+### On Linux
 
 ```sh
 wails3 dev      # hot-reloading development build
@@ -39,6 +63,39 @@ go test ./...
 ```
 
 `Ctrl+P` toggles the performance overlay (FPS, frame time, agent count).
+
+### On macOS and Windows
+
+The `wails3` wrappers do not work here yet. `wails3 build`, `wails3 dev` and
+`wails3 task run` all dispatch through the Taskfile as `{{OS}}:build`, and only
+the `linux` target is wired up (`build/linux/`), so on either platform they stop
+at:
+
+```
+task: Task "darwin:build" does not exist
+```
+
+`wails3 update build-assets` fills in `build/darwin/Info.plist` and
+`build/windows/` (manifest, NSIS, `info.json`), but it does not write the
+per-platform Taskfiles — those come from the `wails3 init` template and were
+never carried in this repository.
+
+Building by hand works on any OS with the toolchain above:
+
+```sh
+npm --prefix frontend install
+npm --prefix frontend run build       # go:embed needs frontend/dist to exist
+go build -tags production -o bin/work # bin/work.exe on Windows
+```
+
+`frontend/bindings/` is committed, so a fresh clone does not need to generate
+it; run `wails3 generate bindings -ts -i` after changing a Go service signature.
+
+What you get from that is a bare executable. There is no packaging for mac or
+Windows — the `task package` pipeline (AppImage, deb, rpm, AUR) is Linux-only,
+and `common:generate:icons` is deliberately stubbed to a no-op because no
+`.icns` or `.ico` is carried here, so the app ships with no icon on those
+platforms.
 
 ## Architecture
 
