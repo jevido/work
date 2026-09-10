@@ -14,24 +14,106 @@ The office is not the product. It is a cheap, legible picture of what the AI
 system is doing, so understanding a run does not mean reading raw terminal
 output.
 
-## Requirements
+## Install
+
+Releases are Linux x86-64 and arm64. macOS and Windows have to be built from
+source for now — see [Building from source](#building-from-source).
+
+**Take the binary.** Every push to main that can change the app publishes one,
+so `latest` is the newest:
+
+```sh
+arch=amd64   # or arm64
+base=https://github.com/jevido/work/releases/latest/download
+
+curl -LO "$base/work-linux-$arch"
+curl -LO "$base/checksums.txt"
+sha256sum --check --ignore-missing checksums.txt
+
+install -Dm755 "work-linux-$arch" ~/.local/bin/work
+```
+
+`~/.local/bin` rather than `/usr/local/bin` deliberately: Work updates itself by
+replacing its own file, so it has to own the directory it sits in. Put it
+somewhere root-owned and everything works except the update button, which fails
+on a permission error.
+
+**Install the webview.** The binary carries its own frontend, but not the
+webview it draws into:
+
+```sh
+# Arch
+sudo pacman -S gtk4 webkitgtk-6.0
+# Debian/Ubuntu
+sudo apt install libgtk-4-1 libwebkitgtk-6.0-4
+```
+
+**Have a signed-in Claude.** Work drives your local `claude` binary and never
+handles credentials of its own, so it needs one that is already signed in.
+Point it at a specific installation with `CLAUDE_BIN=/path/to/claude`.
+
+**Start it from the project you want it to work on:**
+
+```sh
+cd ~/src/some-project
+work
+```
+
+Agents run in Work's working directory, and in the default mode they change it
+without asking — so **start Work from a directory you are happy for it to
+change**; see [What agents may do](#what-agents-may-do). The first launch asks
+for a config root and creates your team's folder under it; see
+[Your team](#your-team).
+
+## Updates
+
+Work watches its own releases. Five seconds after launch, and every six hours a
+window stays open, it asks GitHub for the newest release; if that is newer than
+the running binary, a small window says so — the version, a link to the release
+notes, and **Update now**.
+
+Pressing it downloads the asset for your OS and architecture, hashes it against
+the release's `checksums.txt` and refuses to install anything that is missing
+from that file or does not match it. Then it replaces the binary in place and
+restarts: same process ID, same terminal, no second copy of Work alive. A swap
+that fails puts the old binary back.
+
+Closing the popup closes it for that run only. It returns on the next launch,
+and on every launch after that, until the update is actually installed. That is
+on purpose.
+
+Builds you make yourself never do any of this. `task build` stamps a version
+like `dev+de2f1d2-dirty`, and Work reads anything on a `dev` core as a
+development build: it does not poll, and it will not overwrite a binary that
+came out of somebody's working tree. Only `task build:release`, which the
+release workflow runs, produces a build that opts in.
+
+### Cutting a release
+
+There is no version to bump. A push to main takes the newest `v*` tag, adds one
+to the patch number, stamps that into the binary as its version, tags it and
+publishes both architectures with a checksum list — so the tag, the number the
+app reports and the number it compares against are all the same one.
+
+Pushes that cannot change the binary do not release: markdown, `LICENSE`, docs
+and editor config are filtered out, and `[skip release]` in a commit *subject*
+opts out anything the filter cannot know about. To move a minor or major
+number, push that tag by hand; the next release continues from it.
+
+## Building from source
+
+Only needed to work on Work itself, or to run it on macOS or Windows.
 
 - Go 1.25+
 - Node 22+ and npm
 - [Wails v3](https://v3.wails.io) CLI: `go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.18`
-- The Claude Code CLI, already signed in: `claude`
+- A signed-in `claude`, as above
 
-Work talks to your local `claude` binary, so it never handles credentials of its
-own. Point it at a specific installation with `CLAUDE_BIN=/path/to/claude`.
-
-Agents run in Work's working directory. **Start Work from a directory you are
-happy for it to change**, because in the default mode they change it without
-asking — see [What agents may do](#what-agents-may-do).
-
-## Building
+### Native toolchain
 
 The webview binding is CGO, so each OS needs its own native toolchain and
-webview runtime before anything will link.
+webview runtime before anything will link. These are the development packages;
+the runtime ones in [Install](#install) are not enough to build against.
 
 **Linux** — GTK4 and WebKitGTK 6.0, plus a C compiler:
 
@@ -61,6 +143,10 @@ wails3 build    # production binary in ./bin/work
 wails3 task check   # go vet + svelte-check
 go test ./...
 ```
+
+Both build paths report a `dev+<git description>` version and so never offer to
+update themselves; `wails3 task build:release VERSION=0.1.0` is the one that
+stamps a real release number, and it is what the release workflow runs.
 
 `Ctrl+P` toggles the performance overlay (FPS, frame time, agent count).
 
@@ -238,9 +324,9 @@ touched.
 
 ## Reviewing what an agent did
 
-Work never grants an agent more than your own Claude installation already
-allows: no permission flag is passed unless an agent's `PermissionMode` sets
-one. Setting it to `acceptEdits` lets that agent write files.
+What a run may do is the mode you picked in
+[What agents may do](#what-agents-may-do), which applies to Anton and every
+specialist alike.
 
 The Claude CLI has no hook that lets Work approve a write before it happens, so
 the gate sits after the fact. Work snapshots the working tree when a run starts
