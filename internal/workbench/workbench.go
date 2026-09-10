@@ -67,16 +67,11 @@ type Workbench struct {
 	nextRun  atomic.Uint64
 	nextChat atomic.Uint64
 
-	// admit serialises the decision to start a run. It is held for the whole
-	// of Submit, and by Redirect across cancel-wait-start, so no other caller
-	// can slip into the free slot in between. Never held together with mu, and
-	// never taken by a run's own goroutine, so waiting on a run while holding
-	// it cannot deadlock.
-	admit sync.Mutex
-
-	// chatAdmit serialises the decision to start a side-channel answer, the
-	// same way admit does for runs. It is a separate lock on purpose: a
-	// question to the coordinator must not queue behind the run it is about.
+	// chatAdmit serialises the decision to start a side-channel answer. It is
+	// its own lock rather than mu: a question to the coordinator must not
+	// queue behind the run it is about. Starting a run needs no equivalent --
+	// claiming the active slot is one check-and-set under mu, so two callers
+	// racing to Submit already resolve to one winner and one error.
 	chatAdmit sync.Mutex
 
 	mu      sync.Mutex
@@ -120,15 +115,8 @@ type run struct {
 	prompt string
 	cancel context.CancelFunc
 	nextID atomic.Uint64
-	// agentID is the lead: the coordinator for a routed run, the named agent
-	// for a direct one. Redirect reports it back to the caller.
-	agentID string
 	// followUp is true when this is not the first request of the conversation.
 	followUp bool
-	// done is closed by finishRun once the run has released the workbench and
-	// emitted its last event. Redirect waits on it, so cancelling and starting
-	// again is a single ordered handover rather than a race.
-	done chan struct{}
 	// chat marks a side-channel answer. It suppresses the agent:* state
 	// changes a normal turn emits: the office seats an agent per task, and the
 	// coordinator answering a question while also leading a run would
@@ -288,11 +276,10 @@ func (w *Workbench) Chat(prompt string) (Task, error) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &run{
-		id:      "c" + strconv.FormatUint(w.nextChat.Add(1), 10),
-		prompt:  prompt,
-		cancel:  cancel,
-		agentID: lead.ID,
-		chat:    true,
+		id:     "c" + strconv.FormatUint(w.nextChat.Add(1), 10),
+		prompt: prompt,
+		cancel: cancel,
+		chat:   true,
 	}
 
 	w.mu.Lock()

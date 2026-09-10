@@ -82,18 +82,6 @@ func (c *claims) take(agentID string, paths []string) (blockedBy string, ok bool
 	return "", true
 }
 
-// release hands back everything an agent holds and wakes the waiters. An agent
-// holds the files of at most one step in a plan, so there is nothing finer to
-// release.
-func (c *claims) release(agentID string) {
-	c.mu.Lock()
-	if _, had := c.held[agentID]; had {
-		delete(c.held, agentID)
-		c.wakeLocked()
-	}
-	c.mu.Unlock()
-}
-
 // finish releases an agent's files and records that it is not coming back for
 // them, so anybody queueing on its declared paths can stop waiting.
 func (c *claims) finish(agentID string) {
