@@ -313,6 +313,9 @@ export class OfficeRenderer {
   /** Set when the next frame must repaint everything. */
   private needsFullRepaint = true;
 
+  /** Patches drawn last frame, 0 for a full repaint. Read by the overlay. */
+  private lastPatches = 0;
+
   /** True while any agent is doing something more interesting than strolling. */
   private busy = false;
 
@@ -350,6 +353,23 @@ export class OfficeRenderer {
   private readonly scratchTray: Rect = { x: 0, y: 0, w: 0, h: 0 };
   /** Scratch for the desk box the dirty-rect pass asks for every frame. */
   private readonly scratchDesk: Rect = { x: 0, y: 0, w: 0, h: 0 };
+
+  /**
+   * The patch `drawScene` is drawing into, in world units, or null on a full
+   * repaint.
+   *
+   * `drawScene` runs once per dirty rectangle, and a canvas clip only stops
+   * the pixels: every agent, every lit desk, every bubble and every folder was
+   * still walked, its path built and its fills issued, once per patch on the
+   * frame. Patches are ordinary -- one or two per moving agent, plus a desk
+   * apiece -- so a five-person office was drawing the whole scene three or
+   * four times over to show a quarter of it each time. `visible` tests against
+   * this, so a patch is only asked for what can land in it.
+   */
+  private patch: Rect | null = null;
+  /** Where the patch is in world units, and scratch for the cull test. */
+  private readonly scratchPatch: Rect = { x: 0, y: 0, w: 0, h: 0 };
+  private readonly scratchCull: Rect = { x: 0, y: 0, w: 0, h: 0 };
 
   /** The agent whose monitor the pointer is over, if any. */
   private hoverId: string | null = null;
@@ -650,7 +670,13 @@ export class OfficeRenderer {
     const started = performance.now();
     this.update(dt);
     this.draw(now);
-    this.sampler.sample(dt, performance.now() - started, this.agents.length, now);
+    this.sampler.sample(
+      dt,
+      performance.now() - started,
+      this.agents.length,
+      this.lastPatches,
+      now,
+    );
   };
 
   private drainQueue(): void {
@@ -1421,6 +1447,7 @@ export class OfficeRenderer {
     // made the cheapest frame the most expensive one, and with movement turned
     // off every frame is that frame.
     if (!this.needsFullRepaint && this.dirtyCount === 0) {
+      this.lastPatches = 0;
       this.recordDrawn();
       return;
     }
@@ -1434,9 +1461,12 @@ export class OfficeRenderer {
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.drawImage(this.layer, 0, 0);
       this.setWorldTransform();
+      this.patch = null;
       this.drawScene(ctx, now);
       this.needsFullRepaint = false;
+      this.lastPatches = 0;
     } else {
+      this.lastPatches = this.dirtyCount;
       for (let i = 0; i < this.dirtyCount; i++) {
         const r = this.dirty[i];
         // Restore the background for this patch, in device space so the blit
@@ -1465,9 +1495,22 @@ export class OfficeRenderer {
         ctx.rect(dx, dy, dw, dh);
         ctx.clip();
         this.setWorldTransform();
+        // The same region the clip covers, back in world units, so the cull
+        // and the clip agree to the pixel. Taken from the device rectangle
+        // rather than from `r`: the blit is floored and rounded up with two
+        // pixels of slop, and culling against the tighter world rectangle
+        // would drop something drawn in the slop the blit just erased.
+        const p = this.scratchPatch;
+        const inv = 1 / (this.scale * this.dpr);
+        p.x = (dx - this.offsetX * this.dpr) * inv;
+        p.y = (dy - this.offsetY * this.dpr) * inv;
+        p.w = dw * inv;
+        p.h = dh * inv;
+        this.patch = p;
         this.drawScene(ctx, now);
         ctx.restore();
       }
+      this.patch = null;
     }
 
     this.recordDrawn();
@@ -1488,6 +1531,19 @@ export class OfficeRenderer {
     this.handoff.markDrawn();
   }
 
+  /**
+   * True when a rectangle can put pixels in the patch being drawn.
+   *
+   * The bounds handed in here are the ones `collectDirty` erases with -- an
+   * agent's `boxAt`, a desk's `deskRect`, a bubble's `speechRect`, the ball's
+   * and the chair's sweeps -- so anything this skips lies entirely outside the
+   * clip that was already going to throw it away. It changes what the frame is
+   * asked to draw, never what lands on screen.
+   */
+  private visible(r: Rect): boolean {
+    return this.patch === null || rectsOverlap(this.patch, r);
+  }
+
   /** Draws everything that moves: lit monitors and the agents themselves. */
   private drawScene(ctx: CanvasRenderingContext2D, now: number): void {
     ctx.font = LABEL_FONT;
@@ -1497,39 +1553,53 @@ export class OfficeRenderer {
     // The coordinator's chair, under whoever is sitting on it and in front of
     // the desk it belongs to. Drawn here rather than baked into the static
     // layer because it is the one piece of furniture in this office that moves.
-    if (this.handoff.showsChair) {
-      this.drawChair(ctx, this.handoff.chairX, this.handoff.chairY);
+    const handoff = this.handoff;
+    if (
+      handoff.showsChair &&
+      this.visible(chairRect(handoff.chairX, handoff.chairY, this.scratchCull))
+    ) {
+      this.drawChair(ctx, handoff.chairX, handoff.chairY);
     }
 
     const list = this.agents;
     for (let i = 0; i < list.length; i++) {
       const a = list[i];
       const hot = a.id === this.hoverId;
-      if (isLit(a.state)) this.drawDesk(ctx, a, true, hot);
+      const lit = isLit(a.state);
       // A dark desk is part of the static layer, so hovering one means drawing
       // it again on top -- the same desk, with the highlight added. Every desk
       // opens its owner's panel now, whether or not they are busy, so every
       // desk answers the pointer.
-      else if (hot) this.drawDesk(ctx, a, false, true);
+      if (!lit && !hot) continue;
+      if (!this.visible(deskRect(a.deskX, a.deskY, a.boss, this.scratchCull))) continue;
+      this.drawDesk(ctx, a, lit, hot);
     }
     // Finished work, back where it came from. On the desk rather than in the
     // agents' pass, so anybody standing in front of the desk is drawn over it.
-    if (this.handoff.tray > 0 && this.boss) {
-      this.drawReturned(ctx, this.boss, this.handoff.tray);
+    if (handoff.tray > 0 && this.boss && this.visible(this.trayRect(this.scratchCull))) {
+      this.drawReturned(ctx, this.boss, handoff.tray);
     }
 
-    for (let i = 0; i < list.length; i++) this.drawAgent(ctx, list[i], now);
+    for (let i = 0; i < list.length; i++) {
+      const a = list[i];
+      if (this.visible(a.boxAt(a.x, a.y, this.scratchCull))) this.drawAgent(ctx, a, now);
+    }
 
     // A ball in flight belongs over both players, whichever way the depth
     // sort put them.
     for (const bit of this.director.bits) {
-      if (bit.showsBall) this.drawBall(ctx, bit.ballX, bit.ballY);
+      if (!bit.showsBall) continue;
+      if (!this.visible(bit.ballRect(this.scratchCull))) continue;
+      this.drawBall(ctx, bit.ballX, bit.ballY);
     }
 
     // Bubbles last, so a line is never half-covered by whoever walks in front
     // of the person saying it.
     for (let i = 0; i < list.length; i++) {
-      if (list[i].speech.active) this.drawSpeech(ctx, list[i]);
+      const a = list[i];
+      if (!a.speech.active) continue;
+      if (!this.visible(speechRect(a.x, a.y, a.speech.width, this.scratchCull))) continue;
+      this.drawSpeech(ctx, a);
     }
   }
 

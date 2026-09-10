@@ -12,6 +12,7 @@
   let frameMs = $state(0);
   let peakMs = $state(0);
   let agents = $state(0);
+  let patches = $state(0);
 
   $effect(() => {
     const id = setInterval(() => {
@@ -20,6 +21,7 @@
       frameMs = s.frameMs;
       peakMs = s.peakMs;
       agents = s.agents;
+      patches = s.patches;
     }, 250);
     return () => clearInterval(id);
   });
@@ -30,6 +32,9 @@
   <span><b>{frameMs.toFixed(2)}</b> ms</span>
   <span>peak <b>{peakMs.toFixed(2)}</b> ms</span>
   <span><b>{agents}</b> agents</span>
+  <!-- The scene is drawn once per patch, so this is the multiplier on the
+       millisecond figures beside it. "full" is one whole-canvas repaint. -->
+  <span>{patches === 0 ? "full" : `${patches} patch`}</span>
 </div>
 
 <style>

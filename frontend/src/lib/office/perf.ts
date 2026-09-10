@@ -13,12 +13,20 @@ export interface FrameStats {
   peakMs: number;
   /** Agents drawn in the last frame. */
   agents: number;
+  /**
+   * Dirty rectangles the last frame drew, or 0 when it was a full repaint.
+   *
+   * Worth a slot on the overlay because the scene is drawn once per patch:
+   * this is the multiplier on everything `frameMs` measures, and a frame that
+   * has quietly stopped merging is the shape a regression here takes.
+   */
+  patches: number;
   /** Frames drawn since the loop started. */
   frames: number;
 }
 
 export function createStats(): FrameStats {
-  return { fps: 0, frameMs: 0, peakMs: 0, agents: 0, frames: 0 };
+  return { fps: 0, frameMs: 0, peakMs: 0, agents: 0, patches: 0, frames: 0 };
 }
 
 /** Exponential smoothing factor. Low enough to be readable, high enough to react. */
@@ -31,10 +39,11 @@ export class PerfSampler {
   private peakResetAt = 0;
 
   /** Records one rendered frame. dt and drawMs are in seconds and ms. */
-  sample(dt: number, drawMs: number, agents: number, now: number): void {
+  sample(dt: number, drawMs: number, agents: number, patches: number, now: number): void {
     const s = this.stats;
     s.frames++;
     s.agents = agents;
+    s.patches = patches;
 
     const instantFps = dt > 0 ? 1 / dt : 0;
     s.fps = s.fps === 0 ? instantFps : s.fps + (instantFps - s.fps) * SMOOTHING;
@@ -53,6 +62,7 @@ export class PerfSampler {
     s.fps = 0;
     s.frameMs = 0;
     s.peakMs = 0;
+    s.patches = 0;
     s.frames = 0;
     this.peakWindow = 0;
     this.peakResetAt = 0;
