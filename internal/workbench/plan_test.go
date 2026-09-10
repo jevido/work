@@ -155,18 +155,40 @@ func TestPlanSchemaNeedsSpecialists(t *testing.T) {
 	}
 }
 
-// TestPlanPromptDescribesTheTeam checks the roster comes from the registry
+// TestRosterBlockDescribesTheTeam checks the roster comes from the registry
 // rather than from hand-written prose that can drift.
-func TestPlanPromptDescribesTheTeam(t *testing.T) {
-	got := planPrompt(testRegistry(), "make it faster", false, nil)
+func TestRosterBlockDescribesTheTeam(t *testing.T) {
+	got := rosterBlock(testRegistry())
 
-	for _, want := range []string{"Ada", "id: ada", "performance", "Grace", "id: grace", "make it faster"} {
+	for _, want := range []string{"Ada", "id: ada", "performance", "Grace", "id: grace"} {
 		if !strings.Contains(got, want) {
-			t.Errorf("prompt is missing %q:\n%s", want, got)
+			t.Errorf("roster is missing %q:\n%s", want, got)
 		}
 	}
 	if strings.Contains(got, "id: anton") {
-		t.Error("prompt offers the coordinator as a delegate")
+		t.Error("roster offers the coordinator as a delegate")
+	}
+}
+
+// TestRosterBlockSaysWhenThereIsNobody checks an empty team reads as an empty
+// team. Anton answering "who works here" out of a silent prompt is what let
+// him contradict the office in the first place.
+func TestRosterBlockSaysWhenThereIsNobody(t *testing.T) {
+	got := rosterBlock(agents.NewRegistry(
+		agents.Agent{ID: "anton", Name: "Anton", Role: agents.RoleCoordinator}))
+
+	if !strings.Contains(got, "no specialists") {
+		t.Errorf("roster does not say the team is empty:\n%s", got)
+	}
+}
+
+// TestPlanPromptCarriesTheTask checks the routing turn still gets the request
+// and is not told an opening question is a follow-up.
+func TestPlanPromptCarriesTheTask(t *testing.T) {
+	got := planPrompt("make it faster", false, nil)
+
+	if !strings.Contains(got, "make it faster") {
+		t.Errorf("prompt is missing the task:\n%s", got)
 	}
 	if strings.Contains(got, "follow-up") {
 		t.Error("an opening request is described as a follow-up")
@@ -176,7 +198,7 @@ func TestPlanPromptDescribesTheTeam(t *testing.T) {
 // TestPlanPromptFlagsFollowUps checks the routing turn is told when the task
 // arrives mid-conversation, since the turn itself has no history.
 func TestPlanPromptFlagsFollowUps(t *testing.T) {
-	got := planPrompt(testRegistry(), "now the other half", true, nil)
+	got := planPrompt("now the other half", true, nil)
 
 	if !strings.Contains(got, "follow-up") {
 		t.Errorf("prompt does not mention the conversation:\n%s", got)
@@ -260,7 +282,7 @@ func TestNormaliseAllowsUpdatesWithoutSteps(t *testing.T) {
 // TestPlanPromptListsTheBoard checks Anton is shown the IDs the user will
 // mention, since he cannot act on a task he cannot name.
 func TestPlanPromptListsTheBoard(t *testing.T) {
-	got := planPrompt(testRegistry(), "close T1", false, []board.Card{
+	got := planPrompt("close T1", false, []board.Card{
 		{ID: "T1", Status: board.StatusDoing, AgentID: "ada", Title: "profile the renderer"},
 	})
 
@@ -272,7 +294,7 @@ func TestPlanPromptListsTheBoard(t *testing.T) {
 }
 
 func TestPlanPromptSaysWhenTheBoardIsEmpty(t *testing.T) {
-	got := planPrompt(testRegistry(), "anything", false, nil)
+	got := planPrompt("anything", false, nil)
 	if !strings.Contains(got, "board is empty") {
 		t.Errorf("prompt does not mention the empty board:\n%s", got)
 	}
@@ -337,7 +359,7 @@ func TestPlanSchemaRequiresFileClaims(t *testing.T) {
 }
 
 func TestPlanPromptAsksForAFilePartition(t *testing.T) {
-	got := planPrompt(testRegistry(), "do the thing", false, nil)
+	got := planPrompt("do the thing", false, nil)
 	for _, want := range []string{"files", "same file", "one specialist"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("planPrompt does not mention %q:\n%s", want, got)

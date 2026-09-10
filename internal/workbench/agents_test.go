@@ -296,3 +296,45 @@ func TestPermissionForAgentOverride(t *testing.T) {
 		t.Errorf("permissionFor = %q, want the agent's own mode", got)
 	}
 }
+
+// TestSystemPromptNamesTheTeamToTheCoordinator is the regression the office
+// display exposed: Anton was told who works here only on the routing turn, so
+// asked who was on the team on any other turn -- answering a task himself,
+// synthesising, or on the side channel -- he answered from nothing and
+// contradicted the desks the user was looking at.
+func TestSystemPromptNamesTheTeamToTheCoordinator(t *testing.T) {
+	w := newTestWorkbench(t)
+	root := t.TempDir()
+	// MkdirAll rather than Mkdir: agents/ does not exist until Ensure runs,
+	// and these folders are here before it does.
+	for _, name := range []string{"chris", "dennis", "jeff"} {
+		if err := os.MkdirAll(
+			filepath.Join(root, agents.AgentsDirName, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := w.UseConfigRoot(root); err != nil {
+		t.Fatalf("UseConfigRoot: %v", err)
+	}
+
+	lead, ok := w.registry.Coordinator()
+	if !ok {
+		t.Fatal("no coordinator")
+	}
+	got := w.systemPrompt(lead)
+	for _, want := range []string{"Chris", "Dennis", "Jeff"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the coordinator is not told about %s:\n%s", want, got)
+		}
+	}
+
+	// A specialist carries no roster: they are not asked to route, and every
+	// turn would pay for the list in tokens.
+	other, ok := w.registry.Get("chris")
+	if !ok {
+		t.Fatal("chris is not in the registry")
+	}
+	if strings.Contains(w.systemPrompt(other), "Your specialists") {
+		t.Error("a specialist is billed for the roster")
+	}
+}

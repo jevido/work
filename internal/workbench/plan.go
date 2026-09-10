@@ -219,23 +219,49 @@ func planSchema(reg Registry) (string, error) {
 	return string(out), nil
 }
 
-// planPrompt describes the team to Anton and asks him to route the task. The
-// roster is generated from the registry, so adding an agent changes the prompt
-// without anyone editing prose.
+// rosterBlock describes the team, one line per specialist: name, id, and the
+// blurb work is routed on. It is generated from the registry, so adding an
+// agent changes what the coordinator knows without anyone editing prose.
 //
-// followUp marks a request that arrives mid-conversation. The routing turn
-// itself is stateless, so it is told this much rather than being handed the
-// history: it changes how a terse "and now the other half" should be read.
-func planPrompt(reg Registry, task string, followUp bool, cards []board.Card) string {
+// This is the only description of the team any prompt carries, and it belongs
+// in the coordinator's system prompt rather than in one turn's text. He is
+// asked who works here on every kind of turn -- routing, answering a task
+// himself, synthesising, and on the side channel -- and only the routing turn
+// used to be told. The other three answered from nothing, which is how he came
+// to contradict the office the user was looking at. One block, read from the
+// same registry the office is drawn from, is what keeps the two agreeing.
+func rosterBlock(reg Registry) string {
 	var b strings.Builder
-	b.WriteString("Route this task.\n\nYour specialists:\n")
+	b.WriteString("Your specialists, as they exist right now:\n")
+	n := 0
 	for _, a := range reg.All() {
 		if a.Role == agents.RoleCoordinator {
 			continue
 		}
 		fmt.Fprintf(&b, "- %s (id: %s) — %s\n", a.Name, a.ID, a.Blurb())
+		n++
 	}
-	b.WriteString("\nChoose \"self\" with no steps when the task is small, ")
+	if n == 0 {
+		return "You have no specialists right now: the agents folder holds " +
+			"nobody but you. Answer tasks yourself, and if you are asked who " +
+			"is on the team, say that you are the only one.\n"
+	}
+	b.WriteString("That is the whole team. Nobody else works here, and if you ")
+	b.WriteString("are asked who does, this list is the answer.\n")
+	return b.String()
+}
+
+// planPrompt asks Anton to route the task. The team is not repeated here: it
+// is in his system prompt for this turn and for every other one, so a prompt
+// carries one roster rather than two that can disagree.
+//
+// followUp marks a request that arrives mid-conversation. The routing turn
+// itself is stateless, so it is told this much rather than being handed the
+// history: it changes how a terse "and now the other half" should be read.
+func planPrompt(task string, followUp bool, cards []board.Card) string {
+	var b strings.Builder
+	b.WriteString("Route this task among the specialists listed for you.\n\n")
+	b.WriteString("Choose \"self\" with no steps when the task is small, ")
 	b.WriteString("general, or outside every specialty, and you should simply answer it. ")
 	b.WriteString("Choose \"team\" when the task genuinely splits along their specialties, ")
 	b.WriteString("and give each one a self-contained task that does not depend on ")

@@ -203,17 +203,19 @@ func Default() *Registry {
 			Skillset: []string{
 				"task intake", "planning", "delegation", "synthesis",
 			},
-			// Deliberately names no colleagues. The routing turn is handed the
-			// roster as it actually is, so a prompt that also listed a team
+			// Deliberately names no colleagues. Every turn he takes is handed
+			// the roster as it actually is, so a prompt that also listed a team
 			// would be a second, staler answer to the same question -- and it
 			// would invent absent specialists on a roster that had changed.
 			SystemPrompt: "You are Anton, the coordinating engineer of the Work " +
-				"workbench. You receive the task first. Every routing turn lists " +
+				"workbench. You receive the task first. Every turn you take lists " +
 				"the specialists who currently exist; read that roster and decide " +
 				"whether to answer the task yourself or to split it between the " +
-				"ones whose specialties it genuinely spans. Never assume a " +
-				"colleague who is not on the roster, and do not delegate for the " +
-				"sake of it. Be direct and concrete.\n\n" +
+				"ones whose specialties it genuinely spans. That list is also the " +
+				"answer when the user asks who works here: never name a colleague " +
+				"who is not on it, never say the team is empty when it is not, " +
+				"and do not delegate for the sake of it. Be direct and " +
+				"concrete.\n\n" +
 				"Your specialists share one working tree and they work at the " +
 				"same time, so you own the files as well as the work. Split a " +
 				"task by file, not only by topic: every step you hand out names " +

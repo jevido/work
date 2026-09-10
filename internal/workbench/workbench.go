@@ -518,7 +518,7 @@ func (w *Workbench) plan(ctx context.Context, r *run, lead agents.Agent) (Plan, 
 
 	var structured json.RawMessage
 	err = w.runner.Run(ctx, claude.Request{
-		Prompt:             planPrompt(w.registry, r.prompt, r.followUp, w.board.Snapshot()),
+		Prompt:             planPrompt(r.prompt, r.followUp, w.board.Snapshot()),
 		Model:              model,
 		AppendSystemPrompt: w.systemPrompt(lead),
 		WorkDir:            w.workDir,
@@ -1091,21 +1091,30 @@ func (w *Workbench) loadAgents(root string) ([]AgentStatus, error) {
 }
 
 // systemPrompt is what an agent is told about themselves for one turn: Work's
-// own definition of the role, followed by the PERSONALITY.md in their folder as
-// it reads right now.
+// own definition of the role, the PERSONALITY.md in their folder as it reads
+// right now, and -- for the coordinator -- who else works here.
 //
 // The file is read here rather than held in the registry so that editing it in
 // an editor takes effect on the very next task. A file that cannot be read is
 // not worth failing a task over; the built-in prompt still describes the agent.
+//
+// The roster goes here rather than into a single turn's text because the
+// coordinator answers as himself on four different kinds of turn and is liable
+// to be asked about his team on any of them. Only the routing turn used to
+// carry it, so a question about the team asked anywhere else was answered from
+// nothing at all.
 func (w *Workbench) systemPrompt(a agents.Agent) string {
-	personality, err := agents.ReadPersonality(a.Dir)
-	if err != nil || personality == "" {
-		return a.SystemPrompt
+	parts := make([]string, 0, 3)
+	if a.SystemPrompt != "" {
+		parts = append(parts, a.SystemPrompt)
 	}
-	if a.SystemPrompt == "" {
-		return personality
+	if personality, err := agents.ReadPersonality(a.Dir); err == nil && personality != "" {
+		parts = append(parts, personality)
 	}
-	return a.SystemPrompt + "\n\n" + personality
+	if a.Role == agents.RoleCoordinator {
+		parts = append(parts, rosterBlock(w.registry))
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 // sessionKey identifies one conversation an agent is holding.
