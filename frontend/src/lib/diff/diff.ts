@@ -31,14 +31,19 @@ export function diffLines(before: string, after: string): DiffLine[] {
     ];
   }
 
-  // lcs[i][j] = length of the longest common subsequence of a[i:] and b[j:].
-  const lcs: number[][] = Array.from({ length: a.length + 1 }, () =>
-    new Array<number>(b.length + 1).fill(0),
-  );
+  // lcs[i * w + j] = length of the longest common subsequence of a[i:] and
+  // b[j:]. One flat Int32Array rather than an array of arrays: at the guard
+  // above this table is 2001x2001, and as JS arrays that is two thousand
+  // allocations and about 20MB of heap churn to diff one edit -- on the main
+  // thread, in the event handler, for a tool row that opens collapsed.
+  const w = b.length + 1;
+  const lcs = new Int32Array((a.length + 1) * w);
   for (let i = a.length - 1; i >= 0; i--) {
+    const row = i * w;
+    const next = row + w;
     for (let j = b.length - 1; j >= 0; j--) {
-      lcs[i][j] =
-        a[i] === b[j] ? lcs[i + 1][j + 1] + 1 : Math.max(lcs[i + 1][j], lcs[i][j + 1]);
+      lcs[row + j] =
+        a[i] === b[j] ? lcs[next + j + 1] + 1 : Math.max(lcs[next + j], lcs[row + j + 1]);
     }
   }
 
@@ -50,7 +55,7 @@ export function diffLines(before: string, after: string): DiffLine[] {
       out.push({ kind: "same", text: a[i], oldLine: i + 1, newLine: j + 1 });
       i++;
       j++;
-    } else if (lcs[i + 1][j] >= lcs[i][j + 1]) {
+    } else if (lcs[(i + 1) * w + j] >= lcs[i * w + j + 1]) {
       out.push({ kind: "remove", text: a[i], oldLine: i + 1, newLine: null });
       i++;
     } else {
