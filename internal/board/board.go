@@ -6,7 +6,10 @@
 // and tracks them as they run. Nothing here costs an extra Claude call.
 package board
 
-import "sync"
+import (
+	"strconv"
+	"sync"
+)
 
 // Status is the column a card sits in.
 type Status string
@@ -74,7 +77,7 @@ func (b *Board) Add(runID, agentID, title string) string {
 	defer b.mu.Unlock()
 
 	b.seq++
-	id := "T" + itoa(b.seq)
+	id := "T" + strconv.Itoa(b.seq)
 	b.cards = append(b.cards, Card{
 		ID:      id,
 		RunID:   runID,
@@ -162,19 +165,4 @@ func (b *Board) Clear() {
 	defer b.mu.Unlock()
 	b.cards = nil
 	b.seq = 0
-}
-
-// itoa avoids pulling strconv in for one small job.
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	return string(buf[i:])
 }
