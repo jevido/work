@@ -15,7 +15,7 @@ package update
 import "strings"
 
 // DevVersion is what main.version holds when nothing stamped it, which is
-// every `go build` and every `task build` that is not a release build.
+// every plain `go build`.
 const DevVersion = "dev"
 
 // IsDevBuild reports whether v is a development build rather than a release.
@@ -25,9 +25,20 @@ const DevVersion = "dev"
 // newest release and being told to downgrade to it is noise; and it is never
 // replaced, because the binary sitting in bin/ is somebody's working tree
 // output, not something Work has any business overwriting.
+//
+// `task build` does stamp a version -- there is no reason for a local build to
+// be unable to say what it is -- but it stamps it as build metadata on this
+// same "dev" core, so it reads as `dev+0.3.0-2-g1a2b3c4-dirty`: the git
+// description is there to be shown, and the core is still "dev", so both of
+// the rules above still apply to it. Only `task build:release`, which the
+// release workflow runs, produces a version this returns false for.
 func IsDevBuild(v string) bool {
 	v = strings.TrimSpace(v)
-	return v == "" || v == DevVersion || v == "0.0.0"
+	// Build metadata does not change which version a version is, so a stamp
+	// that only adds metadata to "dev" is still "dev". splitVersion drops it
+	// for exactly the same reason.
+	core, _ := splitVersion(v)
+	return v == "" || core == "" || core == DevVersion || core == "0.0.0"
 }
 
 // Compare orders two release versions the way semver does, without pulling in

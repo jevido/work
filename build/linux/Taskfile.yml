@@ -59,7 +59,30 @@ tasks:
     cmds:
       - '{{if eq .OBFUSCATED "true"}}garble {{.GARBLE_ARGS}} build{{else}}go build{{end}} {{.BUILD_FLAGS}} -o {{.OUTPUT}}'
     vars:
-      BUILD_FLAGS: '{{if eq .DEV "true"}}{{if or .EXTRA_TAGS (eq .OBFUSCATED "true")}}-tags {{if eq .OBFUSCATED "true"}}wails_obfuscated{{if .EXTRA_TAGS}},{{end}}{{end}}{{.EXTRA_TAGS}} {{end}}-buildvcs=false -gcflags=all="-l"{{else}}-tags production{{if eq .OBFUSCATED "true"}},wails_obfuscated{{end}}{{if .EXTRA_TAGS}},{{.EXTRA_TAGS}}{{end}} -trimpath -buildvcs=false -ldflags="-w -s"{{end}}'
+      # What a locally built binary reports as its version.
+      #
+      # It is a git description, so `task build` produces something that can
+      # say which commit it is instead of a bare "dev" -- but it is carried as
+      # build metadata on the "dev" core (`dev+0.3.0-2-g1a2b3c4-dirty`), which
+      # internal/update.IsDevBuild still reads as a development build. That is
+      # deliberate: a local build is normally ahead of the newest release, so
+      # a real version number here would have Work offer to replace your own
+      # binary with an older one. Only `task build:release` in the root
+      # Taskfile stamps a version that opts into the update check.
+      #
+      # Release builds do not come through here at all, so there is nothing to
+      # override: the flag is unconditional.
+      LOCAL_VERSION:
+        sh: |
+          set -eu
+          described=$(git describe --tags --always --dirty --abbrev=7 2>/dev/null || true)
+          if [ -z "$described" ]; then
+            # No git, or a checkout with no commits. Nothing to describe.
+            printf dev
+          else
+            printf 'dev+%s' "${described#v}"
+          fi
+      BUILD_FLAGS: '{{if eq .DEV "true"}}{{if or .EXTRA_TAGS (eq .OBFUSCATED "true")}}-tags {{if eq .OBFUSCATED "true"}}wails_obfuscated{{if .EXTRA_TAGS}},{{end}}{{end}}{{.EXTRA_TAGS}} {{end}}-buildvcs=false -gcflags=all="-l" -ldflags="-X main.version={{.LOCAL_VERSION}}"{{else}}-tags production{{if eq .OBFUSCATED "true"}},wails_obfuscated{{end}}{{if .EXTRA_TAGS}},{{.EXTRA_TAGS}}{{end}} -trimpath -buildvcs=false -ldflags="-w -s -X main.version={{.LOCAL_VERSION}}"{{end}}'
       DEFAULT_OUTPUT: '{{.BIN_DIR}}/{{.APP_NAME}}'
       OUTPUT: '{{ .OUTPUT | default .DEFAULT_OUTPUT }}'
     env:
@@ -69,6 +92,10 @@ tasks:
 
   build:docker:
     summary: Builds for Linux using Docker (for non-Linux hosts or when no C compiler available)
+    # Not version-stamped: the flags are built by the build script inside the
+    # cross image, which this file does not own. A Docker-built binary reports
+    # the unstamped "dev", which IsDevBuild treats the same way as the stamped
+    # local build above -- no update check, no self-replacement.
     internal: true
     deps:
       - task: common:build:frontend

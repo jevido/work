@@ -47,7 +47,13 @@ func TestIsNewer(t *testing.T) {
 }
 
 func TestIsDevBuild(t *testing.T) {
-	for _, v := range []string{"", "dev", "0.0.0", "  "} {
+	// The last three are what `task build` stamps: a git description carried
+	// as build metadata on the "dev" core, so the binary can say which commit
+	// it is without asking to be replaced by a release.
+	for _, v := range []string{
+		"", "dev", "0.0.0", "  ",
+		"dev+0.3.0-2-g1a2b3c4", "dev+0.3.0-2-g1a2b3c4-dirty", "dev+g1a2b3c4",
+	} {
 		if !IsDevBuild(v) {
 			t.Errorf("IsDevBuild(%q) = false, want true", v)
 		}

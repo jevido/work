@@ -11,11 +11,16 @@ info:
   description: "AI development workbench with a visual office of agents" # The application description
   copyright: "(c) 2026, Jeffrey Duivenvoorden" # Copyright text
   comments: "" # Comments
-  # The application version, and the one place it is written down. `task
-  # build:release` stamps this into the binary as main.version with
-  # -ldflags -X, and .github/workflows/release.yml publishes the release under
-  # the matching v-prefixed tag -- so bumping this line is what cuts a release,
-  # and a running Work always reports a version that has a release behind it.
+  # Not the release version, and not read by the release workflow.
+  #
+  # Released versions come from git tags: .github/workflows/release.yml takes
+  # the newest v* tag, increments the patch number and passes that to
+  # `task build:release` as VERSION, which stamps it in as main.version. So the
+  # tag is the version, and there is no line here to remember to bump.
+  #
+  # This value is only the fallback for running `task build:release` by hand
+  # with no VERSION set, plus whatever the packaging templates under build/
+  # read it for. Editing it does not cut a release.
   version: "0.0.1" # The application version
   # cfBundleIconName: "appicon" # The macOS icon name in Assets.car icon bundles (optional)
   #                               # Should match the name of your .icon file without the extension

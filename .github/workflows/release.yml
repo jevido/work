@@ -1,68 +1,126 @@
-# Cuts a release from main.
+# Cuts a release from main, with no version to bump by hand.
 #
-# The version is not computed here: it is info.version in build/config.yml, and
-# a push to main publishes a release only when that number does not have a tag
-# yet. So bumping that one line is what cuts a release, and every other push to
-# main -- which is most of them -- does the version job and stops. The
-# alternative, auto-incrementing a patch number per push, would mean a release
-# per commit and a self-update prompt for every typo fix.
+# The version is derived rather than written down: the newest `v*` tag decides
+# it, the patch number goes up by one, and that number is the tag, the
+# -X main.version stamp in the binary and what internal/update compares
+# against. So a running Work cannot report a version with no release behind it,
+# and nobody has to remember to edit a line before pushing.
 #
-# The same number is the tag, the -X main.version stamp in the binary and what
-# internal/update compares against, so a running Work cannot report a version
-# that has no release behind it.
+# Every push to main that can change the binary therefore publishes a release,
+# and every running Work asks about it once and then nags until it is taken.
+# Two things keep that from being unbearable:
+#
+#   * paths-ignore below, so a README or a note-to-self does not ship a build.
+#   * `[skip release]` anywhere in the head commit's message, for the pushes
+#     the path filter cannot know about.
+#
+# To jump a minor or major number, tag it by hand and push the tag -- the next
+# push continues from there, because the newest tag is the only input.
 name: release
 
 on:
   push:
     branches: [main]
+    # Changes that cannot end up inside the binary. Frontend sources, Go
+    # sources, the build files and the workflow itself are all absent from
+    # this list on purpose: each of them changes what ships.
+    paths-ignore:
+      - "**/*.md"
+      - "LICENSE"
+      - ".gitignore"
+      - ".editorconfig"
+      - ".claude/**"
+      - "docs/**"
+      - ".github/ISSUE_TEMPLATE/**"
 
 # Only what publishing needs: the tag, the release and its assets.
 permissions:
   contents: write
 
-# Two pushes landing together must not both try to tag. Queued rather than
-# cancelled, because the second one's version job is what decides there is
-# nothing left to do.
+# Two pushes landing together must not both compute the same next patch number.
+# Queued rather than cancelled: the second run re-reads the tags after the first
+# has pushed its own, so it works out the number after it rather than the same
+# one. Cancelling instead would drop a commit out of every release.
 concurrency:
   group: release
   cancel-in-progress: false
 
 jobs:
   version:
-    name: read version
+    name: work out the version
     runs-on: ubuntu-24.04
     outputs:
-      version: ${{ steps.read.outputs.version }}
-      tag: ${{ steps.read.outputs.tag }}
-      publish: ${{ steps.read.outputs.publish }}
+      version: ${{ steps.next.outputs.version }}
+      tag: ${{ steps.next.outputs.tag }}
+      publish: ${{ steps.next.outputs.publish }}
     steps:
       - uses: actions/checkout@v4
         with:
-          # Tags are what "has this version already been released?" is answered
-          # against, and a shallow clone has none of them.
+          # The tags are the input to the whole thing, and a shallow clone has
+          # none of them.
           fetch-depth: 0
 
-      - id: read
-        name: Decide whether this version needs a release
+      - id: next
+        name: Increment the newest tag
+        env:
+          # The first release, when there is no tag to count from.
+          SEED_VERSION: "0.1.0"
+          HEAD_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           set -euo pipefail
-          version=$(yq -r '.info.version' build/config.yml)
-          if [ -z "$version" ] || [ "$version" = "null" ]; then
-            echo "::error file=build/config.yml::info.version is missing"
+
+          # An opt-out for pushes the path filter cannot classify: a comment
+          # rewrite, a test-only change, anything not worth interrupting people
+          # over. The token is read from the head commit only.
+          if printf '%s' "$HEAD_MESSAGE" | grep -qiF '[skip release]'; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "Head commit says \`[skip release]\`; nothing published." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Already released. Happens on a re-run of a finished run, and on a
+          # hand-pushed tag that lands on main's tip. Publishing again would
+          # mean a second release of one commit under two version numbers.
+          if existing=$(git tag --points-at HEAD --list 'v[0-9]*' | head -n 1) && [ -n "$existing" ]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "HEAD is already released as $existing." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Newest by version order, not by date: a tag pushed late for an old
+          # version must not decide what comes next.
+          latest=$(git tag --list 'v[0-9]*' --sort=-v:refname | head -n 1 || true)
+
+          if [ -z "$latest" ]; then
+            version="$SEED_VERSION"
+            echo "No v* tag yet; seeding at $version." >> "$GITHUB_STEP_SUMMARY"
+          else
+            core=${latest#v}
+            # Drop any prerelease or build suffix: the next release is a plain
+            # patch bump of the core version, not a continuation of an rc.
+            core=${core%%-*}
+            core=${core%%+*}
+            IFS='.' read -r major minor patch <<<"$core"
+            : "${major:=0}" "${minor:=0}" "${patch:=0}"
+            case "$major$minor$patch" in
+              ''|*[!0-9]*)
+                echo "::error::newest tag $latest is not vMAJOR.MINOR.PATCH; cannot work out the next version"
+                exit 1
+                ;;
+            esac
+            version="$major.$minor.$((patch + 1))"
+            echo "Newest tag is $latest; releasing $version." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          tag="v$version"
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "::error::$tag exists already; refusing to publish over it"
             exit 1
           fi
-          tag="v$version"
 
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-
-          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-            echo "$tag is already released; bump info.version in build/config.yml to cut a new one." >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-            echo "Releasing $tag." >> "$GITHUB_STEP_SUMMARY"
-          fi
+          echo "publish=true" >> "$GITHUB_OUTPUT"
 
   build:
     name: build ${{ matrix.goarch }}
@@ -124,8 +182,9 @@ jobs:
         run: wails3 task build:release OUTPUT=bin/work-linux-${{ matrix.goarch }}
 
       - name: Check the version went in
-        # A silently unstamped binary would ship as "dev" and never check for
-        # an update again, which is exactly the failure nobody notices.
+        # A silently unstamped binary would ship as a development build and
+        # never check for an update again, which is exactly the failure nobody
+        # notices.
         run: |
           set -euo pipefail
           bin=bin/work-linux-${{ matrix.goarch }}
@@ -171,6 +230,9 @@ jobs:
       - name: Tag ${{ needs.version.outputs.tag }}
         env:
           TAG: ${{ needs.version.outputs.tag }}
+        # No --force anywhere: if something else claimed this tag between the
+        # version job and here, the push is rejected and the run fails rather
+        # than moving a tag people may already have downloaded.
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"

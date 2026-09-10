@@ -83,17 +83,21 @@ tasks:
       one exists.
 
       The version comes from VERSION in the environment if it is set, and from
-      info.version in build/config.yml otherwise -- which is where it should be
-      set, so that the number in the binary, the tag in GitHub and the number
-      the app reports are all the same one.
+      info.version in build/config.yml otherwise. The release workflow always
+      sets VERSION: it derives it by incrementing the newest v* tag, so the
+      number in the binary, the tag in GitHub and the number the app reports
+      are all the same one and none of them is maintained by hand. The
+      config.yml value is only the fallback for building a release binary
+      locally.
 
       Usage: task build:release [VERSION=0.2.0] [OUTPUT=bin/work]
 
-      This does not go through {{.GOOS}}:build the way `task build` does. That
-      path builds its own -ldflags in build/<platform>/Taskfile.yml with no way
-      in for a -X, so stamping there would mean editing every platform's build
-      task; here it is one flag in one place, and the flags otherwise match
-      build:native's production build exactly.
+      This does not go through {{.GOOS}}:build the way `task build` does,
+      because the two want different versions: that path stamps a git
+      description on a "dev" core, which internal/update reads as a
+      development build and never offers to replace, and this one stamps the
+      real release number that opts into the update check. The flags otherwise
+      match build:native's production build exactly.
     deps:
       - task: goroot:check
       - task: common:build:frontend
