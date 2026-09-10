@@ -12,8 +12,66 @@ includes:
   linux: ./build/linux/Taskfile.yml
 
 tasks:
+  goroot:check:
+    internal: true
+    summary: Refuses to build with a GOROOT belonging to a different Go install
+    # The go command resolves its compiler as
+    # $GOROOT/pkg/tool/<goos>_<goarch>/compile and passes its own version to it
+    # as -goversion. An inherited GOROOT from a *different* install therefore
+    # pairs one Go's driver with another Go's compiler, and every package in the
+    # standard library fails with
+    #
+    #     compile: version "go1.27.1" does not match go tool version "go1.25.5"
+    #
+    # which names neither the variable nor the two installs it is talking about.
+    # It is not a go.mod or toolchain problem: the same go.mod builds cleanly the
+    # moment the two agree, and it reproduces in both directions.
+    #
+    # Checked rather than corrected because task cannot correct it -- an
+    # inherited environment variable wins over both `env:` blocks, so the only
+    # thing this file can do about it is refuse to run and say why. Correcting it
+    # here would also be the wrong place: a GOROOT this broken breaks `go build`,
+    # `go test` and gopls outside task just as thoroughly, so it wants fixing
+    # where it is set, not hiding per repository.
+    #
+    # Nothing to do in the normal case: no modern Go needs GOROOT set at all.
+    preconditions:
+      # Entirely inside the precondition, and entirely lazy. An earlier version
+      # of this computed the comparison in a top-level `vars` entry, which task
+      # evaluates on every invocation of every task -- so a machine with no go
+      # on PATH could not run `task verify:office`, or even `task --list`,
+      # without the whole file failing on `go env`. A check nothing else depends
+      # on has no business being in the critical path of tasks that never touch
+      # Go.
+      - sh: |
+          # No GOROOT is the healthy case, and the common one.
+          test -z "$GOROOT" && exit 0
+          # No go at all is somebody else's error to report, and a much clearer
+          # one: the go command says so itself.
+          command -v go >/dev/null 2>&1 || exit 0
+          test "$GOROOT" = "$(unset GOROOT; go env GOROOT)"
+        msg: |
+          GOROOT points at a different Go install than the go on PATH:
+
+            GOROOT              {{.GOROOT}}
+            go env GOROOT (own) run `unset GOROOT; go env GOROOT` to see it
+
+          Building with both fails on every package in the standard library
+          with "compile: version ... does not match go tool version ...",
+          because the go command loads its compiler from
+          $GOROOT/pkg/tool/<goos>_<goarch>/compile and then hands it its own
+          version. Unset it -- no modern Go needs it set:
+
+            unset GOROOT
+
+          If a version manager exports it (mise sets GOROOT to the install it
+          currently resolves, which goes stale in a shell that captured the
+          previous one), open a fresh shell or stop it exporting the variable.
+
   build:
     summary: Builds the application
+    deps:
+      - task: goroot:check
     cmds:
       - task: "{{.GOOS}}:build"
 
@@ -29,12 +87,15 @@ tasks:
 
   dev:
     summary: Runs the application in development mode
+    deps:
+      - task: goroot:check
     cmds:
       - wails3 dev -config ./build/config.yml -port {{.VITE_PORT}}
 
   check:
     summary: Typechecks the frontend and vets the Go code
     deps:
+      - task: goroot:check
       - task: common:generate:bindings
       - task: common:install:frontend:deps
     cmds:
@@ -43,6 +104,8 @@ tasks:
 
   test:
     summary: Runs the Go test suite
+    deps:
+      - task: goroot:check
     cmds:
       - go test ./...
 
@@ -61,3 +124,4 @@ tasks:
       - npx tsc .verify/sequences.ts --outDir {{.OUT}} --module commonjs --target es2022 --moduleResolution node --skipLibCheck
       - printf '{"type":"commonjs"}' > {{.OUT}}/package.json
       - node {{.OUT}}/.verify/sequences.js
+
