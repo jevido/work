@@ -155,13 +155,16 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install GTK and WebKit
-        # The libraries pkg-config resolves for the Linux backend; see
-        # pkg/application/linux_cgo_gtk3.go in Wails.
+        # gtk4 and webkitgtk-6.0, not gtk3/webkit2gtk-4.1: the Wails Linux
+        # backend selects between them on a `gtk3` build tag, and nothing here
+        # sets it, so both the app and the wails3 CLI build against the gtk4
+        # pair. See pkg/application/linux_cgo.go in Wails, whose #cgo
+        # pkg-config line is what has to resolve.
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev
+            build-essential pkg-config libgtk-4-dev libwebkitgtk-6.0-dev
 
       - uses: actions/setup-go@v5
         with:
