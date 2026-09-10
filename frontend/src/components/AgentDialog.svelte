@@ -155,6 +155,8 @@
     el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
   }
 
+  // The only caller: `oninput` did this too, which measured and resized the
+  // box twice per keystroke, each one a forced layout. See the console's.
   $effect(() => {
     void prompt;
     fitComposer();
@@ -240,7 +242,6 @@
         bind:this={promptEl}
         bind:value={prompt}
         onkeydown={onKeydown}
-        oninput={fitComposer}
         placeholder="Ask {name} directly…"
         rows="1"
         spellcheck="false"

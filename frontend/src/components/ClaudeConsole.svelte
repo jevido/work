@@ -118,6 +118,11 @@
   }
 
   // Re-fit whenever the text changes, including when submit() empties it.
+  //
+  // This is the only thing that calls it. `oninput` used to as well, which
+  // meant every keystroke measured and resized the box twice -- and each of
+  // those is a forced layout, since fitComposer sets a height and then reads
+  // scrollHeight back. `bind:value` already puts a keystroke through here.
   $effect(() => {
     void prompt;
     fitComposer();
@@ -255,7 +260,6 @@
       bind:this={promptEl}
       bind:value={prompt}
       onkeydown={onKeydown}
-      oninput={fitComposer}
       placeholder={session.busy
         ? "Ask Anton about the work in progress…   (Shift+Enter for a new line)"
         : "Give Anton work…   (Shift+Enter for a new line)"}
