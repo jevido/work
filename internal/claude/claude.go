@@ -213,8 +213,10 @@ type envelope struct {
 	SessionID string `json:"session_id"`
 	Model     string `json:"model"`
 
-	// stream_event
-	Event json.RawMessage `json:"event"`
+	// stream_event. Decoded inline rather than kept raw: this is the only
+	// line the CLI sends per token, so a second Unmarshal of the same bytes
+	// here is the difference between one parse per token and two.
+	Event streamEvent `json:"event"`
 
 	// assistant
 	Message json.RawMessage `json:"message"`
@@ -291,21 +293,17 @@ func scanStream(rd io.Reader, emit func(Event)) error {
 			}
 
 		case "stream_event":
-			var se streamEvent
-			if len(env.Event) == 0 || json.Unmarshal(env.Event, &se) != nil {
+			if env.Event.Type != "content_block_delta" {
 				continue
 			}
-			switch se.Type {
-			case "content_block_delta":
-				switch se.Delta.Type {
-				case "text_delta":
-					if se.Delta.Text != "" {
-						emit(Event{Kind: KindText, Text: se.Delta.Text})
-					}
-				case "thinking_delta":
-					if se.Delta.Thinking != "" {
-						emit(Event{Kind: KindThinking, Text: se.Delta.Thinking})
-					}
+			switch env.Event.Delta.Type {
+			case "text_delta":
+				if env.Event.Delta.Text != "" {
+					emit(Event{Kind: KindText, Text: env.Event.Delta.Text})
+				}
+			case "thinking_delta":
+				if env.Event.Delta.Thinking != "" {
+					emit(Event{Kind: KindThinking, Text: env.Event.Delta.Thinking})
 				}
 			}
 
