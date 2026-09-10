@@ -405,8 +405,10 @@ export class OfficeAgent {
    * and say nothing: the line belongs to the moment the folder changes hands.
    *
    * Nothing here is load-bearing. If the backend says they are producing
-   * output before the folder arrives, `work` runs as it always did and seats
-   * them; the delivery then catches up with them at their desk.
+   * output before the folder arrives, the director hurries the exchange along
+   * and calls `work` the moment it lands (see handoff.ts), so the wait costs a
+   * beat and the order stays the one an office actually has: given the work,
+   * then doing it.
    */
   awaitHandoff(): void {
     this.release();

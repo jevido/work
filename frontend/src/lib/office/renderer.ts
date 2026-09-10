@@ -653,21 +653,32 @@ export class OfficeRenderer {
           // turns, an office with no coordinator, movement turned off -- falls
           // through to the walk this always was.
           if (this.handoff.claim(agent, cmd.phase)) break;
+          // Anton's own turn, while folders are still coming back to him. He
+          // stays in his chair until they land: the alternative is a
+          // coordinator writing up reports he has visibly not been handed.
+          if (this.handoff.defer(agent, "assign")) break;
           agent.assign();
           // Anton has just handed them the task. They answer before they sit
           // down -- the line is canned, so this costs nothing but a bubble.
           this.speak(agent, dispatchLine());
           break;
         case "working":
+          // Held back while the work is still crossing the room, and paid out
+          // the moment it changes hands. Nobody starts on a brief they have
+          // not been given.
+          if (this.handoff.defer(agent, "work")) break;
           agent.work();
           break;
         case "finished":
+          this.handoff.cancelDeferred(agent);
           agent.finish();
           break;
         case "error":
+          this.handoff.cancelDeferred(agent);
           agent.fail();
           break;
         case "idle":
+          this.handoff.cancelDeferred(agent);
           agent.idle();
           break;
       }

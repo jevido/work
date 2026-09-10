@@ -25,10 +25,12 @@ import { isWalkable, prefersReducedMotion, type Rect } from "./world";
  *
  * Nothing here is load-bearing, and that is the whole design. A handoff is a
  * plan; the agents' task states are the truth, and every phase below yields
- * the moment the two disagree -- if the backend says an agent is producing
- * output before the folder has reached them, they get up and start working and
- * the delivery follows them to their desk. The office never holds a monitor
- * dark waiting for a walk to finish.
+ * the moment the two disagree. What it yields is the timing and never the
+ * outcome: a monitor whose backend said "working" before the folder arrived is
+ * held for the beat it takes to hand it over -- and the exchange is hurried up
+ * to meet it, or phoned through if it cannot be -- but it is always paid out,
+ * by `flush` on the way out and by DEFER_LIMIT on the way back. Held for a
+ * moment, never held hostage.
  *
  * Nothing here costs a token and nothing here reaches the backend. It runs off
  * `agent:assigned` and `agent:finished`, which the office already receives, and
@@ -92,6 +94,18 @@ export const TRAY_MAX = 4;
 /** Retry gap after a walk that could not be planned. */
 const ROUTE_RETRY = 0.5;
 
+/**
+ * Longest a turn is held back waiting for the paperwork it belongs to.
+ *
+ * Only the return leg needs it. A folder on its way out is hurried along the
+ * moment the work it carries starts -- it is handed over if Anton is already
+ * there and phoned through if he is not, so that wait is a beat either way.
+ * Coming back there is nothing to hurry: the agent is already walking as fast
+ * as they walk, and this is the point at which their trip stops being a reason
+ * for Anton's monitor to stay dark.
+ */
+const DEFER_LIMIT = 8;
+
 const PHASE_QUEUE = 0;
 const PHASE_DELIVER = 1;
 const PHASE_GIVE = 2;
@@ -112,6 +126,12 @@ class Handoff {
   phase = PHASE_QUEUE;
   /** Seconds left in the phase: patience, a travel watchdog, or an exchange. */
   timer = 0;
+  /**
+   * The monitor this folder owes: true once the backend has said the agent is
+   * producing output and the office has held that back until they have the
+   * work in their hands. Paid out by `flush`, whichever way the bit ends.
+   */
+  workDue = false;
 
   get live(): boolean {
     return this.receiver !== null;
@@ -131,6 +151,7 @@ class Handoff {
     this.receiver = null;
     this.phase = PHASE_QUEUE;
     this.timer = 0;
+    this.workDue = false;
   }
 }
 
@@ -168,6 +189,19 @@ export class HandoffDirector {
   /** Seconds before another attempt at a walk that could not be planned. */
   private retry = 0;
 
+  /**
+   * A turn of Anton's own, held back until the folders owed to him are in.
+   *
+   * "assign" is a turn that has started, "work" one that is already producing
+   * output; "work" outranks "assign" because it is the later of the two and
+   * replaying it does the walk as well. He spends the wait where he already
+   * is -- in his chair, facing the board -- which is the whole reason this is
+   * worth holding: a coordinator reading reports he has not been handed yet
+   * is the one thing in the room that would look wrong.
+   */
+  private bossPending: "none" | "assign" | "work" = "none";
+  private bossDefer = 0;
+
   /** Puts a line in an agent's bubble. Supplied by the renderer; see Speaker. */
   private readonly say: Speaker;
 
@@ -198,6 +232,8 @@ export class HandoffDirector {
     this.slide = 0;
     this.sliding = false;
     this.retry = 0;
+    this.bossPending = "none";
+    this.bossDefer = 0;
 
     const boss = this.boss;
     if (!boss) return;
@@ -236,6 +272,106 @@ export class HandoffDirector {
     return true;
   }
 
+  /**
+   * Holds a turn back until the paperwork it belongs to has changed hands.
+   *
+   * The backend's word is still the truth; this only decides which frame the
+   * office acts on it. Nobody reads a brief before they are handed it, so a
+   * monitor that lights while the folder is still crossing the room is the
+   * one thing here that reads as a bug rather than as decoration -- and the
+   * same in reverse, with Anton writing up reports still under somebody
+   * else's arm.
+   *
+   * The wait is kept short rather than merely bounded. On the way out the
+   * exchange is hurried instead of queued: if Anton is standing there the
+   * folder changes hands this frame, and if he is not he rings, so the hold
+   * is under two seconds. On the way back there is nothing to hurry, so
+   * DEFER_LIMIT is what stops the trip from holding his monitor.
+   *
+   * False means nothing is owed and the caller acts on the state now, exactly
+   * as it did before any of this existed.
+   */
+  defer(agent: OfficeAgent, kind: "assign" | "work"): boolean {
+    if (prefersReducedMotion()) return false;
+    const boss = this.boss;
+    if (!boss) return false;
+    if (agent === boss) return this.deferBoss(kind);
+    // Only a monitor is worth holding on the way out: `claim` has already
+    // taken the walk, so an agent standing by has nothing left to hold.
+    if (kind !== "work") return false;
+
+    const bit = this.bits.find((b) => b.live && b.receiver === agent);
+    if (!bit) return false;
+
+    switch (bit.phase) {
+      case PHASE_QUEUE:
+        // He has not set off, and their output has already started. A call
+        // reaches them now; the walk he is queued for would not.
+        this.ring(bit);
+        break;
+      case PHASE_DELIVER:
+        // In reach, so it changes hands this frame. Otherwise the rest of the
+        // walk is longer than the monitor should wait, and he rings instead.
+        if (this.near(boss, agent)) this.give(bit);
+        else this.ring(bit);
+        break;
+      case PHASE_GIVE:
+      case PHASE_PHONE:
+        // Landing either way, within the second. Let it.
+        break;
+      default:
+        // Already in their hands. This is not what they are waiting for.
+        return false;
+    }
+    bit.workDue = true;
+    return true;
+  }
+
+  /**
+   * Drops anything held back for an agent, because the turn it was held for
+   * is over. Without this a task that finished while its folder was still in
+   * the air would light a monitor for work nobody is doing any more.
+   */
+  cancelDeferred(agent: OfficeAgent): void {
+    if (agent === this.boss) {
+      this.bossPending = "none";
+      return;
+    }
+    for (const bit of this.bits) if (bit.receiver === agent) bit.workDue = false;
+  }
+
+  /** Anton's side of `defer`: his turn waits on the folders owed to him. */
+  private deferBoss(kind: "assign" | "work"): boolean {
+    if (!this.returning()) {
+      // Nothing on its way in. Anything held earlier goes with this turn
+      // rather than being replayed on top of it.
+      this.bossPending = "none";
+      return false;
+    }
+    if (this.bossPending === "none") this.bossDefer = DEFER_LIMIT;
+    if (kind === "work" || this.bossPending === "none") this.bossPending = kind;
+    return true;
+  }
+
+  /** True while somebody is on their way to him with a folder. */
+  private returning(): boolean {
+    for (const bit of this.bits) {
+      if (!bit.live) continue;
+      if (bit.phase === PHASE_RETURN || bit.phase === PHASE_GIVE_BACK) return true;
+    }
+    return false;
+  }
+
+  /** Pays out a held turn of Anton's, once the folders are in or time is up. */
+  private releaseBoss(): void {
+    const pending = this.bossPending;
+    if (pending === "none") return;
+    this.bossPending = "none";
+    const boss = this.boss!;
+    if (pending === "work") boss.work();
+    else boss.assign();
+  }
+
   update(dt: number): void {
     const boss = this.boss;
     if (!boss) return;
@@ -246,6 +382,7 @@ export class HandoffDirector {
     // their desk by the plain path instead.
     if (prefersReducedMotion()) {
       for (const bit of this.bits) if (bit.live) this.close(bit);
+      this.releaseBoss();
       this.tray = 0;
       this.slide = 0;
       this.sliding = false;
@@ -257,6 +394,14 @@ export class HandoffDirector {
     if (this.retry > 0) this.retry -= dt;
     for (const bit of this.bits) if (bit.live) this.advance(bit, dt);
     this.dispatch();
+
+    // Before `seat`, so the frame the last folder lands is the frame he gets
+    // up: waiting is decided from what he has on, and he now has a turn on.
+    if (this.bossPending !== "none") {
+      this.bossDefer -= dt;
+      if (!this.returning() || this.bossDefer <= 0) this.releaseBoss();
+    }
+
     this.seat(dt);
 
     // He reads them. Clearing on the frame his turn starts rather than while
@@ -442,6 +587,10 @@ export class HandoffDirector {
     // Anyone already walking or working is left alone: they did not wait, and
     // restarting them would throw away a monitor that is already filling.
     if (to.errand !== "none" || to.state === "idle") to.assign();
+    // The folder is theirs now, so a monitor held back for it is owed. This is
+    // the ordinary end of a delivery that overtook its own paperwork: they
+    // read it where they stand and walk to their desk to start.
+    this.flush(bit);
     boss.dismiss();
 
     bit.phase = PHASE_WORK;
@@ -486,8 +635,19 @@ export class HandoffDirector {
     if (to) {
       if (to.holding === "files" || to.holding === "phone") to.putDown();
       to.dismiss();
+      // However the sequence ended, a monitor it was holding is released here.
+      // A folder that never arrives is a reason to stop drawing the walk, not
+      // a reason to leave a working agent sitting in the dark.
+      this.flush(bit);
     }
     bit.reset();
+  }
+
+  /** Lights a monitor this bit was holding back. Does nothing if it owes none. */
+  private flush(bit: Handoff): void {
+    if (!bit.workDue) return;
+    bit.workDue = false;
+    bit.receiver?.work();
   }
 
   /**
