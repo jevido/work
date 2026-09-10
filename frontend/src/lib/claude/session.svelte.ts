@@ -1,4 +1,5 @@
 import { Events } from "@wailsio/runtime";
+import { untrack } from "svelte";
 import * as Workbench from "../../../bindings/dev.jevido/work/services/workbenchservice.js";
 import { describeTool, type ToolCall } from "../diff/tools";
 import {
@@ -177,6 +178,21 @@ export class ClaudeSession {
   /** Agent identities, for labelling turns and plan steps. */
   private roster = new Map<string, AgentIdentity>();
 
+  /**
+   * The turns, by the task ID they were opened under.
+   *
+   * Every streamed token has to find the turn it belongs to, and a stream is
+   * the one thing here that arrives thousands of times. Searching `entries`
+   * for it made that search longer with every turn already on screen, so a
+   * long conversation streamed slower than a fresh one for no reason anybody
+   * could see. Written only where a turn is created or the console is
+   * cleared, which is the whole of its life.
+   */
+  private turns = new Map<string, AgentEntry>();
+
+  /** Tool calls by the tool-use ID the backend gave them, for the same reason. */
+  private tools = new Map<string, ToolPart>();
+
   /** Text waiting to be flushed, by entry ID. */
   private pending = new Map<string, string>();
   private flushHandle = 0;
@@ -188,16 +204,23 @@ export class ClaudeSession {
     // An agent renamed from their desk is still the same agent, so the turns
     // they have already taken are relabelled too. Leaving them alone would
     // read as two people having answered one question.
-    for (const entry of this.entries) {
-      if (entry.kind === "agent") {
-        entry.agentName = this.identify(entry.agentId).name;
-      } else if (entry.kind === "plan") {
-        entry.agentName = this.identify(entry.agentId).name;
-        for (const step of entry.steps) {
-          step.agentName = this.identify(step.agentId).name;
+    //
+    // Untracked because this is called from an effect that watches the roster.
+    // Reading the transcript here made that effect watch the transcript too,
+    // so every turn the run added re-ran the whole relabelling walk -- work
+    // proportional to the conversation, done on a roster that had not changed.
+    untrack(() => {
+      for (const entry of this.entries) {
+        if (entry.kind === "agent") {
+          entry.agentName = this.identify(entry.agentId).name;
+        } else if (entry.kind === "plan") {
+          entry.agentName = this.identify(entry.agentId).name;
+          for (const step of entry.steps) {
+            step.agentName = this.identify(step.agentId).name;
+          }
         }
       }
-    }
+    });
   }
 
   /** An agent's display name, falling back to their ID if they are unknown. */
@@ -284,17 +307,29 @@ export class ClaudeSession {
         // Flush prose first, so the tool row lands after the sentence that
         // introduced it rather than before it.
         this.flush();
-        turn.parts.push({
+        const toolId = e.data.toolId ?? "";
+        const part: ToolPart = {
           kind: "tool",
-          id: `${turn.id}:${e.data.toolId || this.mintId("tool")}`,
-          call: describeTool(e.data.toolId ?? "", name, e.data.toolInput ?? ""),
-        });
+          id: `${turn.id}:${toolId || this.mintId("tool")}`,
+          call: describeTool(toolId, name, e.data.toolInput ?? ""),
+        };
+        turn.parts.push(part);
+        // Indexed by the backend's ID rather than searched for later: the
+        // result comes back by that ID, and every other part on screen is
+        // beside the point when it does.
+        //
+        // Read back out of `parts` rather than indexed as it was written:
+        // `entries` is deep state, so what went in is the plain object and
+        // what comes out is the proxy. Only writes through the proxy are
+        // noticed, and a result written to the plain object would be a row
+        // that stayed on "running" with the answer already in it.
+        if (toolId) this.tools.set(toolId, turn.parts[turn.parts.length - 1] as ToolPart);
       }),
 
       Events.On(CLAUDE_TOOL_RESULT, (e) => {
         const toolId = e.data.toolId ?? "";
         if (!toolId) return;
-        const part = this.findToolPart(toolId);
+        const part = this.tools.get(toolId);
         if (!part) return;
         part.call.result = e.data.toolResult ?? "";
         part.call.failed = e.data.toolFailed ?? false;
@@ -456,6 +491,10 @@ export class ClaudeSession {
     this.cancelFlush();
     this.pending.clear();
     this.entries = [];
+    // The indexes point into the transcript that just went, so they go with
+    // it. A stale turn left in here would take a new run's events.
+    this.turns.clear();
+    this.tools.clear();
     this.status = "idle";
     this.runId = null;
     this.runCostUsd = 0;
@@ -495,9 +534,7 @@ export class ClaudeSession {
     const taskId = data.taskId ?? "";
     if (!taskId || data.phase === "plan") return null;
 
-    const existing = this.entries.find(
-      (e): e is AgentEntry => e.kind === "agent" && e.id === taskId,
-    );
+    const existing = this.turns.get(taskId);
     if (existing) return existing;
 
     const who = this.identify(data.agentId ?? "");
@@ -516,7 +553,11 @@ export class ClaudeSession {
       durationMs: 0,
     };
     this.entries.push(turn);
-    return turn;
+    // The proxy, not the object that was pushed -- see the tool index above.
+    // Everything after this point writes to the turn expecting it to show.
+    const tracked = this.entries[this.entries.length - 1] as AgentEntry;
+    this.turns.set(taskId, tracked);
+    return tracked;
   }
 
   private appendText(
@@ -542,9 +583,7 @@ export class ClaudeSession {
   private flush(): void {
     if (this.pending.size === 0) return;
     for (const [id, text] of this.pending) {
-      const turn = this.entries.find(
-        (e): e is AgentEntry => e.kind === "agent" && e.id === id,
-      );
+      const turn = this.turns.get(id);
       if (!turn) continue;
 
       // Append to the trailing run of prose, or start a new one if the last
@@ -557,17 +596,6 @@ export class ClaudeSession {
       }
     }
     this.pending.clear();
-  }
-
-  /** Finds a tool part by the tool-use ID the backend gave it. */
-  private findToolPart(toolId: string): ToolPart | null {
-    for (const entry of this.entries) {
-      if (entry.kind !== "agent") continue;
-      for (const part of entry.parts) {
-        if (part.kind === "tool" && part.call.id === toolId) return part;
-      }
-    }
-    return null;
   }
 
   /**
