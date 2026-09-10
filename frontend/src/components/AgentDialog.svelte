@@ -4,6 +4,7 @@
   import type { AgentEntry, ClaudeSession, UserEntry } from "../lib/claude/session.svelte";
   import type { Config } from "../lib/config/config.svelte";
   import { PanelDrag, dragHandle } from "../lib/ui/drag.svelte";
+  import { followTail } from "../lib/ui/follow";
   import AgentProfile from "./AgentProfile.svelte";
   import AgentTurn from "./AgentTurn.svelte";
 
@@ -96,19 +97,11 @@
   });
 
   // Follow the stream, but stop fighting the user once they scroll up.
+  // Shared with the console; see followTail.
   $effect(() => {
-    // Touch what grows so this reruns as the turn extends.
-    for (const entry of thread) {
-      if (entry.kind !== "agent") continue;
-      void entry.parts.length;
-      for (const part of entry.parts) {
-        if (part.kind === "text") void part.text.length;
-        else void part.call.done;
-      }
-    }
     const el = scroller;
-    if (!el || !pinned) return;
-    el.scrollTop = el.scrollHeight;
+    if (!el) return;
+    return followTail(el, () => pinned);
   });
 
   function onScroll() {

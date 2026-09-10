@@ -2,6 +2,7 @@
   import type { Snippet } from "svelte";
   import type { ClaudeSession, RunStatus } from "../lib/claude/session.svelte";
   import type { ChangeReview as ChangeReviewState } from "../lib/changes/changes.svelte";
+  import { followTail } from "../lib/ui/follow";
   import AgentTurn from "./AgentTurn.svelte";
   import ChangeReview from "./ChangeReview.svelte";
 
@@ -129,20 +130,12 @@
   }
 
   // Follow the stream, but stop fighting the user once they scroll up.
+  // See followTail: this used to be an effect that read the whole transcript
+  // on every frame of a stream to notice that one part of it had grown.
   $effect(() => {
-    // Touch what grows so this reruns as the conversation extends.
-    void session.entries.length;
-    for (const entry of session.entries) {
-      if (entry.kind !== "agent") continue;
-      void entry.parts.length;
-      for (const part of entry.parts) {
-        if (part.kind === "text") void part.text.length;
-        else void part.call.done;
-      }
-    }
     const el = scroller;
-    if (!el || !pinned) return;
-    el.scrollTop = el.scrollHeight;
+    if (!el) return;
+    return followTail(el, () => pinned);
   });
 </script>
 

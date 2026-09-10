@@ -27,7 +27,13 @@
   </button>
 
   {#if open}
-    <div class="body">
+    <!-- `data-expand` marks this as something the reader opened rather than
+         something the run produced. The transcript follows a stream to the
+         bottom as it arrives; it must not do that when a row is expanded, or
+         opening a long result scrolls the top of it -- the part you opened it
+         for -- straight back out of view. See lib/ui/follow.ts, which is the
+         only thing that reads this. -->
+    <div class="body" data-expand>
       {#if call.diff}
         <DiffView lines={call.diff} path={call.path} />
       {:else}
