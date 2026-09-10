@@ -65,6 +65,12 @@ const (
 	EventBoardUpdated = "board:updated"
 )
 
+// Not every event the frontend listens for is declared here: update:available
+// belongs to internal/update, next to the code that decides when to send it,
+// as any later package's events should. This package is where the run's own
+// events live, not a registry of all of them. The list the frontend needs is
+// in frontend/src/lib/bridge/events.ts.
+
 // Phase says which part of a run a task belongs to. The console groups output
 // by phase so a delegated run reads as a sequence rather than an interleaved
 // mess.

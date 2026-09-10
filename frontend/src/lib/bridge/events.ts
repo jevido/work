@@ -29,3 +29,10 @@ export const CHAT_STARTED = "chat:started";
 export const CHAT_FINISHED = "chat:finished";
 
 export const BOARD_UPDATED = "board:updated";
+
+/**
+ * A newer release exists. Emitted by the update check at startup, not in
+ * answer to anything the user did, so whatever shows it has to be interruptible
+ * rather than modal.
+ */
+export const UPDATE_AVAILABLE = "update:available";

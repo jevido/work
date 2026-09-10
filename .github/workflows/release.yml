@@ -1,0 +1,193 @@
+# Cuts a release from main.
+#
+# The version is not computed here: it is info.version in build/config.yml, and
+# a push to main publishes a release only when that number does not have a tag
+# yet. So bumping that one line is what cuts a release, and every other push to
+# main -- which is most of them -- does the version job and stops. The
+# alternative, auto-incrementing a patch number per push, would mean a release
+# per commit and a self-update prompt for every typo fix.
+#
+# The same number is the tag, the -X main.version stamp in the binary and what
+# internal/update compares against, so a running Work cannot report a version
+# that has no release behind it.
+name: release
+
+on:
+  push:
+    branches: [main]
+
+# Only what publishing needs: the tag, the release and its assets.
+permissions:
+  contents: write
+
+# Two pushes landing together must not both try to tag. Queued rather than
+# cancelled, because the second one's version job is what decides there is
+# nothing left to do.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: read version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+      tag: ${{ steps.read.outputs.tag }}
+      publish: ${{ steps.read.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Tags are what "has this version already been released?" is answered
+          # against, and a shallow clone has none of them.
+          fetch-depth: 0
+
+      - id: read
+        name: Decide whether this version needs a release
+        run: |
+          set -euo pipefail
+          version=$(yq -r '.info.version' build/config.yml)
+          if [ -z "$version" ] || [ "$version" = "null" ]; then
+            echo "::error file=build/config.yml::info.version is missing"
+            exit 1
+          fi
+          tag="v$version"
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "$tag is already released; bump info.version in build/config.yml to cut a new one." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "Releasing $tag." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  build:
+    name: build ${{ matrix.goarch }}
+    needs: version
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # A release with only half its platforms in it is worse than no release:
+      # internal/update looks for the asset matching the machine it is running
+      # on, and a missing one is a failed update rather than a skipped one.
+      fail-fast: true
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            goarch: amd64
+          # Native arm64 rather than cross-compiling: the Wails backend is cgo
+          # against gtk+-3.0 and webkit2gtk-4.1, so cross-building it needs a
+          # whole sysroot of arm64 GTK headers. A second runner is free on a
+          # public repository and needs no cross toolchain at all.
+          - runner: ubuntu-24.04-arm
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GTK and WebKit
+        # The libraries pkg-config resolves for the Linux backend; see
+        # pkg/application/linux_cgo_gtk3.go in Wails.
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev
+
+      - uses: actions/setup-go@v5
+        with:
+          # From go.mod, so the toolchain here and locally cannot drift.
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install wails3
+        # Pinned to the version in go.mod: the CLI generates the bindings the
+        # frontend imports, so a newer CLI than the library is a way to get a
+        # frontend that does not compile against the backend it shipped with.
+        run: go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.18
+
+      - name: Build
+        env:
+          # Read by build:release, which stamps it in as main.version.
+          VERSION: ${{ needs.version.outputs.version }}
+        # No GOARCH here: each runner builds for itself, and build:release sets
+        # GOARCH from the host architecture, which would override this anyway.
+        # matrix.goarch names the artifact; the runner decides the target.
+        run: wails3 task build:release OUTPUT=bin/work-linux-${{ matrix.goarch }}
+
+      - name: Check the version went in
+        # A silently unstamped binary would ship as "dev" and never check for
+        # an update again, which is exactly the failure nobody notices.
+        run: |
+          set -euo pipefail
+          bin=bin/work-linux-${{ matrix.goarch }}
+          test -x "$bin"
+          if ! grep -qF "${{ needs.version.outputs.version }}" "$bin"; then
+            echo "::error::$bin does not contain ${{ needs.version.outputs.version }}; the -X main.version stamp did not take"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: work-linux-${{ matrix.goarch }}
+          path: bin/work-linux-${{ matrix.goarch }}
+          if-no-files-found: error
+          # Already a compressed-as-it-gets stripped binary.
+          compression-level: 0
+
+  release:
+    name: publish ${{ needs.version.outputs.tag }}
+    needs: [version, build]
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Write the checksum list
+        # internal/update refuses to install a binary that is not in this file,
+        # so it is part of the release rather than a nicety. The format is
+        # sha256sum's own; see FindChecksum in internal/update/apply.go.
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          sha256sum work-linux-* > checksums.txt
+          cat checksums.txt
+
+      - name: Tag ${{ needs.version.outputs.tag }}
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "$TAG"
+          git push origin "refs/tags/$TAG"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes \
+            --verify-tag \
+            dist/work-linux-amd64 \
+            dist/work-linux-arm64 \
+            dist/checksums.txt

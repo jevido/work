@@ -22,12 +22,24 @@ import (
 	"dev.jevido/work/internal/agents"
 	"dev.jevido/work/internal/claude"
 	"dev.jevido/work/internal/config"
+	"dev.jevido/work/internal/update"
 	"dev.jevido/work/internal/workbench"
 	"dev.jevido/work/services"
 )
 
 //go:embed all:frontend/dist
 var assets embed.FS
+
+// version is the release this binary was built as. The release build stamps it
+// in with -ldflags "-X main.version=..." from the version in build/config.yml,
+// which is also the tag .github/workflows/release.yml publishes under -- so
+// what the app reports and what it can download are the same number by
+// construction rather than by anyone remembering to bump both.
+//
+// It stays "dev" for every other build, and internal/update treats that as
+// "do not check, do not replace": a locally built binary is usually ahead of
+// the newest release.
+var version = update.DevVersion
 
 func init() {
 	// Registering the event payload types gives the frontend generated,
@@ -52,6 +64,8 @@ func init() {
 
 	application.RegisterEvent[workbench.BoardEvent](workbench.EventBoardUpdated)
 	application.RegisterEvent[workbench.ChangesEvent](workbench.EventRunChanges)
+
+	application.RegisterEvent[update.AvailableEvent](update.EventUpdateAvailable)
 }
 
 func main() {
@@ -76,6 +90,12 @@ func main() {
 		emit,
 		workDir,
 	)
+
+	// The update checker shares the workbench's lazy emitter for the same
+	// reason: it is built here, but it has nothing to say until the app is
+	// running. Its own goroutine is started by the service, whose startup
+	// context ends it.
+	updates := update.New(update.DefaultRepo, version, emit)
 
 	// The saved config folder is applied before the window opens, so the office
 	// draws the user's own team rather than the built-in one and then swapping.
@@ -104,6 +124,7 @@ func main() {
 		Description: "AI development workbench",
 		Services: []application.Service{
 			application.NewService(services.NewWorkbenchService(wb)),
+			application.NewService(services.NewUpdateService(updates)),
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),

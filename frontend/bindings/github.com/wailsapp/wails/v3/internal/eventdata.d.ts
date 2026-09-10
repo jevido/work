@@ -7,6 +7,9 @@ import type { Events } from "@wailsio/runtime";
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
+import type * as update$0 from "../../../../../dev.jevido/work/internal/update/models.js";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
 import type * as workbench$0 from "../../../../../dev.jevido/work/internal/workbench/models.js";
 
 declare module "@wailsio/runtime" {
@@ -29,6 +32,7 @@ declare module "@wailsio/runtime" {
             "run:finished": workbench$0.RunEvent;
             "run:plan": workbench$0.RunEvent;
             "run:started": workbench$0.RunEvent;
+            "update:available": update$0.AvailableEvent;
         }
     }
 }

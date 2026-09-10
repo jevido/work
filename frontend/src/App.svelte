@@ -5,12 +5,14 @@
   import OfficeCanvas from "./components/OfficeCanvas.svelte";
   import PermissionMenu from "./components/PermissionMenu.svelte";
   import SettingsMenu from "./components/SettingsMenu.svelte";
+  import UpdateDialog from "./components/UpdateDialog.svelte";
   import { Roster } from "./lib/agents/roster.svelte";
   import { TaskBoard } from "./lib/board/board.svelte";
   import { ChangeReview } from "./lib/changes/changes.svelte";
   import { ClaudeSession } from "./lib/claude/session.svelte";
   import { Config } from "./lib/config/config.svelte";
   import { Permissions } from "./lib/permissions/permissions.svelte";
+  import { AppUpdate } from "./lib/update/update.svelte";
 
   const session = new ClaudeSession();
   const board = new TaskBoard();
@@ -34,6 +36,14 @@
   const permissions = new Permissions();
 
   /**
+   * Whether a newer release of Work exists.
+   *
+   * Held for the session and not written down anywhere: the popup comes back
+   * on the next launch if it was closed rather than acted on. See AppUpdate.
+   */
+  const update = new AppUpdate();
+
+  /**
    * Where the agent folders are.
    *
    * Agents are read off disk now, so this has to be answered before there is
@@ -53,6 +63,7 @@
   $effect(() => session.listen());
   $effect(() => board.listen());
   $effect(() => review.listen());
+  $effect(() => update.listen());
 
   // Reads nothing reactive, so this runs once.
   $effect(() => {
@@ -141,6 +152,14 @@
       </ClaudeConsole>
     </aside>
   </main>
+{/if}
+
+<!-- Outside the config branches on purpose. A new release is news about the
+     app, not about the folder the agents live in, so it reaches someone still
+     on the setup screen as well as someone with an office open. It is fixed
+     and draws over whichever of the two is behind it. -->
+{#if update.showing}
+  <UpdateDialog {update} />
 {/if}
 
 <style>
