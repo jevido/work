@@ -157,17 +157,21 @@ export interface Rect {
 /**
  * The area a desk occupies visually: the surface plus the monitor standing on
  * it. Used both for drawing bounds and, inflated, as an obstacle.
+ *
+ * Writes into `out` rather than returning a fresh rectangle, the same bargain
+ * `monitorRect` strikes: this is asked for once per lit desk per frame by the
+ * dirty-rect pass, and a loop that must not allocate cannot be handed a new
+ * object per desk thirty times a second.
  */
-export function deskRect(deskX: number, deskY: number, boss = false): Rect {
+export function deskRect(deskX: number, deskY: number, boss: boolean, out: Rect): Rect {
   const w = deskWidth(boss);
   const h = deskHeight(boss);
   const top = deskY - h / 2 - 28;
-  return {
-    x: deskX - w / 2,
-    y: top,
-    w,
-    h: deskY + h / 2 - top,
-  };
+  out.x = deskX - w / 2;
+  out.y = top;
+  out.w = w;
+  out.h = deskY + h / 2 - top;
+  return out;
 }
 
 /** Monitor size in world units. */

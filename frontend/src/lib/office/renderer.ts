@@ -336,6 +336,8 @@ export class OfficeRenderer {
   /** Scratch for the coordinator's chair and the folders on his in-tray. */
   private readonly scratchChair: Rect = { x: 0, y: 0, w: 0, h: 0 };
   private readonly scratchTray: Rect = { x: 0, y: 0, w: 0, h: 0 };
+  /** Scratch for the desk box the dirty-rect pass asks for every frame. */
+  private readonly scratchDesk: Rect = { x: 0, y: 0, w: 0, h: 0 };
 
   /** The agent whose monitor the pointer is over, if any. */
   private hoverId: string | null = null;
@@ -1557,8 +1559,7 @@ export class OfficeRenderer {
       }
 
       if (restyled || isLit(agent.state)) {
-        const desk = deskRect(agent.deskX, agent.deskY, agent.boss);
-        this.addDirty(desk);
+        this.addDirty(deskRect(agent.deskX, agent.deskY, agent.boss, this.scratchDesk));
       }
     }
 
