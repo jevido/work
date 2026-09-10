@@ -59,7 +59,6 @@
    * has only the first prose line of their PERSONALITY.md.
    */
   const skillset = $derived(folder?.skillset ?? []);
-  const skills = $derived(folder?.skills ?? []);
 
   /**
    * A URL that would not load, so it is not asked for a second time.
