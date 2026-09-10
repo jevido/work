@@ -177,6 +177,13 @@ func (r *Runner) Run(ctx context.Context, req Request, sink func(Event)) error {
 	}
 
 	scanErr := scanStream(stdout, emit)
+	if scanErr != nil {
+		// Giving up on the stream leaves the CLI writing into a pipe nobody
+		// reads. Wait would then block until that buffer drained, which it
+		// never does, so a single over-long line would strand the process and
+		// this goroutine for as long as the app lived. Drain it instead.
+		_, _ = io.Copy(io.Discard, stdout)
+	}
 
 	waitErr := cmd.Wait()
 	if ctxErr := ctx.Err(); ctxErr != nil {
