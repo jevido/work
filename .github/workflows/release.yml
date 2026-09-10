@@ -11,8 +11,10 @@
 # Two things keep that from being unbearable:
 #
 #   * paths-ignore below, so a README or a note-to-self does not ship a build.
-#   * `[skip release]` anywhere in the head commit's message, for the pushes
-#     the path filter cannot know about.
+#   * `[skip release]` in the *subject* of the head commit, for the pushes the
+#     path filter cannot know about. Subject only, deliberately: a body that
+#     describes this mechanism would otherwise skip its own release, which is
+#     exactly what happened the first time.
 #
 # To jump a minor or major number, tag it by hand and push the tag -- the next
 # push continues from there, because the newest tag is the only input.
@@ -71,8 +73,15 @@ jobs:
 
           # An opt-out for pushes the path filter cannot classify: a comment
           # rewrite, a test-only change, anything not worth interrupting people
-          # over. The token is read from the head commit only.
-          if printf '%s' "$HEAD_MESSAGE" | grep -qiF '[skip release]'; then
+          # over.
+          #
+          # The subject line only, not the whole message. A commit body is
+          # prose, and prose about the release process quotes the token -- the
+          # commit that introduced this check skipped its own release by
+          # explaining itself. Asking for the skip means putting it in the one
+          # line that is a summary of intent.
+          subject=$(printf '%s' "$HEAD_MESSAGE" | head -n 1)
+          if printf '%s' "$subject" | grep -qiF '[skip release]'; then
             echo "publish=false" >> "$GITHUB_OUTPUT"
             echo "Head commit says \`[skip release]\`; nothing published." >> "$GITHUB_STEP_SUMMARY"
             exit 0
