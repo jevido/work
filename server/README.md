@@ -63,6 +63,11 @@ Every non-2xx response has the same body:
 
 `message` is for humans and may change. Branch on `code`, never on `message`.
 
+Rate limiting is per key — 10 requests a second with a burst of 40 — and
+`/v1/health` is never limited. A viewer polling every few seconds and a desktop
+replica syncing hard are both far underneath that, so hitting a 429 means a
+loop, not load. The budget is held in memory, so it is per server instance.
+
 ## Endpoints
 
 ### `GET /v1/health`
@@ -150,8 +155,14 @@ Request:
 }
 ```
 
-At most 500 ops per request, and 1 MiB of body. Ops are appended in the order
-given, in one transaction: either every op in the request lands or none does.
+At most 500 ops per request, and 1 MiB of body. An empty `ops` array is a 400 —
+a client with nothing to send should not be sending. Ops are appended in the
+order given, in one transaction: either every op in the request lands or none
+does.
+
+Every op is validated against the same rules the desktop merges by, and one
+that fails them takes the whole request down with a 400 naming it. The log
+cannot come to hold an op that a replica would later refuse to apply.
 
 Response `200 OK`:
 
@@ -308,7 +319,7 @@ Configuration is environment variables only:
 | --- | --- | --- |
 | `DATABASE_URL` | — | Postgres connection string. Required. |
 | `PORT` | `8080` | Port to listen on. |
-| `WORK_SIGNUP_TOKEN` | — | Bearer token for `POST /v1/workspaces`. Unset disables workspace creation. |
+| `WORK_SIGNUP_TOKEN` | — | Bearer token for `POST /v1/workspaces`. Unset disables workspace creation; set, it must be at least 24 characters, because a short one leaves creation open to guessing while looking closed. |
 | `WORK_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`. |
 
 Migrations are embedded in the binary and run at startup, in order, inside a
