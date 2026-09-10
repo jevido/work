@@ -384,7 +384,10 @@ func flattenContent(raw json.RawMessage) string {
 		Text string `json:"text"`
 	}
 	if err := json.Unmarshal(raw, &blocks); err != nil {
-		return truncate(string(raw))
+		// Cut before copying. A tool result can run to megabytes and only
+		// maxToolResult of it survives, so allocating the whole of it as a
+		// string first is a copy nobody reads.
+		return truncateBytes(raw)
 	}
 
 	var b strings.Builder
@@ -408,6 +411,15 @@ func truncate(s string) string {
 		return s
 	}
 	return s[:maxToolResult] + "\n… truncated"
+}
+
+// truncateBytes is truncate for bytes that are about to become a string, so
+// the cut happens before the copy rather than after it.
+func truncateBytes(b []byte) string {
+	if len(b) <= maxToolResult {
+		return string(b)
+	}
+	return string(b[:maxToolResult]) + "\n… truncated"
 }
 
 // limitedWriter keeps at most max bytes, so a chatty stderr cannot grow without
