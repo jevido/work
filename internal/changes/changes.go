@@ -17,6 +17,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -102,7 +103,7 @@ func (s *Snapshot) Diff(ctx context.Context) ([]Change, error) {
 	var out []Change
 	for path, tracked := range dirty {
 		before, known := s.files[path]
-		now := readState(s.dir, path, tracked)
+		now := hashState(s.dir, path)
 
 		if known && before.hash == now.hash {
 			// Dirty before the run and untouched by it: the user's own edit.
@@ -239,6 +240,27 @@ func readState(root, path string, isTracked bool) fileState {
 		state.stored = true
 	}
 	return state
+}
+
+// hashState is readState without keeping the file's bytes.
+//
+// Diff asks two things of a file as it stands now -- is it there, and has it
+// changed -- and both are answered by the hash. readState would additionally
+// hold up to maxStoredFile of it for a revert that this path never performs,
+// so a Diff over a dirty tree allocated every one of those files and dropped
+// them again. Streaming the hash keeps nothing.
+func hashState(root, path string) fileState {
+	f, err := os.Open(filepath.Join(root, path))
+	if err != nil {
+		return fileState{}
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return fileState{}
+	}
+	return fileState{existed: true, hash: hex.EncodeToString(h.Sum(nil))}
 }
 
 // patch produces a unified diff for one file. Reports whether the file is
