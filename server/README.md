@@ -266,10 +266,17 @@ same result. Do not sort by `seq` and treat the last write as the winner.
    `actor` wins. `parent` and `position` are stamped separately from each other
    and from the fields, so a move and an edit never clobber one another.
 
-2. **Delete beats a concurrent edit, in either order.** A tombstone is
-   absorbing: once a node is deleted, no later op resurrects it, and a delete
-   that arrives after an edit still wins. Clock values do not enter into it.
-   Nothing in this API undeletes a node — restoring means creating a new one.
+2. **Delete beats a concurrent edit, in either order.** Deleting is one-way. A
+   node deleted anywhere is deleted everywhere, whether the delete arrived
+   before the edit or after it, and no clock value undoes it. Nothing in this
+   API undeletes a node — restoring means creating a new one.
+
+   Later edits do still merge into a deleted node's fields. That sounds like the
+   edit winning and is not: the node stays deleted and stays out of the tree.
+   The reason is that a tombstone which swallowed later writes would keep
+   whichever fields happened to arrive before the delete, and that differs per
+   replica. Merging them keeps a tombstone's contents the same everywhere, so a
+   viewer can say *what* was deleted rather than only that something was.
 
 3. **Ops are idempotent by `id`.** Applying an op twice changes nothing the
    second time. This holds in the merge as well as at the endpoint, so a client
