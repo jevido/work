@@ -1,10 +1,10 @@
 // Package config stores the small amount of state Work keeps between runs.
 //
-// There is very little worth persisting -- where the user's agent folders live
-// and what those agents are allowed to do -- so this is a single JSON file
-// rather than a settings system. Everything else about an agent is on disk
-// under that root, which makes the config file cheap to lose: pick the folder
-// again and the team comes back.
+// There is very little worth persisting -- where the user's agent folders
+// live, what those agents are allowed to do, and which project they were last
+// pointed at -- so this is a single JSON file rather than a settings system.
+// Everything else about an agent is on disk under that root, which makes the
+// config file cheap to lose: pick the folder again and the team comes back.
 package config
 
 import (
@@ -26,6 +26,60 @@ type Config struct {
 	// internal/claude. Empty means the default, which is what a config file
 	// written before this field existed says.
 	PermissionMode string `json:"permissionMode,omitempty"`
+	// WorkDir is the last directory Work was deliberately started from -- the
+	// project agents were last pointed at. It exists for launches that carry
+	// no such directory of their own; see StartDir.
+	WorkDir string `json:"workDir,omitempty"`
+}
+
+// StartDir chooses the directory Work runs agents in for this launch, and
+// reports whether that choice is worth writing back to the config.
+//
+// A terminal launch answers the question by itself: the directory you cd'd
+// into before typing `work` is the project you meant. A desktop launcher does
+// not -- it starts the process in $HOME, or in "/", which is not a project and
+// not somewhere agents should be turned loose. So cwd is taken at face value
+// when it looks like a deliberate choice, and the last directory that did
+// stands in when it does not.
+//
+// saved is a fallback only, and only while it still exists: a project that has
+// been moved or deleted since is a worse answer than the cwd we already have.
+func StartDir(cwd, saved string) (dir string, remember bool) {
+	cwd = filepath.Clean(cwd)
+	if deliberate(cwd) {
+		// Worth remembering only when it is news. The common case is starting
+		// Work from the same project twice, and that should not write a file.
+		return cwd, cwd != saved
+	}
+	if saved != "" && isDir(saved) {
+		return saved, false
+	}
+	// Nothing better to offer than where we already are. This is the old
+	// behaviour, and it is also the honest first run from a launcher: $HOME,
+	// no git repository, no review -- but a window that opens.
+	return cwd, false
+}
+
+// deliberate reports whether dir looks like somewhere a person chose to start
+// Work, rather than somewhere a launcher dropped it.
+func deliberate(dir string) bool {
+	if dir == "" || dir == "." || dir == string(filepath.Separator) {
+		return false
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		// Nothing to compare against. Trusting dir is better than refusing to
+		// run anywhere, and a machine with no home directory is not the case
+		// this guard is for.
+		return true
+	}
+	return dir != filepath.Clean(home)
+}
+
+// isDir reports whether path exists and is a directory.
+func isDir(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 // Path returns the config file location, honouring XDG_CONFIG_HOME so a user

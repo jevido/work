@@ -1,10 +1,11 @@
 [Desktop Entry]
 Type=Application
-Name=work
+Name=Work
 Exec=work
 Icon=work
 Categories=Development;
+Comment=AI development workbench
 Terminal=false
-Keywords=wails
+Keywords=AI;agents;claude;development;
 Version=1.0
 StartupNotify=false

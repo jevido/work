@@ -38,6 +38,40 @@ replacing its own file, so it has to own the directory it sits in. Put it
 somewhere root-owned and everything works except the update button, which fails
 on a permission error.
 
+**Put it in your application menu.** The binary on its own gives you a command,
+not something to click. This adds the menu entry and its icon under your own
+home directory — no root, nothing outside `~/.local/share`:
+
+```sh
+curl -L --create-dirs \
+  -o ~/.local/share/icons/hicolor/512x512/apps/work.png \
+  https://raw.githubusercontent.com/jevido/work/main/build/appicon.png
+
+mkdir -p ~/.local/share/applications
+cat > ~/.local/share/applications/work.desktop <<EOF
+[Desktop Entry]
+Type=Application
+Name=Work
+Exec=$HOME/.local/bin/work
+Icon=work
+Categories=Development;
+Comment=AI development workbench
+Terminal=false
+Keywords=AI;agents;claude;development;
+Version=1.0
+StartupNotify=false
+EOF
+
+update-desktop-database ~/.local/share/applications
+```
+
+The `Exec` line is an absolute path on purpose: a desktop session does not
+necessarily have `~/.local/bin` on `PATH`, and a launcher that cannot find its
+binary fails silently — you click, and nothing happens. `.deb`, `.rpm` and AUR
+packages install the same entry system-wide instead, and are built from a
+checkout with `wails3 task linux:package`; from a checkout you can also install
+just the menu entry with `wails3 task linux:install:desktop`.
+
 **Install the webview.** The binary carries its own frontend, but not the
 webview it draws into:
 
@@ -64,6 +98,19 @@ without asking — so **start Work from a directory you are happy for it to
 change**; see [What agents may do](#what-agents-may-do). The first launch asks
 for a config root and creates your team's folder under it; see
 [Your team](#your-team).
+
+**Starting it from the menu instead.** A launcher passes no useful directory —
+it starts the process in your home directory, which is not a project and not
+somewhere to let agents loose. So Work remembers: every terminal launch records
+the directory you started it in, and a launch that arrives with nothing better
+reuses the last one. Run it once from the project you care about and clicking
+the icon afterwards opens on that project.
+
+The consequence is worth knowing before you rely on it: the remembered
+directory is the last one you chose *in a terminal*, so switching projects
+still means a `cd` and one terminal launch. Until you have done that even once,
+a menu launch has nothing to fall back on and opens in your home directory —
+where there is no git repository, and so no change review and no revert.
 
 ## Updates
 
@@ -142,7 +189,14 @@ wails3 dev      # hot-reloading development build
 wails3 build    # production binary in ./bin/work
 wails3 task check   # go vet + svelte-check
 go test ./...
+
+wails3 task linux:install:desktop                     # menu entry for ./bin/work
+wails3 task linux:install:desktop BINARY=~/.local/bin/work
 ```
+
+`install:desktop` writes `~/.local/share/applications/work.desktop` and the
+icon beside it, pointing at the binary you name — the built one in `./bin` by
+default. It is the same entry the packages install, with an absolute `Exec`.
 
 Both build paths report a `dev+<git description>` version and so never offer to
 update themselves; `wails3 task build:release VERSION=0.1.0` is the one that
@@ -413,9 +467,12 @@ test runner — the
 differ and the diff parser were verified by hand against real `git diff` output
 rather than by a suite.
 
-The working directory is the one thing still not a setting: agents run wherever
-Work was started from, which for a packaged app launched from a desktop entry
-is whatever the launcher happened to pass — usually your home directory. That
-is also where the change review looks for a git repository, and outside one
-there is no review and no revert. Until it is a setting, launch Work from the
-project you want it working on.
+The working directory is still not a setting you can change from inside the
+window. Agents run wherever Work was started from; a launch that carries no
+directory of its own — a desktop entry, which starts the process in your home
+directory — falls back to the last directory Work *was* started from by hand,
+which is persisted alongside the config folder and the permission mode. That
+covers clicking the icon, but changing projects is still `cd` and one terminal
+launch, and a machine that has never had one has nothing to fall back on: it
+opens in your home directory, where there is no git repository and so no change
+review and no revert.

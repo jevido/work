@@ -197,13 +197,55 @@ tasks:
     dir: build
     cmds:
       - mkdir -p {{.ROOT_DIR}}/build/linux/appimage
-      - wails3 generate .desktop -name "{{.APP_NAME}}" -exec "{{.EXEC}}" -icon "{{.ICON}}" -outputfile "{{.ROOT_DIR}}/build/linux/{{.APP_NAME}}.desktop" -categories "{{.CATEGORIES}}"
+      - wails3 generate .desktop -name "{{.MENU_NAME}}" -comment "{{.COMMENT}}" -keywords "{{.KEYWORDS}}" -exec "{{.EXEC}}" -icon "{{.ICON}}" -outputfile "{{.ROOT_DIR}}/build/linux/{{.APP_NAME}}.desktop" -categories "{{.CATEGORIES}}"
     vars:
       APP_NAME: '{{.APP_NAME}}'
+      # What the application menu shows. The binary is `work`; the entry a
+      # person reads is `Work`, and the keywords are what they would actually
+      # type into a launcher looking for it -- the generator's default is
+      # "wails", which is the toolkit, not the app.
+      MENU_NAME: 'Work'
+      COMMENT: 'AI development workbench'
+      KEYWORDS: 'AI;agents;claude;development;'
       EXEC: '{{.APP_NAME}}'
       ICON: '{{.APP_NAME}}'
       CATEGORIES: 'Development;'
       OUTPUTFILE: '{{.ROOT_DIR}}/build/linux/{{.APP_NAME}}.desktop'
+
+  install:desktop:
+    summary: Installs a user-level application menu entry for the built binary
+    desc: |
+      Puts a .desktop entry and an icon under ~/.local/share so Work can be
+      started from the application menu instead of a terminal. No root, and
+      nothing outside your own home directory.
+
+      The entry points at wherever the binary is now -- bin/work by default,
+      or BINARY=~/.local/bin/work for the copy you installed. It is written
+      with an absolute Exec on purpose: a desktop session does not necessarily
+      have ~/.local/bin on PATH, and a launcher that cannot find its binary
+      fails with nothing on screen to say why.
+    deps:
+      - task: generate:dotdesktop
+    vars:
+      DEFAULT_BINARY: '{{.ROOT_DIR}}/{{.BIN_DIR}}/{{.APP_NAME}}'
+      BINARY: '{{.BINARY | default .DEFAULT_BINARY}}'
+      DATA_DIR: '{{.XDG_DATA_HOME | default "$HOME/.local/share"}}'
+    preconditions:
+      - sh: 'test -x "{{.BINARY}}"'
+        msg: 'No binary at {{.BINARY}}. Build one with `wails3 task build`, or pass BINARY=/path/to/work.'
+    cmds:
+      - mkdir -p "{{.DATA_DIR}}/applications" "{{.DATA_DIR}}/icons/hicolor/512x512/apps"
+      - install -Dm644 "{{.ROOT_DIR}}/build/appicon.png" "{{.DATA_DIR}}/icons/hicolor/512x512/apps/{{.APP_NAME}}.png"
+      # The generated entry has a bare `Exec=work`, which needs the binary on
+      # the session's PATH. Everything else about it is right, so the install
+      # rewrites that one line rather than keeping a second copy of the file.
+      - sed 's|^Exec=.*$|Exec={{.BINARY}}|' "{{.ROOT_DIR}}/build/linux/{{.APP_NAME}}.desktop" > "{{.DATA_DIR}}/applications/{{.APP_NAME}}.desktop"
+      - chmod 644 "{{.DATA_DIR}}/applications/{{.APP_NAME}}.desktop"
+      # Without this the entry is on disk but not yet in the menu on some
+      # desktops. Missing on others, which is not a failure worth stopping for.
+      - cmd: update-desktop-database "{{.DATA_DIR}}/applications" 2>/dev/null || true
+        silent: true
+      - echo 'Installed. Work is in your application menu.'
 
   run:
     cmds:

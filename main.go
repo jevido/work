@@ -69,9 +69,29 @@ func init() {
 }
 
 func main() {
-	workDir, err := os.Getwd()
+	cwd, err := os.Getwd()
 	if err != nil {
 		log.Fatal(err)
+	}
+
+	// The config is read first because it decides one of the arguments below:
+	// which directory agents run in. A config that cannot be read is a
+	// warning, not a fatal error -- the zero value describes a first run, and
+	// Work is usable before it is configured.
+	cfg, err := config.Load()
+	if err != nil {
+		log.Printf("config: %v", err)
+	}
+
+	// A desktop launcher starts Work in $HOME rather than in the project you
+	// meant, so the directory it was last started from by hand stands in for
+	// one. Remembering it at startup rather than at exit means it survives a
+	// crash, and it costs a single small write on the launches that change it.
+	workDir, remember := config.StartDir(cwd, cfg.WorkDir)
+	if remember {
+		if err := config.Update(func(c *config.Config) { c.WorkDir = workDir }); err != nil {
+			log.Printf("config: %v", err)
+		}
 	}
 
 	// The workbench needs to emit before the app exists, so the emitter reaches
@@ -101,21 +121,18 @@ func main() {
 	// draws the user's own team rather than the built-in one and then swapping.
 	// A folder that has gone missing is a warning, not a fatal error: Work
 	// falls back to the built-in team and the user can pick a folder again.
-	if cfg, cfgErr := config.Load(); cfgErr != nil {
-		log.Printf("config: %v", cfgErr)
+	//
+	// A mode saved by a later version of Work, or edited by hand into
+	// something the CLI does not accept, falls back to the default rather than
+	// taking the window down with it.
+	if mode, err := claude.ParsePermissionMode(cfg.PermissionMode); err != nil {
+		log.Printf("permissions: %v", err)
 	} else {
-		// A mode saved by a later version of Work, or edited by hand into
-		// something the CLI does not accept, falls back to the default rather
-		// than taking the window down with it.
-		if mode, err := claude.ParsePermissionMode(cfg.PermissionMode); err != nil {
-			log.Printf("permissions: %v", err)
-		} else {
-			wb.UsePermissionMode(mode)
-		}
-		if cfg.Root != "" {
-			if _, err := wb.UseConfigRoot(cfg.Root); err != nil {
-				log.Printf("agents: %v", err)
-			}
+		wb.UsePermissionMode(mode)
+	}
+	if cfg.Root != "" {
+		if _, err := wb.UseConfigRoot(cfg.Root); err != nil {
+			log.Printf("agents: %v", err)
 		}
 	}
 
