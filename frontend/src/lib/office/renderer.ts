@@ -190,6 +190,18 @@ const LABEL_FONT = "600 12px Inter, system-ui, sans-serif";
 const MONO_FONT = "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
 
 /**
+ * The monitor readout's font, composed once.
+ *
+ * Both the size and the face are constants of the world -- the readout is
+ * measured in world units and does not move with the window -- and
+ * `drawReadout` runs once per reporting desk per frame, so building this
+ * string there was a fresh allocation for a value that never changes. The
+ * board's notes are set in the same face for the same reason: the advance
+ * measured at startup is what says how many characters fit on one.
+ */
+const MONITOR_FONT = `${MONITOR_TEXT_SIZE}px ${MONO_FONT}`;
+
+/**
  * Where finished folders stack on the coordinator's in-tray, relative to the
  * centre of his desk.
  *
@@ -1207,7 +1219,7 @@ export class OfficeRenderer {
     const noteH = cellH - 5;
     const chars = Math.max(3, Math.floor((noteW - 8) / this.monitorAdvance));
 
-    ctx.font = `${MONITOR_TEXT_SIZE}px ${MONO_FONT}`;
+    ctx.font = MONITOR_FONT;
     ctx.textAlign = "left";
     ctx.textBaseline = "middle";
 
@@ -1899,7 +1911,7 @@ export class OfficeRenderer {
       (glassH - MONITOR_LINE_HEIGHT * MONITOR_TEXT_LINES) / 2 +
       MONITOR_LINE_HEIGHT / 2;
 
-    ctx.font = `${MONITOR_TEXT_SIZE}px ${MONO_FONT}`;
+    ctx.font = MONITOR_FONT;
     ctx.textAlign = "left";
     ctx.fillStyle = a.colourSoft;
 
