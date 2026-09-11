@@ -1,0 +1,23 @@
+{
+  "extends": "@tsconfig/svelte/tsconfig.json",
+  "compilerOptions": {
+    "target": "ESNext",
+    "useDefineForClassFields": true,
+    "module": "ESNext",
+    "resolveJsonModule": true,
+    "allowJs": true,
+    "checkJs": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "skipLibCheck": true,
+    "noEmit": true,
+    "strict": true,
+    "baseUrl": ".",
+    "paths": {
+      "@doc/*": ["../frontend/src/lib/workspace/*"]
+    }
+  },
+  /* The Vite config is Node's, not the browser's, and typing it here would
+     mean pulling @types/node into a project whose only job is a static page. */
+  "include": ["src/**/*.ts", "src/**/*.svelte"]
+}

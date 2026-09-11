@@ -138,6 +138,16 @@ const IDLE_INTERVAL_MS = 1000 / IDLE_FPS;
 /** Longest delta we integrate. Protects the sim after the tab is unhidden. */
 const MAX_DT = 0.1;
 
+/**
+ * How many unheard state changes are worth keeping while the office is paused.
+ *
+ * A run only produces a handful per agent per turn, so a queue this long means
+ * the office has been off screen for a while rather than that anything is
+ * wrong. Trimmed to the tail: see push().
+ */
+const MAX_QUEUED_COMMANDS = 256;
+const KEEP_QUEUED_COMMANDS = 32;
+
 /** Highest device pixel ratio the canvas will render at. */
 const MAX_DPR = 2;
 
@@ -398,9 +408,22 @@ export class OfficeRenderer {
   private readonly monitorAdvance: number;
   private readonly monitorColumns: number;
 
+  /**
+   * Whether the window is showing at all, and whether the app is showing the
+   * office in particular.
+   *
+   * Two reasons to stop drawing, kept apart because they come and go
+   * independently: a minimised window in work mode, and a visible window in
+   * idea mode. Folding them into one flag means whichever ends last turns the
+   * loop back on while the other still wants it off.
+   */
+  private windowVisible = true;
+  private shown = true;
+
   private readonly onVisibility = () => {
-    if (document.hidden) this.pause();
-    else this.resume();
+    this.windowVisible = !document.hidden;
+    if (this.windowVisible) this.resume();
+    else this.pause();
   };
 
   constructor(canvas: HTMLCanvasElement) {
@@ -511,6 +534,14 @@ export class OfficeRenderer {
   /** Queues a coarse state change. Cheap enough to call from an event handler. */
   push(agentId: string, state: VisualState, phase?: TaskPhase): void {
     this.queue.push({ agentId, state, phase });
+    // A paused office still gets told what the run is doing, and nothing
+    // drains the queue until it is drawn again -- so a long session in another
+    // mode would come back and replay every state change it missed as a
+    // stampede. Only the tail is worth keeping: these are coarse states, and
+    // the newest one per agent is the office anybody wants to walk back into.
+    if (this.queue.length > MAX_QUEUED_COMMANDS) {
+      this.queue = this.queue.slice(-KEEP_QUEUED_COMMANDS);
+    }
   }
 
   /**
@@ -623,10 +654,11 @@ export class OfficeRenderer {
   start(): void {
     if (this.running) return;
     this.running = true;
+    this.windowVisible = !document.hidden;
     this.lastTime = performance.now();
     this.lastDraw = 0;
     document.addEventListener("visibilitychange", this.onVisibility);
-    this.raf = requestAnimationFrame(this.tick);
+    this.resume();
   }
 
   stop(): void {
@@ -636,15 +668,38 @@ export class OfficeRenderer {
     document.removeEventListener("visibilitychange", this.onVisibility);
   }
 
-  /** Stops drawing without tearing anything down. Used when the window hides. */
+  /**
+   * Whether the office is on screen.
+   *
+   * The app can put another mode over this canvas, and a canvas nobody is
+   * looking at must not cost a frame. Tearing the renderer down instead would
+   * be cheaper still and wrong: the cast would be rebuilt on the way back, so
+   * everyone would be standing at their opening position with a blank monitor,
+   * and a run that carried on the whole time would look like it had restarted.
+   * Pausing keeps the office exactly where it was.
+   */
+  setShown(shown: boolean): void {
+    if (this.shown === shown) return;
+    this.shown = shown;
+    if (shown) this.resume();
+    else this.pause();
+  }
+
+  /** True while the loop is running and nothing is holding it back. */
+  get drawing(): boolean {
+    return this.raf !== 0;
+  }
+
+  /** Stops drawing without tearing anything down. */
   private pause(): void {
-    if (!this.running) return;
-    if (this.raf) cancelAnimationFrame(this.raf);
+    if (!this.raf) return;
+    cancelAnimationFrame(this.raf);
     this.raf = 0;
   }
 
   private resume(): void {
     if (!this.running || this.raf) return;
+    if (!this.windowVisible || !this.shown) return;
     this.lastTime = performance.now();
     this.sampler.reset();
     this.needsFullRepaint = true;

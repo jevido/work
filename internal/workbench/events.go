@@ -63,7 +63,29 @@ const (
 	// board is small and changes a handful of times per run, so publishing a
 	// snapshot is cheaper than reconciling deltas and cannot drift.
 	EventBoardUpdated = "board:updated"
+
+	// EventWorkspaceChanged announces that the workspace itself changed:
+	// joined, created, left, or its tabs edited. It carries the whole
+	// workspace for the same reason board:updated carries the whole board --
+	// it is tiny and it changes rarely.
+	EventWorkspaceChanged = "workspace:changed"
+	// EventWorkspaceSync reports where the second stage stands: online,
+	// syncing, offline or rejected, and how much is queued. This is the
+	// offline indicator's only source.
+	//
+	// It carries no document. Sync state changes on every poll and the
+	// document changes when someone edits something, so putting a merged tree
+	// on this payload would re-encode the workspace every few seconds to say
+	// that nothing happened. The frontend calls WorkspaceDocument when the
+	// cursor on this event moves.
+	EventWorkspaceSync = "workspace:sync"
 )
+
+// The workspace events above are new names rather than new fields on the
+// existing payloads, and that is deliberate. Work with no workspace joined
+// must behave exactly as it did before this existed -- so the events it
+// already emits are untouched, byte for byte, and everything the second stage
+// adds arrives under a name the old frontend never listens for.
 
 // Not every event the frontend listens for is declared here: update:available
 // belongs to internal/update, next to the code that decides when to send it,
@@ -157,6 +179,21 @@ type RunEvent struct {
 // BoardEvent is the payload for board:updated.
 type BoardEvent struct {
 	Cards []board.Card `json:"cards"`
+}
+
+// WorkspaceEvent is the payload for workspace:changed.
+type WorkspaceEvent struct {
+	// Workspace is the workspace as this machine now sees it, or nil after
+	// leaving one.
+	Workspace *WorkspaceView `json:"workspace"`
+	// Status is where sync stands, so a join does not need a second round
+	// trip to draw the indicator.
+	Status Status `json:"status"`
+}
+
+// SyncEvent is the payload for workspace:sync.
+type SyncEvent struct {
+	Status Status `json:"status"`
 }
 
 // ChangesEvent is the payload for run:changes.

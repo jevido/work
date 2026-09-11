@@ -1,0 +1,109 @@
+# Deploys the Work sync server to work.jevido.app on Coolify.
+#
+# Point a Coolify "Docker Compose" resource at this repository with this file
+# as its compose path. Coolify builds the image from the Dockerfile beside it,
+# puts both containers on its own network, and publishes only the one that
+# asks to be published.
+#
+# The SERVICE_* names below are Coolify's, not Docker's. Coolify substitutes
+# them before compose ever sees the file: SERVICE_FQDN_* claims a domain and
+# wires the proxy and its certificate, SERVICE_PASSWORD_* and SERVICE_BASE64_*
+# generate a secret once and keep it for the life of the resource. That is
+# what keeps every credential here out of the repository -- there is no .env
+# to forget to gitignore, because there are no literal secrets to put in one.
+
+services:
+  server:
+    build:
+      # The root, not server/. server/ is its own Go module and reaches up
+      # into internal/ops; see the Dockerfile.
+      context: .
+      dockerfile: Dockerfile
+    # Not just for crashes: this is also what recovers the ungated starts
+    # described under depends_on.
+    restart: unless-stopped
+    environment:
+      # Claims the domain and terminates TLS in front of port 8080. Set to
+      # the intended hostname rather than left blank so a fresh deploy comes
+      # up on the right name instead of a generated one; Coolify's UI still
+      # overrides it.
+      - SERVICE_FQDN_SERVER_8080=https://work.jevido.app
+
+      # sslmode=disable is correct here and only here: the connection never
+      # leaves Coolify's internal network, and asking for TLS to a sidecar on
+      # a private bridge buys nothing but a handshake. Pointing this at
+      # anything reachable from outside that network means sslmode=require.
+      - DATABASE_URL=postgres://work:${SERVICE_PASSWORD_POSTGRES}@postgres:5432/work?sslmode=disable
+
+      # Gates workspace creation. Coolify generates 64 bytes once and keeps
+      # it; read it out of the resource's environment when creating the first
+      # workspace, and unset this afterwards to close signup for good.
+      - WORK_SIGNUP_TOKEN=${SERVICE_BASE64_64_SIGNUP}
+
+      # info logs failures and lifecycle. Successful requests are debug on
+      # purpose -- a viewer polling every few seconds would otherwise be the
+      # entire log.
+      - WORK_LOG_LEVEL=info
+      - PORT=8080
+    depends_on:
+      postgres:
+        # The server migrates before it opens its listener and exits if the
+        # database will not take a connection, so it has to start second.
+        # This gate is what a deploy uses -- Coolify runs `up`, and `up`
+        # honours it: verified by a full down/up cycle coming back with a
+        # single "listening" line and no error.
+        #
+        # It does not cover every start. `compose restart`, and a host
+        # rebooting both containers at once, bring them up together with no
+        # gate at all; the server then loses the race, exits on
+        # "the database system is starting up", and comes back on the restart
+        # policy below a second or two later. That self-heals, and it is
+        # still worth a line in the server's own startup to retry the first
+        # connection rather than relying on it.
+        condition: service_healthy
+    healthcheck:
+      # Same check as the Dockerfile's, restated so Coolify's rollout can see
+      # it: a deploy is not finished until /v1/health has done a real
+      # database round trip.
+      test: ["CMD-SHELL", "wget --quiet --spider --tries=1 http://127.0.0.1:8080/v1/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      start_period: 40s
+      retries: 3
+
+  # Postgres runs alongside the server, on the same Coolify instance.
+  #
+  # To use a Postgres that Coolify already manages instead, delete this
+  # service and the volume, drop the depends_on above, and set DATABASE_URL to
+  # that database's internal connection string -- Coolify shows it on the
+  # database resource. Nothing else changes: the server owns its schema and
+  # migrates at startup either way.
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=work
+      - POSTGRES_PASSWORD=${SERVICE_PASSWORD_POSTGRES}
+      - POSTGRES_DB=work
+      # The server's own schema lives in its migrations. This only sets the
+      # encoding and collation the database is created with, which cannot be
+      # changed afterwards without recreating it.
+      - POSTGRES_INITDB_ARGS=--encoding=UTF8 --locale=C
+    volumes:
+      - work-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U work -d work"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+    # Deliberately no ports. The database is reachable from the server over
+    # Coolify's internal network and from nowhere else; publishing it would
+    # put a password-only Postgres on the public internet.
+
+volumes:
+  # The append-only op log is the only state this deployment has, and losing
+  # it loses every workspace. A named volume survives a redeploy and a
+  # container rebuild; it does not survive deleting the resource, so this is
+  # what a backup schedule points at.
+  work-postgres:

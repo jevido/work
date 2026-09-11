@@ -211,6 +211,48 @@ func TestFieldsAreLastWriteWinsPerField(t *testing.T) {
 	})
 }
 
+// TestPlacementMovesAsOneThing pins the other half of rule one: a parent and a
+// position are one slot, not two.
+//
+// Stamping them separately would look like finer-grained merging and would be
+// worse. Two replicas moving the same node at once would merge into one op's
+// parent with the other's position — a place neither of them chose, and for a
+// position that is a fractional index between two nodes under a parent it was
+// never computed for, somewhere arbitrary in a list nobody moved it to.
+func TestPlacementMovesAsOneThing(t *testing.T) {
+	// Same clock, so the actor decides. Different parent and different position,
+	// so a mix is visible.
+	alice := Op{ID: "1", Kind: KindMoveNode, Actor: "alice", Clock: 5, Node: "n", Parent: "p1", Position: "z"}
+	bob := Op{ID: "2", Kind: KindMoveNode, Actor: "bob", Clock: 5, Node: "n", Parent: "p2", Position: "a"}
+
+	for _, order := range [][]Op{{alice, bob}, {bob, alice}} {
+		state := merge(t, order...)
+		node, ok := state.Node("n")
+		if !ok {
+			t.Fatal("the node is gone")
+		}
+		// bob wins the tiebreak, so both halves must be bob's.
+		if node.Parent != "p2" || node.Position != "a" {
+			t.Errorf("order %s: placement = %s/%s, want p2/a — the winner takes both halves or neither",
+				ids(order), node.Parent, node.Position)
+		}
+	}
+
+	t.Run("a later move of only the parent carries its position with it", func(t *testing.T) {
+		// A move op always states both. One that leaves position empty is
+		// moving the node to the empty position, not keeping the old one, and
+		// a client that means to keep it has to say so.
+		state := merge(t,
+			Op{ID: "1", Kind: KindCreateNode, Actor: "a", Clock: 1, Node: "n", Parent: "p1", Position: "m"},
+			Op{ID: "2", Kind: KindMoveNode, Actor: "a", Clock: 2, Node: "n", Parent: "p2"},
+		)
+		node, _ := state.Node("n")
+		if node.Parent != "p2" || node.Position != "" {
+			t.Errorf("placement = %s/%s, want p2 and an empty position", node.Parent, node.Position)
+		}
+	})
+}
+
 // TestDeleteBeatsConcurrentEdit covers rule two, and covers it in both orders,
 // because a tombstone that only wins when it happens to arrive last is not a
 // tombstone.

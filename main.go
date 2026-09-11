@@ -7,6 +7,12 @@
 //   - Svelte owns application UI: the console, the layout, the controls.
 //   - The Canvas renderer owns animation state, and only animation state.
 //
+// Work is also a replica. A workspace can be shared with other people, and
+// the rule there is the same one: local first. An edit lands on this machine
+// immediately and durably, and reaching the server is a second stage that
+// happens afterwards or, offline, later. Nothing in a run waits on a network,
+// and with no workspace joined none of it runs at all.
+//
 // The backend emits semantic events (agent:assigned, agent:working,
 // agent:finished, agent:error) and never positions. Movement never crosses the
 // Wails bridge.
@@ -64,6 +70,9 @@ func init() {
 
 	application.RegisterEvent[workbench.BoardEvent](workbench.EventBoardUpdated)
 	application.RegisterEvent[workbench.ChangesEvent](workbench.EventRunChanges)
+
+	application.RegisterEvent[workbench.WorkspaceEvent](workbench.EventWorkspaceChanged)
+	application.RegisterEvent[workbench.SyncEvent](workbench.EventWorkspaceSync)
 
 	application.RegisterEvent[update.AvailableEvent](update.EventUpdateAvailable)
 }
@@ -134,6 +143,24 @@ func main() {
 		if _, err := wb.UseConfigRoot(cfg.Root); err != nil {
 			log.Printf("agents: %v", err)
 		}
+	}
+
+	// The workspace is the second stage: local work first, always, and the
+	// server afterwards. Wiring the transport in here rather than inside the
+	// workbench is what keeps internal/workbench free of HTTP and testable
+	// against a fake -- and it is also the switch that turns the whole
+	// feature off. Without a client every workspace call answers
+	// ErrNoTransport and Work is exactly what it was before any of this
+	// existed.
+	wb.UseOps(&workbench.HTTPClient{})
+
+	// A workspace saved by a previous run is restored before the window
+	// opens, so the tab strip draws joined rather than joining. Failing to
+	// restore it is a warning: a workspace Work cannot reach is a reason to
+	// work offline, not a reason not to open. The sync loop itself starts
+	// with the app -- see services.WorkbenchService.ServiceStartup.
+	if err := wb.UseWorkspace(cfg.Workspace); err != nil {
+		log.Printf("workspace: %v", err)
 	}
 
 	app := application.New(application.Options{

@@ -2,5 +2,7 @@
 bin
 frontend/dist
 frontend/node_modules
+web/dist
+web/node_modules
 build/linux/appimage/build
 .tmp-verify

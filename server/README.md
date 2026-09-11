@@ -104,7 +104,7 @@ Response `201 Created`:
 ```json
 {
   "workspace": {
-    "id": "ws_01JBQ8Z3K4M5N6P7Q8R9S0T1V2",
+    "id": "ws_9c938701f37f5bae73592c4f27d7790b",
     "name": "jevido/work",
     "head": 0,
     "createdAt": "2026-09-10T12:00:00Z"
@@ -114,6 +114,10 @@ Response `201 Created`:
 }
 ```
 
+Workspace IDs and keys are opaque. They are `ws_`, `wk_` and `rk_` followed by
+32 hex characters today, and nothing but the prefix is promised — do not parse
+one, derive one, or sort by one.
+
 ### `GET /v1/workspace`
 
 Read or write key. Metadata for the workspace the key belongs to.
@@ -121,7 +125,7 @@ Read or write key. Metadata for the workspace the key belongs to.
 ```json
 {
   "workspace": {
-    "id": "ws_01JBQ8Z3K4M5N6P7Q8R9S0T1V2",
+    "id": "ws_9c938701f37f5bae73592c4f27d7790b",
     "name": "jevido/work",
     "head": 4127,
     "createdAt": "2026-09-10T12:00:00Z"
@@ -259,6 +263,13 @@ same result. Do not sort by `seq` and treat the last write as the winner.
 | `position` | string | `create-node`, `move-node`, `extract-to-task` | Sort key among siblings, compared as a string. |
 | `task` | string | `extract-to-task` | ID of the task node being created. |
 
+`clock` must be at least 1 — zero is reserved for "never written". Identifiers
+(`id`, `actor`, `node`, `task`, `parent`) are capped at 128 bytes, `position` at
+256, field names at 128, and one op carries at most 256 fields. An op that
+breaks any of these is a 400 naming the field, and the same limits are enforced
+by the desktop before it sends, so nothing that would be refused here is ever
+put on the wire.
+
 ### The kinds
 
 | `kind` | Does |
@@ -274,8 +285,19 @@ same result. Do not sort by `seq` and treat the last write as the winner.
 1. **Fields are last-write-wins, one field at a time.** Two replicas editing
    different fields of the same node both keep their edit. Two editing the same
    field: the higher `clock` wins, and if the clocks are equal, the higher
-   `actor` wins. `parent` and `position` are stamped separately from each other
-   and from the fields, so a move and an edit never clobber one another.
+   `actor` wins.
+
+   Where a node *sits* is stamped separately from its fields, so a move and an
+   edit never clobber one another. But `parent` and `position` are one slot
+   between them, not two: a move that wins takes both halves, and a move that
+   loses takes neither. Stamping them apart would look like finer-grained
+   merging and would be worse — two replicas moving the same node at once would
+   land it under one replica's parent at the other's position, which is a place
+   neither of them chose.
+
+   A consequence for clients: `move-node` always states both. Sending one with
+   no `position` moves the node *to* the empty position; it does not keep the
+   position the node had. Send the position you want, every time.
 
 2. **Delete beats a concurrent edit, in either order.** Deleting is one-way. A
    node deleted anywhere is deleted everywhere, whether the delete arrived

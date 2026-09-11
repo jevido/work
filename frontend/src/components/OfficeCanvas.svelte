@@ -23,6 +23,7 @@
     board,
     config,
     showPerf = false,
+    shown = true,
   }: {
     roster: Roster;
     session: ClaudeSession;
@@ -32,6 +33,17 @@
     /** Passed straight through to the desk panel's profile view. */
     config: Config;
     showPerf?: boolean;
+    /**
+     * Whether the office is the mode currently on screen.
+     *
+     * It stays mounted either way. The office is a picture of a run that keeps
+     * going while you are planning, and unmounting it would restart the
+     * picture rather than the run: everybody back at their opening position,
+     * every monitor blank, the walk you were watching gone. So the canvas is
+     * hidden and the loop is stopped, and coming back is the frame after this
+     * goes true.
+     */
+    shown?: boolean;
   } = $props();
 
   let canvas: HTMLCanvasElement;
@@ -106,9 +118,15 @@
 
     const observer = new ResizeObserver((entries) => {
       const box = entries[0]?.contentRect;
-      if (box) r.resize(box.width, box.height);
-      // The world is scaled to fit, so every desk is somewhere else now.
-      measureDesks(r);
+      // A hidden office measures 0x0, and resizing to that throws the world's
+      // scale away -- so the mode you switch back to would open on a canvas
+      // laid out for nothing. Kept at the last size it was actually shown at;
+      // the observer fires again with real numbers on the way back.
+      if (box && box.width > 0 && box.height > 0) {
+        r.resize(box.width, box.height);
+        // The world is scaled to fit, so every desk is somewhere else now.
+        measureDesks(r);
+      }
     });
     observer.observe(host);
     r.resize(host.clientWidth, host.clientHeight);
@@ -123,6 +141,18 @@
       observer.disconnect();
       renderer = null;
     };
+  });
+
+  /**
+   * Starts and stops the draw loop as the office comes and goes.
+   *
+   * Separate from the effect above on purpose: that one owns the renderer's
+   * whole life, and reading `shown` in it would tear the office down and build
+   * a new one on every mode switch -- which is the thing this is here to
+   * avoid.
+   */
+  $effect(() => {
+    renderer?.setShown(shown);
   });
 
   // The cast can change (agents loaded, or reconfigured later) without
@@ -198,6 +228,13 @@
   $effect(() => {
     const r = renderer;
     if (!r) return;
+    // Nothing to type onto a monitor nobody is looking at. This runs once per
+    // animation frame for the length of a streaming turn, and scanning the
+    // transcript for each agent's live prose is the most frequent work this
+    // component does -- so a run watched from another mode should not pay for
+    // it. Reading `shown` first makes this effect follow it: the frame the
+    // office comes back, every monitor is filled in from the current stream.
+    if (!shown) return;
     for (const agent of roster.list) {
       const live = liveTextFor(session, agent.id);
       r.setMonitorText(agent.id, live?.id ?? "", live?.text ?? "");
@@ -297,7 +334,13 @@
 
 <!-- Labelled as a group so the desks inside it are announced as somewhere,
      rather than as a run of buttons after the console. -->
-<div class="office" bind:this={host} role="group" aria-label="Office floor">
+<div
+  class="office"
+  class:hidden={!shown}
+  bind:this={host}
+  role="group"
+  aria-label="Office floor"
+>
   <!-- Hidden from assistive technology on purpose. It is a picture of state
        that is available as text elsewhere: who is on the team, who is working
        and what they are writing are all in the console and in the desk panels.
@@ -344,6 +387,18 @@
     min-width: 0;
     overflow: hidden;
     background: #0b0d11;
+  }
+
+  /*
+   * `visibility: hidden` rather than `display: none`. Both stop the paint, and
+   * both take the desk buttons out of the tab order and out of the
+   * accessibility tree -- but display:none collapses the box, and the desks
+   * are absolutely positioned in pixels measured off a laid-out canvas. The
+   * office would come back with every desk at the size it had while it was
+   * nothing wide. This keeps the box and its size.
+   */
+  .office.hidden {
+    visibility: hidden;
   }
 
   canvas {

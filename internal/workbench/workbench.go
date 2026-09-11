@@ -61,8 +61,33 @@ type Workbench struct {
 	registry *agents.Registry
 	runner   *claude.Runner
 	emit     Emitter
-	workDir  string
-	board    *board.Board
+	// baseDir is the folder Work was started in. It is what agents run in
+	// when no workspace is joined -- the behaviour Work has always had -- and
+	// what they go back to on leaving one.
+	baseDir string
+	// workDir is the folder agents run in now. It is baseDir until a
+	// workspace tab is activated, and the active tab's folder after. Guarded
+	// by mu, because switching tabs writes it.
+	workDir string
+	board   *board.Board
+
+	// ops is the workspace transport, or nil. Written once by UseOps before
+	// the window opens and only read after, so it needs no lock.
+	ops OpsClient
+	// sync is the joined workspace's second stage, or nil. Read on the event
+	// path by emit, which is why it is atomic: an app with no workspace pays
+	// one atomic load per event and nothing else.
+	sync atomic.Pointer[Sync]
+	// syncCtx is the app lifetime, handed over by StartSync. A workspace
+	// joined after startup uses it to start its loop with the same lifetime
+	// as one restored at startup.
+	syncCtx atomic.Pointer[context.Context]
+
+	// wsMu guards ws. It is not mu: joining a workspace writes a config file,
+	// and that has no business queueing behind a run. Where both are needed
+	// -- ActivateTab -- wsMu is taken first and mu second, never the reverse.
+	wsMu sync.Mutex
+	ws   *config.Workspace
 
 	nextRun  atomic.Uint64
 	nextChat atomic.Uint64
@@ -135,6 +160,7 @@ func New(reg *agents.Registry, runner *claude.Runner, emit Emitter, workDir stri
 		registry: reg,
 		runner:   runner,
 		emit:     emit,
+		baseDir:  workDir,
 		workDir:  workDir,
 		board:    board.New(),
 		state:    make(map[string]AgentState),
@@ -149,6 +175,14 @@ func New(reg *agents.Registry, runner *claude.Runner, emit Emitter, workDir stri
 		w.state[a.ID] = StateIdle
 	}
 	return w
+}
+
+// WorkDir is the folder agents currently run in: the folder Work was started
+// in, or the active workspace tab's folder.
+func (w *Workbench) WorkDir() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.workDir
 }
 
 // Agents returns every agent with its current state.
@@ -219,9 +253,12 @@ func (w *Workbench) Submit(agentID, prompt string) (Task, error) {
 
 	// Record the working tree so the run's file changes can be reviewed. A
 	// non-repository is not an error; there is simply nothing to compare.
+	// Read once: a run works in one folder from start to finish, and
+	// ActivateTab refuses to move it while a run is live.
+	workDir := w.WorkDir()
 	var review *changes.Snapshot
-	if changes.IsRepo(ctx, w.workDir) {
-		if snap, snapErr := changes.Take(ctx, w.workDir); snapErr == nil {
+	if changes.IsRepo(ctx, workDir) {
+		if snap, snapErr := changes.Take(ctx, workDir); snapErr == nil {
 			review = snap
 		}
 	}
@@ -415,8 +452,21 @@ func (w *Workbench) moveCard(cardID string, status board.Status, note string) {
 	w.publishBoard()
 }
 
+// publishBoard sends the board to the frontend, and to the workspace.
+//
+// The two are deliberately in this order and not the same thing. The local
+// frontend gets the whole board because it is small and cannot then drift;
+// the workspace gets only what changed, as ops, because that goes to a log
+// every replica has to merge. Neither waits for the other, and neither waits
+// for the network.
+//
+// This is the one place the second stage attaches to the run, which is why
+// nothing else in this file knows a workspace exists. With none joined the
+// cost is a single atomic load inside shareBoard.
 func (w *Workbench) publishBoard() {
-	w.emit(EventBoardUpdated, BoardEvent{Cards: w.board.Snapshot()})
+	cards := w.board.Snapshot()
+	w.emit(EventBoardUpdated, BoardEvent{Cards: cards})
+	w.shareBoard(cards)
 }
 
 // Cancel stops the run with the given ID. Cancelling an unknown or already
@@ -508,7 +558,7 @@ func (w *Workbench) plan(ctx context.Context, r *run, lead agents.Agent) (Plan, 
 		Prompt:             planPrompt(r.prompt, r.followUp, w.board.Snapshot()),
 		Model:              model,
 		AppendSystemPrompt: w.systemPrompt(lead),
-		WorkDir:            w.workDir,
+		WorkDir:            w.WorkDir(),
 		JSONSchema:         schema,
 		// Routing is a judgement call on the text of the task, not an
 		// investigation, and it is not the turn that does the work -- so it
@@ -802,7 +852,7 @@ func (w *Workbench) streamStep(
 		Prompt:             prompt,
 		Model:              agent.Model,
 		AppendSystemPrompt: w.systemPrompt(agent),
-		WorkDir:            w.workDir,
+		WorkDir:            w.WorkDir(),
 		AllowedTools:       agent.AllowedTools,
 		PermissionMode:     w.permissionFor(agent),
 		Resume:             resume,

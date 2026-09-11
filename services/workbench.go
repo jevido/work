@@ -5,8 +5,10 @@
 package services
 
 import (
+	"context"
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 
@@ -20,6 +22,18 @@ import (
 // maxPromptBytes bounds what the frontend may send. The webview is untrusted
 // input like any other client.
 const maxPromptBytes = 128 << 10 // 128 KiB
+
+// maxTabNameBytes bounds a tab label. The server caps identifiers, not
+// labels, so this is the app's own limit: a name is read off a tab strip.
+const maxTabNameBytes = 200
+
+// joinTimeout bounds the round trips that create or join a workspace.
+//
+// These are the only workspace calls the user waits on -- everything after
+// them happens on the sync loop -- so the deadline is generous enough for a
+// slow link and short enough that a wrong server address is a message rather
+// than a spinner that never resolves.
+const joinTimeout = 30 * time.Second
 
 // WorkbenchService exposes the agent workbench to the frontend.
 type WorkbenchService struct {
@@ -199,4 +213,170 @@ func (s *WorkbenchService) Cancel(runID string) error {
 		return errors.New("runId is empty")
 	}
 	return s.wb.Cancel(runID)
+}
+
+// ServiceStartup hands the workbench the app's lifetime, so a joined
+// workspace's push/pull loop ends with the window rather than having to be
+// shut down separately -- the same arrangement UpdateService uses for its
+// poll.
+//
+// With no workspace joined this does nothing at all, which is the point:
+// every line below is inert until someone joins one, and Work behaves exactly
+// as it always has.
+func (s *WorkbenchService) ServiceStartup(ctx context.Context, _ application.ServiceOptions) error {
+	s.wb.StartSync(ctx)
+	return nil
+}
+
+// Workspaces reports whether this build can talk to a workspace server at
+// all. The UI hides the workspace controls when it cannot, rather than
+// offering buttons whose only outcome is an error.
+func (s *WorkbenchService) Workspaces() bool {
+	return s.wb.HasOps()
+}
+
+// Workspace returns the joined workspace, or null on a machine that has not
+// joined one. Null is the ordinary case.
+//
+// The keys are not on it. Asking for those is WorkspaceKeys, so a credential
+// never rides along on a payload the frontend fetches as a matter of course.
+func (s *WorkbenchService) Workspace() *workbench.WorkspaceView {
+	return s.wb.Workspace()
+}
+
+// WorkspaceKeys returns the workspace's write key, and its read key if this
+// machine is the one that created it. This is what an invitation is made of.
+func (s *WorkbenchService) WorkspaceKeys() (workbench.Keys, error) {
+	return s.wb.Keys()
+}
+
+// CreateWorkspace makes a workspace on a server and joins it.
+//
+// signupToken is the server's own signup token, not a workspace key: creating
+// a workspace is gated by the server operator, and there is no workspace to
+// authenticate against yet.
+func (s *WorkbenchService) CreateWorkspace(serverURL, signupToken, name string) (*workbench.WorkspaceView, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), joinTimeout)
+	defer cancel()
+	return s.wb.CreateWorkspace(ctx, serverURL, signupToken, name)
+}
+
+// JoinWorkspace joins an existing workspace with its write key. The key
+// identifies the workspace, so there is no ID to supply.
+func (s *WorkbenchService) JoinWorkspace(serverURL, writeKey string) (*workbench.WorkspaceView, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), joinTimeout)
+	defer cancel()
+	return s.wb.JoinWorkspace(ctx, serverURL, writeKey)
+}
+
+// LeaveWorkspace stops syncing and returns Work to running purely locally.
+// Ops that never reached the server are kept, not discarded.
+func (s *WorkbenchService) LeaveWorkspace() error {
+	return s.wb.LeaveWorkspace()
+}
+
+// SyncStatus is where the second stage stands: online, syncing, offline or
+// rejected, how many ops are waiting, and how far behind the server this
+// machine is. Joined is false when no workspace has been joined.
+//
+// The frontend does not need to poll this -- workspace:sync carries the same
+// value whenever it changes. This is for the first paint.
+func (s *WorkbenchService) SyncStatus() workbench.Status {
+	return s.wb.SyncStatus()
+}
+
+// SyncNow pushes and pulls immediately instead of waiting for the next poll.
+// It is the retry behind an offline indicator, and the way back from a
+// rejected key once it has been replaced.
+func (s *WorkbenchService) SyncNow() {
+	s.wb.SyncNow()
+}
+
+// WorkspaceDocument is the merged workspace: every tab, and every card from
+// every machine that has joined.
+//
+// Fetched rather than pushed, because it changes when someone edits something
+// and not on the poll. Call it when the cursor on a workspace:sync event
+// moves.
+func (s *WorkbenchService) WorkspaceDocument() workbench.Document {
+	return s.wb.WorkspaceDocument()
+}
+
+// WorkspaceCards is one tab's cards as the whole workspace sees them. Board
+// remains this machine's own board; this is everyone's.
+func (s *WorkbenchService) WorkspaceCards(tabID string) []board.Card {
+	return s.wb.WorkspaceCards(tabID)
+}
+
+// NewTab creates a workspace tab. It has no folder yet -- see BindTabFolder.
+func (s *WorkbenchService) NewTab(name string) (workbench.TabView, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return workbench.TabView{}, errors.New("name is empty")
+	}
+	if len(name) > maxTabNameBytes {
+		return workbench.TabView{}, errors.New("name is too long")
+	}
+	return s.wb.NewTab(name)
+}
+
+// ActivateTab makes a tab the one agents run in, which means running them in
+// the folder this machine bound to it. Refused while a run is in flight.
+func (s *WorkbenchService) ActivateTab(tabID string) error {
+	tabID = strings.TrimSpace(tabID)
+	if tabID == "" {
+		return errors.New("tabId is empty")
+	}
+	return s.wb.ActivateTab(tabID)
+}
+
+// CloseTab retires a tab for everyone in the workspace.
+func (s *WorkbenchService) CloseTab(tabID string) error {
+	tabID = strings.TrimSpace(tabID)
+	if tabID == "" {
+		return errors.New("tabId is empty")
+	}
+	return s.wb.CloseTab(tabID)
+}
+
+// BindTabFolder asks the user which project on this machine a tab means,
+// using the platform's own folder picker, and remembers the answer.
+//
+// The folder is per-machine and never leaves it: the workspace knows the tab,
+// not where anybody keeps their code. A cancelled dialog returns an empty
+// path and no error, exactly as SelectConfigFolder does.
+func (s *WorkbenchService) BindTabFolder(tabID string) (string, error) {
+	tabID = strings.TrimSpace(tabID)
+	if tabID == "" {
+		return "", errors.New("tabId is empty")
+	}
+
+	app := application.Get()
+	if app == nil {
+		return "", errors.New("no application")
+	}
+
+	dialog := app.Dialog.OpenFile().
+		SetTitle("Choose the project folder for this tab").
+		CanChooseDirectories(true).
+		CanChooseFiles(false).
+		CanCreateDirectories(false).
+		SetDirectory(s.wb.WorkDir())
+	if window := app.Window.Current(); window != nil {
+		dialog = dialog.AttachToWindow(window)
+	}
+
+	path, err := dialog.PromptForSingleSelection()
+	if err != nil {
+		return "", err
+	}
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", nil
+	}
+
+	if err := s.wb.BindTab(tabID, path); err != nil {
+		return "", err
+	}
+	return path, nil
 }
