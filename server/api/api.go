@@ -56,6 +56,9 @@ type API struct {
 	// it exists for.
 	signupToken string
 	limiter     *limiter
+	// documents is the merged state behind GET /v1/document, one per workspace
+	// and bounded, so that a viewer polling does not replay the log each time.
+	documents *documents
 }
 
 // New builds the API. An empty signupToken disables workspace creation.
@@ -65,6 +68,7 @@ func New(backing Store, signupToken string, logger *slog.Logger) *API {
 		logger:      logger,
 		signupToken: signupToken,
 		limiter:     newLimiter(),
+		documents:   newDocuments(MaxCachedDocuments),
 	}
 }
 
@@ -89,6 +93,10 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("POST /v1/ops", a.authed(store.AccessWrite, a.appendOps))
 	mux.Handle("GET /v1/ops", a.authed(store.AccessRead, a.readLog))
 	mux.Handle("/v1/ops", a.plain(methodNotAllowed))
+
+	// Read access, because the read-only viewer is what this is for.
+	mux.Handle("GET /v1/document", a.authed(store.AccessRead, a.document))
+	mux.Handle("/v1/document", a.plain(methodNotAllowed))
 
 	mux.Handle("/", a.plain(func(http.ResponseWriter, *http.Request) error {
 		return apiError{http.StatusNotFound, "not_found", "no such endpoint"}

@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 //go:embed migrations/*.sql
@@ -29,20 +30,23 @@ const migrationLock = 8_251_749_006_331
 // deploying is copying one file and there is no way to run a version of the
 // server against a schema it was not built for.
 func Migrate(ctx context.Context, s *Store, logger *slog.Logger) error {
-	files, err := pending(ctx, s)
-	if err != nil {
-		return err
-	}
-	if len(files) == 0 {
-		return nil
-	}
-
 	conn, err := s.pool.Acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("acquiring a connection to migrate on: %w", err)
 	}
 	defer conn.Release()
 
+	// The lock is taken before anything is read, and before anything is
+	// created, because the first thing pending does is create the table it
+	// then reads. CREATE TABLE IF NOT EXISTS is not atomic in Postgres: two
+	// sessions can both find the table absent and both try to make it, and one
+	// of them dies on pg_type_typname_nsp_index rather than getting the "if not
+	// exists" it asked for. That is two instances of this server starting
+	// together, which is every rolling deploy.
+	//
+	// It costs one lock round-trip on a start with nothing to do. That is a
+	// startup, once, against a schema check that already costs a query.
+	//
 	// The lock is held on one connection for the whole run and released by
 	// unlocking rather than by returning it to the pool, because a pooled
 	// connection can outlive this function.
@@ -55,10 +59,7 @@ func Migrate(ctx context.Context, s *Store, logger *slog.Logger) error {
 		}
 	}()
 
-	// Re-read now the lock is held: another instance may have applied
-	// everything between the first read and here, and applying a migration
-	// twice is worse than starting a moment later.
-	files, err = pending(ctx, s)
+	files, err := pending(ctx, conn)
 	if err != nil {
 		return err
 	}
@@ -96,8 +97,11 @@ func Migrate(ctx context.Context, s *Store, logger *slog.Logger) error {
 }
 
 // pending lists the migration files not yet recorded as applied, in order.
-func pending(ctx context.Context, s *Store) ([]string, error) {
-	_, err := s.pool.Exec(ctx, `
+//
+// It takes the connection the migration lock is held on rather than the pool,
+// so that it cannot run before the caller has taken that lock.
+func pending(ctx context.Context, conn *pgxpool.Conn) ([]string, error) {
+	_, err := conn.Exec(ctx, `
 		CREATE TABLE IF NOT EXISTS schema_migrations (
 			version    int         PRIMARY KEY,
 			name       text        NOT NULL,
@@ -107,7 +111,7 @@ func pending(ctx context.Context, s *Store) ([]string, error) {
 		return nil, fmt.Errorf("creating the migration table: %w", err)
 	}
 
-	rows, err := s.pool.Query(ctx, `SELECT version FROM schema_migrations`)
+	rows, err := conn.Query(ctx, `SELECT version FROM schema_migrations`)
 	if err != nil {
 		return nil, fmt.Errorf("reading applied migrations: %w", err)
 	}

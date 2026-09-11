@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -192,4 +194,55 @@ func TestVersionOfRejectsMisnamedMigrations(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestConcurrentMigrateFromEmpty is the rolling deploy: two instances of the
+// server start against a database that has never seen it, at the same moment.
+//
+// This failed before the advisory lock moved ahead of the first statement.
+// CREATE TABLE IF NOT EXISTS is not atomic in Postgres — both sessions find
+// schema_migrations absent, both create it, and the loser dies on
+// pg_type_typname_nsp_index rather than getting the "if not exists" it asked
+// for. Taking the lock afterwards was too late, because the table that records
+// what has been applied is itself the first thing being created.
+func TestConcurrentMigrateFromEmpty(t *testing.T) {
+	s := freshSchema(t)
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	const instances = 6
+	start := make(chan struct{})
+	failures := make(chan error, instances)
+
+	var wg sync.WaitGroup
+	for range instances {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if err := Migrate(context.Background(), s, quiet); err != nil {
+				failures <- err
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(failures)
+
+	for err := range failures {
+		t.Errorf("concurrent migrate: %v", err)
+	}
+
+	// One row per migration, not one per instance that tried.
+	var applied, files int
+	if err := s.pool.QueryRow(t.Context(), `SELECT count(*) FROM schema_migrations`).Scan(&applied); err != nil {
+		t.Fatalf("counting applied migrations: %v", err)
+	}
+	entries, err := fs.ReadDir(migrations, "migrations")
+	if err != nil {
+		t.Fatalf("listing migrations: %v", err)
+	}
+	files = len(entries)
+	if applied != files {
+		t.Errorf("%d migrations recorded, want %d: an instance applied one twice", applied, files)
+	}
 }

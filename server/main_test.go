@@ -248,6 +248,79 @@ func TestEndToEnd(t *testing.T) {
 			t.Errorf("detached = %v, want nothing adrift", state.Detached())
 		}
 	})
+
+	t.Run("the hosted merge equals the merge the client just did", func(t *testing.T) {
+		// This is the only claim GET /v1/document makes: that a consumer which
+		// cannot run internal/ops gets what it would have got if it could. The
+		// state above was merged here, from the log this server handed back;
+		// the document below was merged inside the server, from the rows in
+		// Postgres. They have to be the same bytes.
+		body := reader.do(http.MethodGet, "/v1/document", http.StatusOK, nil)
+
+		detached := state.Detached()
+		if detached == nil {
+			detached = []ops.Node{}
+		}
+		want, err := json.Marshal(map[string]any{
+			"head":     len(log),
+			"tree":     state.Tree(),
+			"detached": detached,
+		})
+		if err != nil {
+			t.Fatalf("encoding the locally merged document: %v", err)
+		}
+		got, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("re-encoding the served document: %v", err)
+		}
+		// Both sides go back through encoding/json so that the comparison is
+		// about the document and not about key order.
+		var canonical any
+		remarshal(t, json.RawMessage(want), &canonical)
+		wantCanonical, err := json.Marshal(canonical)
+		if err != nil {
+			t.Fatalf("canonicalising: %v", err)
+		}
+		if string(got) != string(wantCanonical) {
+			t.Errorf("the server merged something else\n served %s\n local  %s", got, wantCanonical)
+		}
+	})
+
+	t.Run("an unchanged document answers 304 to its own ETag", func(t *testing.T) {
+		first := reader.raw(http.MethodGet, "/v1/document", "")
+		tag := first.Header.Get("ETag")
+		first.Body.Close()
+		if tag == "" {
+			t.Fatal("no ETag on the document")
+		}
+		again := reader.raw(http.MethodGet, "/v1/document", tag)
+		defer again.Body.Close()
+		if again.StatusCode != http.StatusNotModified {
+			t.Errorf("status = %d, want 304", again.StatusCode)
+		}
+	})
+}
+
+// raw makes a request and hands back the response undecoded, for the one
+// endpoint whose interesting answer has no body.
+func (c *client) raw(method, path, ifNoneMatch string) *http.Response {
+	c.t.Helper()
+
+	req, err := http.NewRequestWithContext(c.t.Context(), method, c.url+path, nil)
+	if err != nil {
+		c.t.Fatalf("building request: %v", err)
+	}
+	if c.key != "" {
+		req.Header.Set("Authorization", "Bearer "+c.key)
+	}
+	if ifNoneMatch != "" {
+		req.Header.Set("If-None-Match", ifNoneMatch)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		c.t.Fatalf("%s %s: %v", method, path, err)
+	}
+	return resp
 }
 
 func TestHealthNeedsTheDatabase(t *testing.T) {

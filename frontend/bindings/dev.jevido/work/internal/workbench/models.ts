@@ -10,6 +10,9 @@ import * as board$0 from "../board/models.js";
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
 import * as changes$0 from "../changes/models.js";
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
+import * as ops$0 from "../ops/models.js";
 
 /**
  * AgentEvent is the payload for every agent:* event.
@@ -188,6 +191,42 @@ export interface ClaudeEvent {
 }
 
 /**
+ * Document is the merged workspace as the frontend sees it.
+ * 
+ * Detached is not an error case to hide. It is what an eventually consistent
+ * tree looks like while it converges -- and, after concurrent moves, sometimes
+ * once it has. A viewer that drops those nodes is showing an incomplete
+ * workspace, so they travel separately and get shown.
+ */
+export interface Document {
+    "tree": ops$0.TreeNode[] | null;
+    "detached": ops$0.Node[] | null;
+
+    /**
+     * Cursor is the highest sequence merged here.
+     */
+    "cursor": number;
+}
+
+/**
+ * Keys are a workspace's credentials, handed over only when asked for.
+ */
+export interface Keys {
+    /**
+     * WriteKey can append ops and read the log.
+     */
+    "writeKey"?: string;
+
+    /**
+     * ReadKey can only read, and is what goes into the web viewer. It is
+     * empty on a machine that joined with a write key rather than creating
+     * the workspace: the server hands both out once and cannot show them
+     * again.
+     */
+    "readKey"?: string;
+}
+
+/**
  * Phase says which part of a run a task belongs to. The console groups output
  * by phase so a delegated run reads as a sequence rather than an interleaved
  * mess.
@@ -298,6 +337,74 @@ export interface RunEvent {
 }
 
 /**
+ * Status is what the UI needs to draw the workspace indicator.
+ */
+export interface Status {
+    /**
+     * Joined is false when no workspace has been joined, in which case every
+     * other field is zero and Work behaves exactly as it always has.
+     */
+    "joined": boolean;
+
+    /**
+     * State is one of SyncOffline, SyncSyncing, SyncOnline, SyncRejected.
+     */
+    "state"?: string;
+
+    /**
+     * Pending is how many ops have not reached the server.
+     */
+    "pending": number;
+
+    /**
+     * Dropped is how many ops were discarded because the outbox hit its cap.
+     * Non-zero means this machine's history has a hole in it.
+     */
+    "dropped"?: number;
+
+    /**
+     * Cursor is the highest sequence merged here and Head the highest the
+     * server holds. Sequences are gapless, so Head-Cursor is exactly how many
+     * ops behind this machine is -- not an estimate.
+     */
+    "cursor": number;
+    "head": number;
+
+    /**
+     * Error is the last sync failure, or empty. Being offline is a normal
+     * condition rather than an alarm; the text explains it, nothing more.
+     */
+    "error"?: string;
+}
+
+/**
+ * SyncEvent is the payload for workspace:sync.
+ */
+export interface SyncEvent {
+    "status": Status;
+}
+
+/**
+ * TabView is one tab and this machine's binding for it.
+ */
+export interface TabView {
+    "id": string;
+    "name"?: string;
+
+    /**
+     * Dir is this machine's folder for the tab, empty when unbound.
+     */
+    "dir"?: string;
+
+    /**
+     * Bound is false when the tab has no folder here yet, or when the folder
+     * it had has since gone. Either way the answer is the same: the tab
+     * cannot run anything until someone points it at a project.
+     */
+    "bound": boolean;
+}
+
+/**
  * Task identifies the work started by one Submit call.
  */
 export interface Task {
@@ -321,4 +428,37 @@ export interface Task {
      * Routed is true when Anton will decide who does the work.
      */
     "routed": boolean;
+}
+
+/**
+ * WorkspaceEvent is the payload for workspace:changed.
+ */
+export interface WorkspaceEvent {
+    /**
+     * Workspace is the workspace as this machine now sees it, or nil after
+     * leaving one.
+     */
+    "workspace": WorkspaceView | null;
+
+    /**
+     * Status is where sync stands, so a join does not need a second round
+     * trip to draw the indicator.
+     */
+    "status": Status;
+}
+
+/**
+ * WorkspaceView is the workspace as the frontend is allowed to see it.
+ * 
+ * It is not config.Workspace: that struct holds the keys, and a key is the one
+ * thing here that must not be handed out with every routine status payload.
+ * Whoever is inviting a colleague asks for one by name; see Workbench.Keys.
+ */
+export interface WorkspaceView {
+    "serverUrl": string;
+    "id": string;
+    "name"?: string;
+    "actor"?: string;
+    "tabs": TabView[] | null;
+    "activeTab"?: string;
 }

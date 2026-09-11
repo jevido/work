@@ -33,6 +33,8 @@ declare module "@wailsio/runtime" {
             "run:plan": workbench$0.RunEvent;
             "run:started": workbench$0.RunEvent;
             "update:available": update$0.AvailableEvent;
+            "workspace:changed": workbench$0.WorkspaceEvent;
+            "workspace:sync": workbench$0.SyncEvent;
         }
     }
 }

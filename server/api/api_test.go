@@ -127,7 +127,7 @@ func TestRoutingFailures(t *testing.T) {
 		expectStatus(t, call(t, srv, http.MethodGet, "/v1/nope", "", nil), http.StatusNotFound, "not_found")
 	})
 	t.Run("the wrong method is a JSON 405", func(t *testing.T) {
-		for _, path := range []string{"/v1/health", "/v1/workspaces", "/v1/workspace", "/v1/ops"} {
+		for _, path := range []string{"/v1/health", "/v1/workspaces", "/v1/workspace", "/v1/ops", "/v1/document"} {
 			resp := call(t, srv, http.MethodDelete, path, "", nil)
 			expectStatus(t, resp, http.StatusMethodNotAllowed, "method_not_allowed")
 		}

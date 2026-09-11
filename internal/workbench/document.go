@@ -53,14 +53,24 @@ func cardNode(actor, cardID string) string {
 	return "c_" + actor + "_" + cardID
 }
 
-// position sorts a card among its siblings.
+// tabTail is the greatest sort key among a tab's live children, or "" when it
+// has none -- which is where the next card appended to that tab goes.
 //
-// Positions are compared as strings by the merge, so a plain decimal index
-// would order card 10 before card 2. Zero-padding fixes that and keeps the
-// key insertable: a client that later needs a card between two neighbours can
-// append to the lower one's key rather than renumbering the board.
-func position(i int) string {
-	return fmt.Sprintf("%06d", i)
+// The greatest rather than the last, because this reads the flat node set and
+// that is not in sibling order. Taking the maximum costs one comparison per
+// node and needs no sort.
+//
+// Every child counts, including cards belonging to other machines. A new card
+// goes after everything already in the tab, not after the last one this
+// machine happens to have made.
+func tabTail(s *Sync, tab string) string {
+	var tail string
+	for _, node := range s.liveNodes() {
+		if node.Parent == tab && node.Position > tail {
+			tail = node.Position
+		}
+	}
+	return tail
 }
 
 // boardOps is the diff between what this machine's board says and what the
@@ -140,7 +150,23 @@ func planBoard(s *Sync, tab string, cards []board.Card) ([]ops.Op, error) {
 
 	live := make(map[string]struct{}, len(cards))
 
-	for i, card := range cards {
+	// Where the next new card goes. A card's sort key is minted once, when the
+	// card is created, and is never recomputed from its index afterwards --
+	// see the comment on the move below for what that buys.
+	//
+	// tail is resolved at most once per publish, and only if there is actually
+	// a card to place. Most publishes move one card between columns and create
+	// nothing, and those never walk the node set at all.
+	tail, resolved := "", false
+	nextPosition := func() string {
+		if !resolved {
+			tail, resolved = tabTail(s, tab), true
+		}
+		tail = between(tail, "")
+		return tail
+	}
+
+	for _, card := range cards {
 		id := cardNode(s.actor, card.ID)
 		live[id] = struct{}{}
 
@@ -174,7 +200,7 @@ func planBoard(s *Sync, tab string, cards []board.Card) ([]ops.Op, error) {
 				Kind:     ops.KindCreateNode,
 				Node:     id,
 				Parent:   tab,
-				Position: position(i),
+				Position: nextPosition(),
 				Fields:   fields,
 			})
 			continue
@@ -192,12 +218,29 @@ func planBoard(s *Sync, tab string, cards []board.Card) ([]ops.Op, error) {
 		if len(changed) > 0 {
 			out = append(out, ops.Op{Kind: ops.KindSetFields, Node: id, Fields: changed})
 		}
-		if node.Parent != tab || node.Position != position(i) {
+		// An existing card keeps the key it was created with. The board is
+		// append-only -- board.Add appends, and nothing else reorders the
+		// slice -- so a card's index never moves, and recomputing a key from
+		// that index could only ever produce one of two things: the key the
+		// card already has, or a stomp on somebody else's reorder.
+		//
+		// The second is the one that mattered. Positions are shared: a
+		// colleague, or the outline, may move one of this machine's cards
+		// within the tab. Deriving the key from the local board index made
+		// this machine the authority on sibling order, so the next publish --
+		// a status change, a card added, anything at all -- would quietly move
+		// the card back, and emit a move-node per following sibling doing it.
+		//
+		// A different tab is a real move, and the card is appended to the new
+		// tab rather than carrying a key that means nothing among its new
+		// siblings. That happens when the active tab changes with cards still
+		// on the board.
+		if node.Parent != tab {
 			out = append(out, ops.Op{
 				Kind:     ops.KindMoveNode,
 				Node:     id,
 				Parent:   tab,
-				Position: position(i),
+				Position: nextPosition(),
 			})
 		}
 	}

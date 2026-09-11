@@ -14,7 +14,14 @@ export type {
     BoardUpdate,
     ChangesEvent,
     ClaudeEvent,
+    Document,
+    Keys,
     PlanStep,
     RunEvent,
-    Task
+    Status,
+    SyncEvent,
+    TabView,
+    Task,
+    WorkspaceEvent,
+    WorkspaceView
 } from "./models.js";

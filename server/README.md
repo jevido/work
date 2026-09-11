@@ -1,7 +1,9 @@
 # Work sync server
 
 The server behind `work.jevido.app`. It stores an append-only log of operations
-per workspace and hands that log back in order. That is the whole job.
+per workspace and hands that log back in order. That is almost the whole job:
+it will also merge the log for you and hand back the resulting document, for the
+one client that cannot merge it itself.
 
 It holds **no Anthropic credentials and never runs `claude`**. Agents run on the
 desktop, against your own signed-in CLI; what reaches the server is the result —
@@ -236,13 +238,115 @@ there is no cursor type to carry around — the sequence number is the cursor.
 `GET /v1/ops?since=<your head>` on an interval; it is a single indexed query
 that returns an empty list when there is nothing new.
 
+### `GET /v1/document`
+
+Read or write key. The whole log, merged, as a document.
+
+This is the only endpoint that materialises anything, and it exists for the one
+consumer that cannot merge for itself: the web viewer is a browser page and
+`internal/ops` is Go. *Applying the log*, below, says why that is an exception
+rather than the new normal.
+
+```json
+{
+  "head": 4128,
+  "tree": [
+    {
+      "id": "n_7f3c",
+      "position": "m",
+      "fields": { "title": "Ship the sync server", "status": "doing" },
+      "children": [
+        {
+          "id": "n_91ab",
+          "parent": "n_7f3c",
+          "position": "a",
+          "fields": { "title": "Retry the first connect" }
+        }
+      ]
+    }
+  ],
+  "detached": [
+    {
+      "id": "n_4d0e",
+      "parent": "n_1b55",
+      "position": "c",
+      "fields": { "title": "Its parent was deleted from another replica" }
+    }
+  ]
+}
+```
+
+| Field | Means |
+| --- | --- |
+| `head` | The sequence number this document is merged through. The same number `GET /v1/workspace` reports, so one request tells a poller both what the document is and whether it is current. |
+| `tree` | The live nodes reachable from the roots, each with its `children` nested inside it, siblings in position order. |
+| `detached` | The live nodes `tree` cannot reach, ordered by `id`. Flat — never nested, even when one detached node is another's parent. |
+
+`tree` and `detached` are always arrays, never `null`. A node appears in exactly
+one of them.
+
+A node carries `id` always, and `parent`, `position` and `fields` when they are
+set. `parent` is absent on a root. This is the merge's own output shape, so the
+viewer and the desktop app render the same structure from the same code.
+
+**`detached` is not an error case and has to be rendered.** A node lands there
+when its parent is a tombstone or sits under one, when its parent is a node no
+op has mentioned yet, or when concurrent moves put it in a cycle. The first two
+are what an eventually-consistent tree looks like mid-convergence and clear up
+when the missing op arrives; the third can outlive convergence. A viewer that
+drops `detached` is showing an incomplete workspace and cannot tell that it is.
+Showing it as a second list — "not filed" — is showing all of it.
+
+Tombstones are in neither list. There is no `deleted` field in this payload: a
+deleted node is absent, not marked. A viewer that needs to say *what* was
+deleted reads `GET /v1/ops` and merges for itself.
+
+#### Polling it
+
+The response carries a strong `ETag`. Send it back as `If-None-Match` and an
+unchanged document answers `304 Not Modified` with an empty body:
+
+```
+GET /v1/document HTTP/1.1
+Authorization: Bearer rk_8b4d2f6a0c9e7b5d3a1f8c6e4b2d0a9f
+If-None-Match: "ws_9c938701f37f5bae73592c4f27d7790b:4128"
+```
+
+`304` is the one response on this server without a JSON body. Every *error* is
+still the shape in the table above; `304` is not an error. The `ETag` is opaque
+— echo it, do not parse it, and do not derive one from `head`.
+
+Sending no `If-None-Match` always gets a `200` and the whole document, so a
+client that ignores this section is correct, only chattier.
+
+The server keeps each workspace's merged state between requests and advances it
+by the ops that arrived since, so a poll that finds nothing new is one indexed
+query returning no rows — not a replay of the log. Poll it on the same interval
+you would poll `GET /v1/ops`.
+
 ## Applying the log
 
 Ops are defined by the `dev.jevido/work/internal/ops` package, which is the one
-merge implementation shared by the desktop app and this server. The server
+merge implementation, shared by the desktop app and this server. Every consumer
+reaches the same state because every consumer runs that same code — there is no
+second implementation to disagree with it.
+
+An earlier version of this document drew the line differently: *the server
 stores and orders ops; it does not merge them and does not materialise a
-document. Every consumer replays the log through the same code and reaches the
-same state.
+document.* The first half still holds. `POST /v1/ops` and `GET /v1/ops` are the
+whole sync protocol, and they are all the desktop app uses — it merges locally
+and keeps working with this server unreachable, which is the reason the log,
+rather than a document, is what goes on the wire.
+
+The second half is no longer true, and `GET /v1/document` is where it stopped
+being true. The web viewer is a browser page; `internal/ops` is Go; a browser
+cannot run it. The only other way to show a document in a browser is a second
+merge implementation in TypeScript, and two merges that drift apart show two
+different documents for one log — a bug with no correct side and no way to see
+it from either. So the server hosts the merge for the client that cannot host
+it, and that endpoint is a convenience, not the protocol. The invariant that
+mattered survives intact: **one merge implementation.** What changed is that it
+can be reached over HTTP, not that there are two of it.
 
 **The log's order is not the merge order.** `seq` is arrival order at the
 server, which depends on who had network when. Convergence comes from the op's

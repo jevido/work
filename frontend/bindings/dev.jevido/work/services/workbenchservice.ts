@@ -28,6 +28,14 @@ import * as workbench$0 from "../internal/workbench/models.js";
 import * as $models from "./models.js";
 
 /**
+ * ActivateTab makes a tab the one agents run in, which means running them in
+ * the folder this machine bound to it. Refused while a run is in flight.
+ */
+export function ActivateTab(tabID: string): $CancellablePromise<void> {
+    return $Call.ByID(969308478, tabID);
+}
+
+/**
  * AgentProfile returns what one agent's folder says about them: the skills in
  * skills/, their PERSONALITY.md and the line Anton routes them on. The profile
  * view asks for this when it opens, rather than reading it out of the roster,
@@ -42,6 +50,18 @@ export function AgentProfile(agentID: string): $CancellablePromise<agents$0.Prof
  */
 export function Agents(): $CancellablePromise<workbench$0.AgentStatus[] | null> {
     return $Call.ByID(1687195856);
+}
+
+/**
+ * BindTabFolder asks the user which project on this machine a tab means,
+ * using the platform's own folder picker, and remembers the answer.
+ * 
+ * The folder is per-machine and never leaves it: the workspace knows the tab,
+ * not where anybody keeps their code. A cancelled dialog returns an empty
+ * path and no error, exactly as SelectConfigFolder does.
+ */
+export function BindTabFolder(tabID: string): $CancellablePromise<string> {
+    return $Call.ByID(2990789672, tabID);
 }
 
 /**
@@ -82,11 +102,52 @@ export function ClearConversation(): $CancellablePromise<void> {
 }
 
 /**
+ * CloseTab retires a tab for everyone in the workspace.
+ */
+export function CloseTab(tabID: string): $CancellablePromise<void> {
+    return $Call.ByID(451949873, tabID);
+}
+
+/**
+ * CreateWorkspace makes a workspace on a server and joins it.
+ * 
+ * signupToken is the server's own signup token, not a workspace key: creating
+ * a workspace is gated by the server operator, and there is no workspace to
+ * authenticate against yet.
+ */
+export function CreateWorkspace(serverURL: string, signupToken: string, name: string): $CancellablePromise<workbench$0.WorkspaceView | null> {
+    return $Call.ByID(137920851, serverURL, signupToken, name);
+}
+
+/**
  * GetConfigPath returns the folder Work loads agents from, or an empty string
  * if the user has not picked one yet. An empty result is the first-run signal.
  */
 export function GetConfigPath(): $CancellablePromise<string> {
     return $Call.ByID(4273611995);
+}
+
+/**
+ * JoinWorkspace joins an existing workspace with its write key. The key
+ * identifies the workspace, so there is no ID to supply.
+ */
+export function JoinWorkspace(serverURL: string, writeKey: string): $CancellablePromise<workbench$0.WorkspaceView | null> {
+    return $Call.ByID(1719684323, serverURL, writeKey);
+}
+
+/**
+ * LeaveWorkspace stops syncing and returns Work to running purely locally.
+ * Ops that never reached the server are kept, not discarded.
+ */
+export function LeaveWorkspace(): $CancellablePromise<void> {
+    return $Call.ByID(3221268550);
+}
+
+/**
+ * NewTab creates a workspace tab. It has no folder yet -- see BindTabFolder.
+ */
+export function NewTab(name: string): $CancellablePromise<workbench$0.TabView> {
+    return $Call.ByID(2023998847, name);
 }
 
 /**
@@ -140,4 +201,73 @@ export function SetPermissionMode(mode: string): $CancellablePromise<$models.Per
  */
 export function Submit(agentID: string, prompt: string): $CancellablePromise<workbench$0.Task> {
     return $Call.ByID(3576145318, agentID, prompt);
+}
+
+/**
+ * SyncNow pushes and pulls immediately instead of waiting for the next poll.
+ * It is the retry behind an offline indicator, and the way back from a
+ * rejected key once it has been replaced.
+ */
+export function SyncNow(): $CancellablePromise<void> {
+    return $Call.ByID(889870599);
+}
+
+/**
+ * SyncStatus is where the second stage stands: online, syncing, offline or
+ * rejected, how many ops are waiting, and how far behind the server this
+ * machine is. Joined is false when no workspace has been joined.
+ * 
+ * The frontend does not need to poll this -- workspace:sync carries the same
+ * value whenever it changes. This is for the first paint.
+ */
+export function SyncStatus(): $CancellablePromise<workbench$0.Status> {
+    return $Call.ByID(1767437727);
+}
+
+/**
+ * Workspace returns the joined workspace, or null on a machine that has not
+ * joined one. Null is the ordinary case.
+ * 
+ * The keys are not on it. Asking for those is WorkspaceKeys, so a credential
+ * never rides along on a payload the frontend fetches as a matter of course.
+ */
+export function Workspace(): $CancellablePromise<workbench$0.WorkspaceView | null> {
+    return $Call.ByID(1753161623);
+}
+
+/**
+ * WorkspaceCards is one tab's cards as the whole workspace sees them. Board
+ * remains this machine's own board; this is everyone's.
+ */
+export function WorkspaceCards(tabID: string): $CancellablePromise<board$0.Card[] | null> {
+    return $Call.ByID(4289137830, tabID);
+}
+
+/**
+ * WorkspaceDocument is the merged workspace: every tab, and every card from
+ * every machine that has joined.
+ * 
+ * Fetched rather than pushed, because it changes when someone edits something
+ * and not on the poll. Call it when the cursor on a workspace:sync event
+ * moves.
+ */
+export function WorkspaceDocument(): $CancellablePromise<workbench$0.Document> {
+    return $Call.ByID(2545762642);
+}
+
+/**
+ * WorkspaceKeys returns the workspace's write key, and its read key if this
+ * machine is the one that created it. This is what an invitation is made of.
+ */
+export function WorkspaceKeys(): $CancellablePromise<workbench$0.Keys> {
+    return $Call.ByID(857101543);
+}
+
+/**
+ * Workspaces reports whether this build can talk to a workspace server at
+ * all. The UI hides the workspace controls when it cannot, rather than
+ * offering buttons whose only outcome is an error.
+ */
+export function Workspaces(): $CancellablePromise<boolean> {
+    return $Call.ByID(1679766508);
 }

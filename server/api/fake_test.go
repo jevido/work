@@ -30,6 +30,15 @@ type fakeStore struct {
 	// appendErr is returned by the next Append, for testing error mapping.
 	appendErr error
 	created   int
+
+	// logSince records the `since` of every Log call, which is how the document
+	// tests show that a poll finding nothing new costs one query rather than a
+	// replay of the log.
+	logSince []int64
+	// phantomHead makes Log report a head with no rows behind it, which
+	// gaplessness says cannot happen and which the document catch-up has to
+	// refuse rather than serve as current.
+	phantomHead int64
 }
 
 func newFakeStore() *fakeStore {
@@ -157,6 +166,8 @@ func (f *fakeStore) Log(_ context.Context, workspaceID string, since int64, limi
 	if !ok {
 		return nil, 0, store.ErrNoWorkspace
 	}
+	f.logSince = append(f.logSince, since)
+
 	var out []store.Entry
 	for _, entry := range f.log[workspaceID] {
 		if entry.Seq > since {
@@ -166,7 +177,19 @@ func (f *fakeStore) Log(_ context.Context, workspaceID string, since int64, limi
 			break
 		}
 	}
+	if f.phantomHead != 0 {
+		return out, f.phantomHead, nil
+	}
 	return out, workspace.Head, nil
+}
+
+// logs returns the `since` of every Log call so far, and forgets them.
+func (f *fakeStore) logs() []int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	calls := f.logSince
+	f.logSince = nil
+	return calls
 }
 
 // errBroken stands in for anything the store fails at that a handler is not
