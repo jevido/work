@@ -169,14 +169,15 @@ tasks:
   sync:up:
     summary: Starts the local sync server and its Postgres
     desc: |
-      Brings up the dev half of docker-compose.yml: the sync server on
+      Brings up docker-compose.dev.yml: the sync server on
       http://localhost:8080 and Postgres on 127.0.0.1:5432, with a `work_test`
       database beside the dev one for `task test:server`.
 
       http://localhost:8080 is what to type into the desktop app's join
-      dialog, and the signup token is the word "dev". Nothing here is shared
-      with the deployment: the two production services in that file have no
-      profile and are Coolify's, these three are profiled `dev` and are not.
+      dialog, and the signup token is the word "dev". Nothing here is shared with the deployment. They are in
+      their own file because Coolify parses the one it deploys to work out
+      what the application is, and extra services in it were enough for it to
+      re-derive the domain and drop work.jevido.app off the proxy.
 
       The database is in tmpfs, so `task sync:down` is also how you reset it.
     cmds:
@@ -185,7 +186,7 @@ tasks:
       # services Coolify deploys -- with nothing to substitute for their
       # password. Naming this one starts it and its depends_on and nothing
       # else. See the comment in docker-compose.yml.
-      - docker compose --profile dev up -d --build server-dev
+      - docker compose -f docker-compose.dev.yml up -d --build server-dev
       - echo "sync server on http://localhost:8080 (signup token: dev)"
 
   sync:down:
@@ -194,12 +195,12 @@ tasks:
       # By name for the same reason, and `down` is enough to discard the
       # database: it lives in tmpfs, not in the named volume the deployment
       # uses.
-      - docker compose --profile dev down server-dev postgres-dev postgres-dev-init
+      - docker compose -f docker-compose.dev.yml down
 
   sync:logs:
     summary: Follows the local sync server's log
     cmds:
-      - docker compose --profile dev logs -f server-dev
+      - docker compose -f docker-compose.dev.yml logs -f server-dev
 
   test:server:
     summary: Runs the sync server's tests against the local Postgres
