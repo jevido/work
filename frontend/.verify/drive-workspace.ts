@@ -1122,6 +1122,97 @@ async function run() {
   V().endStream();
   await settle(8);
 
+  /* ---------------------------------------------------------------------- */
+  /* 4j. Links across branches, and regions                                 */
+  /* ---------------------------------------------------------------------- */
+
+  // A mindmap is not a tree. Until there is a canvas these are the only place a
+  // link is visible at all, so they are on the row.
+
+  pickMode("idea");
+  await settle(12);
+
+  // An outline with something in it. Earlier sections left this tab holding a
+  // single line, and a link needs two ends.
+  V().remote({
+    cursor: 900,
+    tree: [
+      {
+        id: "tab-a",
+        position: "m",
+        fields: { text: "Work" },
+        children: [
+          { id: "g1", position: "m", fields: { type: "idea", text: "a static handler" }, children: [] },
+          { id: "g2", position: "n", fields: { type: "idea", text: "where the files come from" }, children: [] },
+          { id: "g3", position: "o", fields: { type: "idea", text: "somewhere else entirely" }, children: [] },
+        ],
+      },
+    ],
+    detached: [],
+  });
+  await settle(25);
+
+  const outlineLines = () => lines().map((l) => l.value);
+  check("there are at least two lines to link", lines().length >= 2, outlineLines().join(" | "));
+
+  const linkButtons = () =>
+    $$<HTMLButtonElement>("button").filter((b) => b.textContent?.trim() === "Link");
+  check("a row offers to link", linkButtons().length > 0);
+
+  linkButtons()[0]?.click();
+  await settle(10);
+  const picker = () => $<HTMLInputElement>(".picker input");
+  check("linking opens a picker, not a box for an id", !!picker());
+
+  const candidate = () => $$<HTMLButtonElement>(".candidates button")[0] ?? null;
+  const candidateText = candidate()?.textContent?.trim() ?? "";
+  check("the picker lists lines to link to", !!candidate(), candidateText);
+  candidate()?.click();
+  await settle(15);
+
+  const relations = () => $$("p.relations").map((el) => el.textContent ?? "").join(" | ");
+  check("the link shows on the row", relations().includes("links to"), relations().slice(0, 100));
+  // Both ends, because one relationship should not look like two different
+  // things depending on which row you are reading.
+  check(
+    "and on the row at the other end",
+    $$("p.relations").length >= 2,
+    `${$$("p.relations").length} rows show a relation`,
+  );
+
+  const unlink = () => $$<HTMLButtonElement>("p.relations button").find((b) => b.textContent?.trim() === "\u00d7");
+  check("a link can be removed", !!unlink());
+  unlink()?.click();
+  await settle(15);
+  check("and removing it takes it off both rows", !relations().includes("links to"), relations().slice(0, 80));
+
+  // Regions. The caret has to be somewhere for a branch to be grouped.
+  lines()[0]?.focus();
+  await settle(8);
+  const groupButton = () =>
+    $$<HTMLButtonElement>("button").find((b) => b.textContent?.trim() === "Group branch") ?? null;
+  check("grouping a branch is offered when the caret is in one", !!groupButton());
+
+  groupButton()?.click();
+  await settle(8);
+  const namer = () => $<HTMLInputElement>(".grouping input");
+  check("a region is named when it is made, not afterwards", !!namer());
+  if (namer()) {
+    namer()!.value = "Networking";
+    namer()!.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle(6);
+    $<HTMLButtonElement>(".grouping button")?.click();
+    await settle(15);
+  }
+  check("the branch says which region it is in", relations().includes("Networking"), relations().slice(0, 100));
+
+  // And neither a link nor a region is an outline line.
+  check(
+    "links and regions are not lines in the outline",
+    !outlineLines().includes("Networking"),
+    outlineLines().join(" | ").slice(0, 90),
+  );
+
 }
 
 run()

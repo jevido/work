@@ -31,6 +31,13 @@ export interface OutlineContext {
   toggle(row: Row): void;
   promote(row: Row): void;
   remove(row: Row): void;
+  /**
+   * Announces something into the outline's live region.
+   *
+   * Linking and grouping change a shape rather than any text, so without this
+   * they are silent -- exactly the reason indent and fold are announced.
+   */
+  say(text: string): void;
 }
 
 /**
@@ -87,6 +94,7 @@ export class OutlineKeys {
       toggle: (row) => this.toggle(row),
       promote: (row) => this.promote(row),
       remove: (row) => this.remove(row),
+      say: (text) => this.say(text),
     };
   }
 

@@ -8,6 +8,35 @@
   const outline = getOutline();
   const ws = outline.workspace;
 
+  /** The row whose link picker is open, if any. One at a time. */
+  let linking = $state<string | null>(null);
+  let filter = $state("");
+
+  /**
+   * Which lines this one could be linked to.
+   *
+   * Everything but itself, what it already links to, and its own descendants.
+   * A link to a child says nothing the tree does not already say, and the
+   * whole point of an edge is that it goes where the tree cannot.
+   */
+  function candidates(id: string) {
+    const already = new Set(ws.linksOf(id).map((l) => l.other));
+    const under = new Set<string>();
+    const row = ws.rows.find((r) => r.node.id === id);
+    if (row) {
+      const walk = (node: { id: string; children: { id: string; children: any[] }[] }) => {
+        under.add(node.id);
+        for (const child of node.children) walk(child);
+      };
+      walk(row.node);
+    }
+    const needle = filter.trim().toLowerCase();
+    return ws.rows
+      .filter((r) => !under.has(r.node.id) && !already.has(r.node.id))
+      .filter((r) => needle === "" || labelOf(r.node, 200).toLowerCase().includes(needle))
+      .slice(0, 8);
+  }
+
   /**
    * The run of rows at this depth, and where each one's children start.
    *
@@ -151,6 +180,13 @@
             </button>
           {/if}
           <button
+            class="ghost"
+            onclick={() => (linking = linking === id ? null : id)}
+            title="Link this line to another one"
+          >
+            Link
+          </button>
+          <button
             class="ghost danger"
             onclick={() => outline.remove(row)}
             title="Delete this line and everything under it"
@@ -159,6 +195,79 @@
           </button>
         </div>
       </div>
+
+      <!--
+        What this line points at, and what it is grouped with. A mindmap is not
+        a tree, and until there is a canvas these are the only place a link is
+        visible at all -- so they are on the row rather than waiting for one.
+      -->
+      {#if ws.linksOf(id).length > 0 || ws.regionOf(id)}
+        <p class="relations">
+          {#if ws.regionOf(id)}
+            <span class="region">in {ws.regionOf(id)!.name || "an unnamed region"}</span>
+          {/if}
+          {#each ws.linksOf(id) as relation (relation.edge)}
+            <span class="link" class:dangling={relation.dangling}>
+              <!-- Following a link moves the caret, the way the plan's link
+                   back to an idea already does. -->
+              <button
+                class="follow"
+                disabled={relation.dangling}
+                onclick={() => outline.workspace.requestReveal(relation.other)}
+                title={relation.dangling ? "The line this pointed at is gone" : "Go to this line"}
+              >
+                {relation.dangling ? "was linked to" : "links to"} “{relation.text}”
+              </button>
+              <button
+                class="unlink"
+                onclick={() => ws.unlink(relation.edge)}
+                aria-label="Remove the link to {relation.text}"
+              >
+                ×
+              </button>
+            </span>
+          {/each}
+        </p>
+      {/if}
+
+      {#if linking === id}
+        <!--
+          A picker rather than a box to type an id into. An edge names an id and
+          a person cannot be asked for one.
+        -->
+        <div class="picker">
+          <label>
+            <span class="sr">Link “{ws.text(id)}” to</span>
+            <input
+              bind:value={filter}
+              placeholder="link to…"
+              {@attach (el: HTMLInputElement) => el.focus()}
+              onkeydown={(event) => {
+                if (event.key === "Escape") {
+                  linking = null;
+                  filter = "";
+                }
+              }}
+            />
+          </label>
+          <ul class="candidates">
+            {#each candidates(id) as candidate (candidate.node.id)}
+              <li>
+                <button
+                  onclick={() => {
+                    ws.link(id, candidate.node.id);
+                    outline.say(`Linked to ${labelOf(candidate.node, 40)}.`);
+                    linking = null;
+                    filter = "";
+                  }}
+                >
+                  {labelOf(candidate.node, 60)}
+                </button>
+              </li>
+            {/each}
+          </ul>
+        </div>
+      {/if}
 
       {#if to > from}
         <Self {rows} at={from} depth={depth + 1} />
@@ -393,5 +502,102 @@
 
   .changed .take:hover {
     color: var(--text, inherit);
+  }
+
+  .relations {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 0 0 2px 0;
+    font-size: 11px;
+    color: var(--muted);
+  }
+
+  .region {
+    padding: 0 6px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+  }
+
+  .link {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+  }
+
+  /* A link whose far end is gone is still worth showing -- it says what it
+     linked, which is more than the line it pointed at can say. */
+  .link.dangling {
+    opacity: 0.6;
+  }
+
+  .relations button {
+    padding: 0 4px;
+    border: none;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .relations button:hover:not(:disabled) {
+    color: var(--text, inherit);
+    text-decoration: underline;
+  }
+
+  .relations button:disabled {
+    cursor: default;
+  }
+
+  .picker {
+    margin: 0 0 4px 0;
+    padding: 4px 6px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--panel);
+  }
+
+  .picker input {
+    width: 100%;
+    padding: 2px 6px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-size: 12px;
+  }
+
+  .candidates {
+    margin: 4px 0 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .candidates button {
+    width: 100%;
+    padding: 2px 4px;
+    border: none;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-size: 12px;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .candidates button:hover {
+    background: var(--line);
+  }
+
+  .sr {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
 </style>

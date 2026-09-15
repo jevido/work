@@ -226,11 +226,13 @@ setTransport({
         return backend.document;
 
       case APPLY_EDITS:
-        // Go's answer is the merged document. Null is what a real one returns
-        // for a machine that has joined nothing, and it is also the honest
-        // default here: a harness that invented a merge would be testing its
-        // own merge rather than the app's handling of one.
-        return backend.document;
+        // Null, which is what a real one returns for a machine that has joined
+        // nothing -- and the only honest answer here, because this harness has
+        // no merge. Answering with the last document a test happened to set
+        // would make every edit adopt a document that does not contain it, and
+        // the edit would vanish a frame after it was made. Remote changes
+        // arrive through remote() instead, which is how they arrive for real.
+        return null;
 
       case WITHOUT_REVIEW:
         return backend.withoutReview;

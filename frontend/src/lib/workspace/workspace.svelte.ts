@@ -41,8 +41,15 @@ import {
   FIELD_STATUS,
   FIELD_TEXT,
   FIELD_TYPE,
+  FIELD_FROM,
+  FIELD_REGION,
+  FIELD_TO,
   MODES,
+  TYPE_EDGE,
+  TYPE_REGION,
   findInTree,
+  isEdge,
+  isRegion,
   isCollapsed,
   isTask,
   newId,
@@ -475,6 +482,147 @@ export class Workspace {
     this.#settle(id);
     if (!findInTree(this.tree, id) && !this.#detachedNode(id)) return false;
     return this.#emit(this.#replica.remove(id));
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Links and regions: the parts of a mindmap that are not a tree          */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * Every edge and region in this tab, indexed once.
+   *
+   * Derived rather than walked per row: an outline of four hundred lines each
+   * asking "what do I link to" would walk the tree four hundred times for an
+   * answer that is the same every time.
+   */
+  graph = $derived.by(() => {
+    const edges: { id: string; from: string; to: string }[] = [];
+    const regions = new Map<string, string>();
+    const regionOf = new Map<string, string>();
+    const text = new Map<string, string>();
+    const alive = new Set<string>();
+
+    const walk = (nodes: readonly TreeNode[]) => {
+      for (const node of nodes) {
+        alive.add(node.id);
+        text.set(node.id, textOf(node));
+        if (isEdge(node)) {
+          edges.push({
+            id: node.id,
+            from: String(node.fields[FIELD_FROM] ?? ""),
+            to: String(node.fields[FIELD_TO] ?? ""),
+          });
+        } else if (isRegion(node)) {
+          regions.set(node.id, textOf(node));
+        } else {
+          const region = node.fields[FIELD_REGION];
+          if (typeof region === "string" && region !== "") regionOf.set(node.id, region);
+        }
+        walk(node.children);
+      }
+    };
+    walk(this.tree);
+    return { edges, regions, regionOf, text, alive };
+  });
+
+  /**
+   * The links touching a line, in either direction.
+   *
+   * Either direction, because an edge between two branches is one relationship
+   * and both ends should show the same thing. Which end was drawn first is an
+   * accident of who made it.
+   */
+  linksOf(id: string): { edge: string; other: string; text: string; dangling: boolean }[] {
+    const g = this.graph;
+    const out: { edge: string; other: string; text: string; dangling: boolean }[] = [];
+    for (const edge of g.edges) {
+      const other = edge.from === id ? edge.to : edge.to === id ? edge.from : "";
+      if (!other || other === id) continue;
+      out.push({
+        edge: edge.id,
+        other,
+        // A dangling link still says what it linked, which is more than the
+        // line it pointed at can say for itself.
+        text: g.text.get(other) ?? "a line that is gone",
+        dangling: !g.alive.has(other),
+      });
+    }
+    return out;
+  }
+
+  /** The region a line is in, or null. A deleted region is no region at all. */
+  regionOf(id: string): { id: string; name: string } | null {
+    const region = this.graph.regionOf.get(id);
+    if (!region) return null;
+    const name = this.graph.regions.get(region);
+    if (name === undefined) return null;
+    return { id: region, name };
+  }
+
+  /** Links one line to another. Returns the edge, or null if it makes no sense. */
+  link(from: string, to: string): string | null {
+    if (!from || !to || from === to) return null;
+    // Twice is once. Making the same link again would put two edges between
+    // two lines, which says nothing the first one did not.
+    if (this.linksOf(from).some((l) => l.other === to)) return null;
+
+    const id = newId();
+    const created = this.#emit(
+      this.#replica.create(id, "", keyFor(atEnd(this.#siblingsOf(""))), {
+        [FIELD_TYPE]: TYPE_EDGE,
+        [FIELD_FROM]: from,
+        [FIELD_TO]: to,
+      }),
+    );
+    return created ? id : null;
+  }
+
+  /** Unlinking is deleting the edge, which already has an undo and a conflict. */
+  unlink(edge: string): boolean {
+    return this.#emit(this.#replica.remove(edge));
+  }
+
+  /**
+   * Gathers a line and everything under it into a named region.
+   *
+   * The branch, because the outline has no multi-select and "this branch" is
+   * what people mean by a region most of the time. Membership is written onto
+   * each member, so two people grouping different lines at once keep both.
+   */
+  group(root: string, name: string): string | null {
+    const row = this.rows.find((r) => r.node.id === root);
+    if (!row) return null;
+
+    const id = newId();
+    if (
+      !this.#emit(
+        this.#replica.create(id, "", keyFor(atEnd(this.#siblingsOf(""))), {
+          [FIELD_TYPE]: TYPE_REGION,
+          [FIELD_TEXT]: name,
+        }),
+      )
+    ) {
+      return null;
+    }
+
+    const branch: string[] = [];
+    const collect = (node: TreeNode) => {
+      branch.push(node.id);
+      for (const child of node.children) collect(child);
+    };
+    collect(row.node);
+    for (const member of branch) {
+      this.#emit(this.#replica.setFields(member, { [FIELD_REGION]: id }));
+    }
+    return id;
+  }
+
+  /** Takes a line out of its region. The region itself is left alone. */
+  ungroup(id: string): boolean {
+    if (!this.graph.regionOf.has(id)) return false;
+    // Emptied rather than removed: a field cannot be unset in this protocol,
+    // and empty is what "no region" reads as everywhere that asks.
+    return this.#emit(this.#replica.setFields(id, { [FIELD_REGION]: "" }));
   }
 
   /* ---------------------------------------------------------------------- */

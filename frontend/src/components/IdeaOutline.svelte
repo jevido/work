@@ -6,6 +6,22 @@
   import OutlineRow from "./OutlineRow.svelte";
   import AskClaude from "./AskClaude.svelte";
 
+  /** The name being typed for a new region, or null when none is. */
+  let grouping = $state<string | null>(null);
+
+  /**
+   * The last line the caret was in.
+   *
+   * Not keys.active, which is null by the time a button is clicked: blur fires
+   * before click, so reading the focused row from inside a click handler reads
+   * it after the caret has already left. The last line somebody was in is what
+   * they mean by "this branch" anyway.
+   */
+  let lastLine = $state<string | null>(null);
+  $effect(() => {
+    if (keys.active) lastLine = keys.active;
+  });
+
   let { workspace, restructuring }: { workspace: Workspace; restructuring: Restructuring } =
     $props();
 
@@ -76,6 +92,27 @@
     if (id) keys.focus(id, "start");
   }
 
+  /**
+   * Gathers the line the caret is on, and everything under it, into a region.
+   *
+   * The branch, because the outline has no multi-select and "this branch" is
+   * what people mean by a region most of the time. Say what it took, so nobody
+   * has to count rows to find out.
+   */
+  function group() {
+    const id = lastLine;
+    if (!id) return;
+    const name = (grouping ?? "").trim();
+    const region = workspace.group(id, name || "Unnamed region");
+    grouping = null;
+    if (!region) return;
+    const row = workspace.rows.find((r) => r.node.id === id);
+    keys.say(
+      `Grouped ${row ? labelOf(row.node, 40) : "this line"} and everything under it into ` +
+        `${name || "an unnamed region"}.`,
+    );
+  }
+
   function unfoldAll() {
     const opened = workspace.unfoldAll();
     keys.say(`Unfolded ${opened} ${opened === 1 ? "branch" : "branches"}.`);
@@ -94,12 +131,40 @@
       <kbd>Alt</kbd>+<kbd>↑↓</kbd> move · <kbd>Alt</kbd>+<kbd>←→</kbd> fold ·
       <kbd>Ctrl</kbd>+<kbd>Enter</kbd> to plan · <kbd>Esc</kbd> leave
     </p>
+    {#if lastLine}
+      <button class="ghost" onclick={() => (grouping = grouping === null ? "" : null)}>
+        Group branch
+      </button>
+    {/if}
     {#if workspace.foldedCount > 0}
       <button class="ghost" onclick={unfoldAll}>
         Unfold all ({workspace.foldedCount})
       </button>
     {/if}
   </header>
+
+  {#if grouping !== null}
+    <!-- A region wants a name, and asking for one afterwards is asking twice. -->
+    <form
+      class="grouping"
+      onsubmit={(event) => {
+        event.preventDefault();
+        group();
+      }}
+    >
+      <label>
+        <span class="sr">Name for this region</span>
+        <input
+          bind:value={grouping}
+          placeholder="name this region…"
+          {@attach (el: HTMLInputElement) => el.focus()}
+          onkeydown={(event) => event.key === "Escape" && (grouping = null)}
+        />
+      </label>
+      <button type="submit">Group</button>
+      <button type="button" onclick={() => (grouping = null)}>Cancel</button>
+    </form>
+  {/if}
 
   <AskClaude
     {workspace}
@@ -310,5 +375,42 @@
   :focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
+  }
+
+  .grouping {
+    display: flex;
+    gap: 6px;
+    padding: 4px 0;
+  }
+
+  .grouping input {
+    flex: 1;
+    min-width: 0;
+    padding: 3px 8px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--panel);
+    color: inherit;
+    font: inherit;
+    font-size: 12px;
+  }
+
+  .grouping button {
+    padding: 3px 10px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 11px;
+    cursor: pointer;
+  }
+
+  .sr {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
 </style>
