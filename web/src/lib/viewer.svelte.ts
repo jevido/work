@@ -1,29 +1,31 @@
 /**
  * Reading a workspace, and nothing else.
  *
- * The viewer speaks the read half of the server's API: metadata, and the op
- * log from a sequence number. It never posts. The one place that would be
- * tempting -- folding a branch, which is a field on a node -- is deliberately
- * kept as local view state instead, so there is no code path in this
- * directory that can write to somebody's workspace.
+ * The viewer speaks two endpoints and both are GETs: `/v1/workspace` for the
+ * name, and `/v1/document` for the document. It never posts. The one place
+ * that would be tempting -- folding a branch, which is a field on a node -- is
+ * deliberately kept as local view state instead, so there is no code path in
+ * this directory that can write to somebody's workspace.
+ *
+ * It used to fetch `/v1/ops` and merge the log itself. It does not any more:
+ * the merge is `internal/ops`, which is Go, and a second implementation of it
+ * in TypeScript is two documents for one log. The server runs the one merge
+ * and hands back the result.
  *
  * Live updates are polling, because the server has no websocket and no SSE.
- * See server/README.md.
+ * Polling is cheap because the document carries a strong ETag: an unchanged
+ * document answers 304 with no body, and nothing here re-renders.
  */
-import { State, type Node, type Op, type TreeNode } from "@doc/ops";
-import { outlineRows, planTasks, type Row } from "@doc/model";
+import { outlineNodes, planTasks, readDocument, type DocNode } from "./doc";
 
 /** What the viewer is doing, in the words the status line uses. */
 export type Status = "starting" | "loading" | "live" | "offline" | "rejected" | "no-key";
 
-/** How often to ask for more of the log once we have caught up. */
+/** How often to ask whether the document has moved. */
 const POLL_MS = 5000;
 
 const RETRY_MS = 3000;
 const RETRY_CAP_MS = 60_000;
-
-/** Pages read per pass, so a long history fills in visibly rather than at once. */
-const PAGES_PER_PASS = 10;
 
 export class Viewer {
   status = $state<Status>("starting");
@@ -40,26 +42,35 @@ export class Viewer {
   /**
    * The document.
    *
-   * `$state.raw` and replaced whole: the merge is not reactive, so the tree is
-   * rebuilt after each batch of ops and swapped in. Making it deeply reactive
-   * would turn reading a thousand-op history into thousands of signal writes
-   * for one paint.
+   * `$state.raw` and replaced whole: a document arrives as one JSON body and
+   * is swapped in as one value. Making it deeply reactive would turn one
+   * response into a signal write per node for one paint.
    */
-  tree = $state.raw<TreeNode[]>([]);
+  tree = $state.raw<DocNode[]>([]);
 
   /**
    * Lines the tree cannot reach, because the line they were under was deleted
-   * while somebody was still writing under it. Shown rather than dropped: a
-   * viewer that hides them looks complete and is not.
+   * while somebody was still writing under it -- or because the op that
+   * creates their parent has not arrived yet, or because concurrent moves put
+   * them in a cycle.
+   *
+   * Shown rather than dropped: a viewer that hides them looks complete and is
+   * not, and cannot tell that it is not. server/README.md is explicit about
+   * this being a state to render rather than an error.
    */
-  detached = $state.raw<Node[]>([]);
+  detached = $state.raw<DocNode[]>([]);
 
-  rows = $derived<Row[]>(outlineRows(this.tree));
-  tasks = $derived<TreeNode[]>(planTasks(this.tree));
+  /** The sequence the document on screen was merged through. */
+  head = $state(0);
+
+  /** The outline: the tree without the tasks, which are the plan. */
+  outline = $derived<DocNode[]>(outlineNodes(this.tree));
+
+  /** The plan, already in position order -- the merge sorted it. */
+  tasks = $derived<DocNode[]>(planTasks(this.tree));
 
   #key: string | null = null;
-  #state = new State();
-  #seq = 0;
+  #etag: string | null = null;
   #timer: ReturnType<typeof setTimeout> | null = null;
   #backoff = RETRY_MS;
   #stopped = true;
@@ -68,14 +79,14 @@ export class Viewer {
   /** Points the viewer at a key, from nothing or from another one. */
   use(key: string | null): void {
     this.#key = key;
-    this.#state = new State();
-    this.#seq = 0;
+    this.#etag = null;
     this.#backoff = RETRY_MS;
     this.error = null;
     this.name = "";
     this.updatedAt = null;
     this.tree = [];
     this.detached = [];
+    this.head = 0;
     this.status = key ? "loading" : "no-key";
     if (!this.#stopped) this.#schedule(0);
   }
@@ -133,55 +144,39 @@ export class Viewer {
     this.#busy = true;
     try {
       if (this.name === "") {
-        const info = await this.#get<{ workspace?: { name?: string } }>("/v1/workspace");
+        const info = await this.#json<{ workspace?: { name?: string } }>(
+          await this.#get("/v1/workspace"),
+        );
         this.name = info.workspace?.name ?? "Workspace";
       }
 
-      let caughtUp = false;
-      for (let page = 0; page < PAGES_PER_PASS; page++) {
-        const body = await this.#get<{
-          head?: number;
-          ops?: { seq?: number; op?: Op }[];
-          more?: boolean;
-        }>(`/v1/ops?since=${this.#seq}`);
+      // The conditional request. The ETag is opaque -- echoed, never parsed,
+      // and never derived from `head`.
+      const headers: Record<string, string> = {};
+      if (this.#etag !== null) headers["if-none-match"] = this.#etag;
+      const response = await this.#get("/v1/document", headers);
 
-        const entries = body.ops ?? [];
-        let applied = 0;
-        for (const entry of entries) {
-          if (!entry.op) continue;
-          try {
-            if (this.#state.apply(entry.op)) applied++;
-          } catch {
-            // An op this version cannot apply -- written by a newer release of
-            // the app. Skipped, so the rest of the log still renders: a
-            // viewer that refused the whole workspace over one unknown op
-            // would go blank on the day the desktop grows a feature.
-          }
-          if (typeof entry.seq === "number") this.#seq = Math.max(this.#seq, entry.seq);
-        }
-        if (applied > 0) this.#refresh();
-
-        if (!(body.more ?? entries.length > 0) || entries.length === 0) {
-          caughtUp = true;
-          break;
-        }
+      if (response.status !== 304) {
+        const etag = response.headers.get("etag");
+        const document = readDocument(await this.#json<unknown>(response));
+        // Assigned after the body parsed, so a truncated response does not
+        // leave an ETag behind that would suppress the retry of it.
+        this.#etag = etag;
+        this.tree = document.tree;
+        this.detached = document.detached;
+        this.head = document.head;
       }
 
       this.status = "live";
       this.error = null;
       this.updatedAt = Date.now();
       this.#backoff = RETRY_MS;
-      this.#schedule(caughtUp ? POLL_MS : 0);
+      this.#schedule(POLL_MS);
     } catch (err) {
       this.#fail(err);
     } finally {
       this.#busy = false;
     }
-  }
-
-  #refresh(): void {
-    this.tree = this.#state.tree();
-    this.detached = this.#state.detached();
   }
 
   #fail(err: unknown): void {
@@ -205,14 +200,20 @@ export class Viewer {
    * Relative, because that is what it is: the viewer is a static file handed
    * out by the same Go binary that answers /v1. An absolute URL would need
    * CORS on a server that has no reason to allow it.
+   *
+   * `cache: "no-store"` is what makes the conditional request ours. Left to
+   * its own devices the browser revalidates on its own schedule and turns the
+   * 304 back into a 200 out of its cache before this code sees it -- so the
+   * ETag would still save bandwidth and this page could never tell whether it
+   * had.
    */
-  async #get<T>(path: string): Promise<T> {
+  async #get(path: string, headers: Record<string, string> = {}): Promise<Response> {
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), 10_000);
     let response: Response;
     try {
       response = await fetch(path, {
-        headers: { authorization: `Bearer ${this.#key}` },
+        headers: { ...headers, authorization: `Bearer ${this.#key}` },
         signal: abort.signal,
         cache: "no-store",
       });
@@ -228,9 +229,15 @@ export class Viewer {
         true,
       );
     }
-    if (!response.ok) {
+    // 304 is the one answer on this server without a JSON body, and it is not
+    // an error -- so it passes `ok`, which is false for it.
+    if (!response.ok && response.status !== 304) {
       throw new ReadError(`The server answered ${response.status}.`, false);
     }
+    return response;
+  }
+
+  async #json<T>(response: Response): Promise<T> {
     try {
       return (await response.json()) as T;
     } catch {

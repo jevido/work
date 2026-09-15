@@ -1,10 +1,9 @@
 <script lang="ts">
-  import { countDescendants, labelOf, textOf } from "@doc/model";
-  import type { TreeNode } from "@doc/ops";
+  import { countDescendants, labelOf, textOf, type DocNode } from "../lib/doc";
   import { getView } from "../lib/view.svelte";
   import Self from "./OutlineBranch.svelte";
 
-  let { nodes, depth = 0 }: { nodes: readonly TreeNode[]; depth?: number } = $props();
+  let { nodes, depth = 0 }: { nodes: readonly DocNode[]; depth?: number } = $props();
 
   const view = getView();
 
@@ -16,7 +15,7 @@
    * the whitespace, but a label with a line break in the middle of it is one
    * nobody trusts when they see it in an accessibility inspector.
    */
-  function foldLabel(node: TreeNode, open: boolean, hidden: number): string {
+  function foldLabel(node: DocNode, open: boolean, hidden: number): string {
     const lines = `${hidden} ${hidden === 1 ? "line" : "lines"}`;
     return `${open ? "Hide" : "Show"} the ${lines} under ${labelOf(node)}`;
   }

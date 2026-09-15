@@ -6,7 +6,7 @@
     sourceIdOf,
     statusOf,
     textOf,
-  } from "@doc/model";
+  } from "./lib/doc";
   import OutlineBranch from "./components/OutlineBranch.svelte";
   import { forget, recall, remember, takeKey } from "./lib/key";
   import { ViewState, setView } from "./lib/view.svelte";
@@ -79,10 +79,25 @@
     }
   });
 
+  /** Why the pasted link was not accepted, or null. Cleared by typing. */
+  let pasteError = $state<string | null>(null);
+
   function usePasted(event: SubmitEvent) {
     event.preventDefault();
     const key = keyFrom(pasted);
-    if (!key) return;
+    // Answered on submit rather than by greying the button out. A disabled
+    // button says "no" without saying why, is skipped by a screen reader
+    // entirely, and cannot be pressed to find out -- which leaves somebody
+    // who pasted a link with the fragment already stripped staring at a
+    // control that will not respond and no idea what is wrong with it.
+    if (!key) {
+      pasteError =
+        pasted.trim() === ""
+          ? "Paste the whole link, or just the key from the end of it."
+          : "There is no key in that. A viewer link ends with #k=rk_… — if yours does not, the part after #k= was dropped somewhere on the way to you.";
+      return;
+    }
+    pasteError = null;
     remember(key);
     saved = true;
     pasted = "";
@@ -158,9 +173,15 @@
           spellcheck="false"
           autocomplete="off"
           placeholder="https://…/#k=rk_…"
+          aria-invalid={pasteError !== null}
+          aria-describedby={pasteError !== null ? "paste-error" : undefined}
+          oninput={() => (pasteError = null)}
         />
-        <button class="primary" type="submit" disabled={keyFrom(pasted) === null}>Open</button>
+        <button class="primary" type="submit">Open</button>
       </div>
+      {#if pasteError}
+        <p class="paste-error" id="paste-error">{pasteError}</p>
+      {/if}
     </form>
     {#if saved}
       <button class="link" onclick={forgetKey}>Forget the saved link on this device</button>
@@ -170,12 +191,12 @@
   <main>
     <section id="outline" aria-labelledby="outline-heading">
       <h2 id="outline-heading">Outline</h2>
-      {#if viewer.rows.length === 0}
+      {#if viewer.outline.length === 0}
         <p class="empty">
           {viewer.status === "loading" ? "Loading the outline…" : "The outline is empty."}
         </p>
       {:else}
-        <OutlineBranch nodes={viewer.tree.filter((n) => n.fields.type !== "task")} />
+        <OutlineBranch nodes={viewer.outline} />
       {/if}
 
       {#if viewer.detached.length > 0}
@@ -409,6 +430,13 @@
     background: var(--panel-2);
     font-size: 0.9em;
     overflow-wrap: anywhere;
+  }
+
+  .paste-error {
+    margin: 6px 0 0;
+    color: var(--err);
+    font-size: 13px;
+    line-height: 1.5;
   }
 
   .empty {

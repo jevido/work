@@ -13,8 +13,7 @@
  * server.
  */
 import { createContext } from "svelte";
-import { isCollapsed } from "@doc/model";
-import type { TreeNode } from "@doc/ops";
+import { isCollapsed, type DocNode } from "./doc";
 
 export class ViewState {
   /** Branches this reader has opened, over the document's own folds. */
@@ -28,18 +27,18 @@ export class ViewState {
   #fade: ReturnType<typeof setTimeout> | null = null;
 
   /** Whether a branch's children are drawn. The document, then this reader. */
-  isOpen(node: TreeNode): boolean {
+  isOpen(node: DocNode): boolean {
     if (this.#opened[node.id]) return true;
     if (this.#closed[node.id]) return false;
     return !isCollapsed(node);
   }
 
   /** Whether this reader has overridden what the document says. */
-  isOverridden(node: TreeNode): boolean {
+  isOverridden(node: DocNode): boolean {
     return this.#opened[node.id] === true || this.#closed[node.id] === true;
   }
 
-  toggle(node: TreeNode): void {
+  toggle(node: DocNode): void {
     const open = this.isOpen(node);
     delete this.#opened[node.id];
     delete this.#closed[node.id];
@@ -55,7 +54,7 @@ export class ViewState {
    * The ancestors are opened for this reader only, which is the whole reason
    * a link into a folded branch works here at all.
    */
-  jumpTo(tree: readonly TreeNode[], id: string): void {
+  jumpTo(tree: readonly DocNode[], id: string): void {
     for (const ancestor of chainTo(tree, id)) {
       delete this.#closed[ancestor.id];
       this.#opened[ancestor.id] = true;
@@ -73,9 +72,9 @@ export class ViewState {
 
 export const [getView, setView] = createContext<ViewState>();
 
-function chainTo(tree: readonly TreeNode[], id: string): TreeNode[] {
-  const path: TreeNode[] = [];
-  const dig = (nodes: readonly TreeNode[]): boolean => {
+function chainTo(tree: readonly DocNode[], id: string): DocNode[] {
+  const path: DocNode[] = [];
+  const dig = (nodes: readonly DocNode[]): boolean => {
     for (const node of nodes) {
       if (node.id === id) return true;
       path.push(node);
