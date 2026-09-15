@@ -82,6 +82,10 @@ func (w *Workbench) Restructure(tabID, mode, request string) (Task, error) {
 		// A side channel, like Chat: it must not move an agent to their desk,
 		// touch the board, or look like work is in flight.
 		chat: true,
+		// Its own conversation, the same one the mode's chat uses -- but a
+		// restructuring never resumes, so this only decides which transcript it
+		// is counted against.
+		mode: mode,
 		proposal: &proposalRun{
 			mcpConfig: config,
 			state:     state,

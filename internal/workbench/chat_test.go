@@ -22,19 +22,19 @@ func TestChatSessionIsSeparateFromRunSession(t *testing.T) {
 	w := newChatWorkbench(t)
 
 	w.rememberSession(runSession("anton"), "run-session")
-	w.rememberSession(chatSession("anton"), "chat-session")
+	w.rememberSession(chatSession("anton", ModeWork), "chat-session")
 
 	if got := w.sessionFor(runSession("anton")); got != "run-session" {
 		t.Errorf("run session = %q, want %q", got, "run-session")
 	}
-	if got := w.sessionFor(chatSession("anton")); got != "chat-session" {
+	if got := w.sessionFor(chatSession("anton", ModeWork)); got != "chat-session" {
 		t.Errorf("chat session = %q, want %q", got, "chat-session")
 	}
 
 	// Forgetting one must not forget the other: a run whose session went bad
 	// should not take the conversation the user is holding down with it.
 	w.forgetSession(runSession("anton"))
-	if got := w.sessionFor(chatSession("anton")); got != "chat-session" {
+	if got := w.sessionFor(chatSession("anton", ModeWork)); got != "chat-session" {
 		t.Errorf("chat session = %q after forgetting the run's, want it kept", got)
 	}
 }
@@ -44,11 +44,11 @@ func TestChatSessionIsSeparateFromRunSession(t *testing.T) {
 func TestChatSessionCannotBeForgedByAgentName(t *testing.T) {
 	w := newChatWorkbench(t)
 
-	w.rememberSession(chatSession("anton"), "anton-chat")
+	w.rememberSession(chatSession("anton", ModeWork), "anton-chat")
 	// A folder called "anton#chat" is a legal folder.
 	w.rememberSession(runSession("anton#chat"), "impostor")
 
-	if got := w.sessionFor(chatSession("anton")); got != "anton-chat" {
+	if got := w.sessionFor(chatSession("anton", ModeWork)); got != "anton-chat" {
 		t.Errorf("chat session = %q, want %q", got, "anton-chat")
 	}
 }
@@ -81,7 +81,7 @@ func TestChatRefusesASecondQuestion(t *testing.T) {
 	w.chat = first
 	w.mu.Unlock()
 
-	if _, err := w.Chat("and another thing"); err == nil {
+	if _, err := w.Chat("and another thing", ModeWork); err == nil {
 		t.Fatal("want an error while an answer is in flight")
 	}
 
@@ -116,7 +116,7 @@ func TestChatIsAcceptedWhileARunIsActive(t *testing.T) {
 		t.Fatal("Submit accepted a second run; the limit it works around is gone")
 	}
 
-	task, err := w.Chat("how far along is Chris?")
+	task, err := w.Chat("how far along is Chris?", ModeWork)
 	if err != nil {
 		t.Fatalf("Chat while a run is active: %v", err)
 	}
@@ -201,17 +201,17 @@ func TestReloadKeepsChatSessionForSurvivingAgent(t *testing.T) {
 	if !ok {
 		t.Fatal("no coordinator")
 	}
-	w.rememberSession(chatSession(coordinator.ID), "chat-session")
-	w.rememberSession(chatSession("departed"), "gone-session")
+	w.rememberSession(chatSession(coordinator.ID, ModeWork), "chat-session")
+	w.rememberSession(chatSession("departed", ModeWork), "gone-session")
 
 	if _, err := w.ReloadAgents(); err != nil {
 		t.Fatalf("ReloadAgents: %v", err)
 	}
 
-	if got := w.sessionFor(chatSession(coordinator.ID)); got != "chat-session" {
+	if got := w.sessionFor(chatSession(coordinator.ID, ModeWork)); got != "chat-session" {
 		t.Errorf("chat session = %q after reload, want it kept", got)
 	}
-	if got := w.sessionFor(chatSession("departed")); got != "" {
+	if got := w.sessionFor(chatSession("departed", ModeWork)); got != "" {
 		t.Errorf("chat session for a removed agent = %q, want it dropped", got)
 	}
 }
@@ -231,5 +231,48 @@ func TestReloadRefusedWhileAnswering(t *testing.T) {
 
 	if _, err := w.ReloadAgents(); err == nil {
 		t.Fatal("want an error while a question is being answered")
+	}
+}
+
+// A conversation per mode, underneath the transcripts.
+//
+// Splitting only what is on screen would look fixed and not be: the three
+// transcripts would read as separate while the model continued one session with
+// all three in its history.
+func TestChatSessionsAreSplitByMode(t *testing.T) {
+	stateHome(t)
+	w := New(agents.Default(), claude.NewRunner(""), func(string, any) {}, t.TempDir())
+
+	w.rememberSession(chatSession("anton", ModeIdea), "about-shape")
+	w.rememberSession(chatSession("anton", ModePlanning), "about-tasks")
+	w.rememberSession(chatSession("anton", ModeWork), "about-the-run")
+
+	for _, want := range []struct{ mode, session string }{
+		{ModeIdea, "about-shape"},
+		{ModePlanning, "about-tasks"},
+		{ModeWork, "about-the-run"},
+	} {
+		if got := w.sessionFor(chatSession("anton", want.mode)); got != want.session {
+			t.Errorf("%s resumed %q, want %q", want.mode, got, want.session)
+		}
+	}
+
+	// And two questions in one mode are one conversation, which is the half
+	// that makes it a conversation at all.
+	if a, b := chatSession("anton", ModeIdea), chatSession("anton", ModeIdea); a != b {
+		t.Error("two chats in one mode take different keys")
+	}
+
+	// Anything that is not one of the two thinking modes is work's, where the
+	// side channel has always lived. An unknown mode must not mint a fourth
+	// conversation nobody can see.
+	if got := w.sessionFor(chatSession("anton", "sideways")); got != "about-the-run" {
+		t.Errorf("an unknown mode resumed %q, want work's", got)
+	}
+
+	// A run's session is per agent and per run and has nothing to do with
+	// modes, so it is untouched by any of this.
+	if runSession("anton") == chatSession("anton", ModeWork) {
+		t.Error("a run and a chat share a key")
 	}
 }

@@ -161,6 +161,10 @@ type run struct {
 	// proposal marks a run that is asking Claude to restructure the outline
 	// rather than to do work. Nil for every other run. See restructure.go.
 	proposal *proposalRun
+
+	// mode is which conversation a side-channel turn belongs to. Empty on a
+	// run, which has no mode: a run is work, whatever is on screen.
+	mode string
 }
 
 // taskID mints a stable, readable ID for one Claude call inside the run.
@@ -308,7 +312,7 @@ func (w *Workbench) Submit(agentID, prompt string) (Task, error) {
 // concurrent answer would interleave into the first. A question asked with
 // nothing running is still a question, not a run -- the caller decides which
 // it wants, and Submit remains the way to start work.
-func (w *Workbench) Chat(prompt string) (Task, error) {
+func (w *Workbench) Chat(prompt, mode string) (Task, error) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		return Task{}, errors.New("workbench: empty prompt")
@@ -331,6 +335,7 @@ func (w *Workbench) Chat(prompt string) (Task, error) {
 		prompt: prompt,
 		cancel: cancel,
 		chat:   true,
+		mode:   mode,
 	}
 
 	w.mu.Lock()
@@ -378,7 +383,7 @@ func (w *Workbench) Chat(prompt string) (Task, error) {
 // answer is one side-channel turn, with the same bad-session retry executeStep
 // uses and none of its bookkeeping.
 func (w *Workbench) answer(ctx context.Context, r *run, lead agents.Agent, about string) error {
-	key := chatSession(lead.ID)
+	key := chatSession(lead.ID, r.mode)
 	taskID := r.taskID(lead.ID)
 	prompt := chatPrompt(r.prompt, about)
 
@@ -877,7 +882,7 @@ func (w *Workbench) streamStep(
 	// two live Claude processes never resume the same session.
 	key := runSession(agent.ID)
 	if r.chat {
-		key = chatSession(agent.ID)
+		key = chatSession(agent.ID, r.mode)
 	}
 
 	request := claude.Request{
@@ -1229,6 +1234,14 @@ type sessionKey struct {
 	// chat marks the coordinator's side-channel conversation, which is kept
 	// apart from the run's so the two never resume each other.
 	chat bool
+	// mode is which conversation a chat belongs to: idea, planning or work.
+	//
+	// On the chat key only. A run's session is per agent and per run and has
+	// nothing to do with modes -- but the side channel is one conversation a
+	// person has, and they have three. Without this the transcripts would look
+	// separate on screen while the model read one history with all three in it,
+	// which is worse than not splitting at all: it looks fixed and is not.
+	mode string
 }
 
 // runSession is the key for an agent's conversation inside runs.
@@ -1237,8 +1250,13 @@ func runSession(agentID string) sessionKey {
 }
 
 // chatSession is the key for the coordinator's side-channel conversation.
-func chatSession(agentID string) sessionKey {
-	return sessionKey{agentID: agentID, chat: true}
+func chatSession(agentID, mode string) sessionKey {
+	if mode != ModeIdea && mode != ModePlanning {
+		// Anything that is not one of the two thinking modes is work's, which
+		// is where the side channel has always lived.
+		mode = ModeWork
+	}
+	return sessionKey{agentID: agentID, chat: true, mode: mode}
 }
 
 // sessionFor returns the session held under key in this conversation, if any.

@@ -189,7 +189,7 @@ func (s *WorkbenchService) Submit(agentID, prompt string) (workbench.Task, error
 
 // Chat asks the coordinator a question without starting a run, so the input
 // stays usable while specialists are working.
-func (s *WorkbenchService) Chat(prompt string) (workbench.Task, error) {
+func (s *WorkbenchService) Chat(prompt, mode string) (workbench.Task, error) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		return workbench.Task{}, errors.New("prompt is empty")
@@ -197,7 +197,7 @@ func (s *WorkbenchService) Chat(prompt string) (workbench.Task, error) {
 	if len(prompt) > maxPromptBytes {
 		return workbench.Task{}, errors.New("prompt is too large")
 	}
-	return s.wb.Chat(prompt)
+	return s.wb.Chat(prompt, mode)
 }
 
 // Changes lists the files the last run touched, with their diffs.

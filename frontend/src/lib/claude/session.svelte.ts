@@ -176,6 +176,15 @@ export class ClaudeSession {
    */
   draft = $state("");
 
+  /**
+   * Which conversation this is, for the backend to keep its own memory of it.
+   *
+   * A session that does not know its mode would resume the wrong one, and the
+   * three transcripts would read as separate while the model continued a single
+   * history with all of them in it -- which looks fixed and is not.
+   */
+  mode = "work";
+
   /** True when there is nothing on screen to clear. */
   isEmpty = $derived(this.entries.length === 0);
 
@@ -491,7 +500,7 @@ export class ClaudeSession {
     this.chatStatus = "planning";
 
     try {
-      const task = await Workbench.Chat(text);
+      const task = await Workbench.Chat(text, this.mode);
       this.chatId = task.id;
     } catch (err) {
       this.notice(messageOf(err), "error");
@@ -529,6 +538,39 @@ export class ClaudeSession {
    * exchange too, so clearing the screen and clearing their memory are the same
    * gesture rather than two that can disagree.
    */
+  /**
+   * Empties what is on screen, without telling the backend anything.
+   *
+   * The half of clear() that is about this transcript alone. Used for the two
+   * conversations that are not the one whose button was pressed -- see
+   * Conversations.clear(), and why the backend's half is the window's.
+   */
+  forget(): void {
+    this.cancelFlush();
+    this.pending.clear();
+    this.entries = [];
+    this.turns.clear();
+    this.tools.clear();
+    this.status = "idle";
+    this.runId = null;
+    this.runCostUsd = 0;
+    this.chatStatus = "idle";
+    this.chatId = null;
+    this.chatCostUsd = 0;
+    this.draft = "";
+  }
+
+  /**
+   * Empties this transcript and forgets the agents' memory of it.
+   *
+   * The backend half of this is the window's rather than one mode's:
+   * ClearConversation forgets every session and empties the board, and making
+   * that per-mode would mean the board clearing or not depending on which mode
+   * somebody happened to be looking at. So Conversations.clear() empties all
+   * three on screen to match, and the button says what it does -- a Clear that
+   * silently emptied two conversations nobody could see is the kind of thing
+   * that is only noticed after something has been lost.
+   */
   async clear(): Promise<void> {
     this.cancelFlush();
     this.pending.clear();
@@ -543,6 +585,7 @@ export class ClaudeSession {
     this.chatStatus = "idle";
     this.chatId = null;
     this.chatCostUsd = 0;
+    this.draft = "";
     try {
       await Workbench.ClearConversation();
     } catch {

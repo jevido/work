@@ -125,8 +125,8 @@ export function Changes(): $CancellablePromise<changes$0.Change[] | null> {
  * Chat asks the coordinator a question without starting a run, so the input
  * stays usable while specialists are working.
  */
-export function Chat(prompt: string): $CancellablePromise<workbench$0.Task> {
-    return $Call.ByID(3317554920, prompt);
+export function Chat(prompt: string, mode: string): $CancellablePromise<workbench$0.Task> {
+    return $Call.ByID(3317554920, prompt, mode);
 }
 
 /**

@@ -576,7 +576,7 @@
 
              The app's own controls live in its header row, which is the only
              strip in the window that is neither the work nor the watching. -->
-        <ClaudeConsole {session} {review}>
+        <ClaudeConsole {session} {review} clear={() => conversations.clear()}>
           {#snippet controls()}
             <PermissionMenu {permissions} />
             <SettingsMenu {config} review={proposals} />

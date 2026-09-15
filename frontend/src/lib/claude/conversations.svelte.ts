@@ -56,9 +56,9 @@ const ENDS = new Set([RUN_FINISHED, CHAT_FINISHED]);
 
 export class Conversations {
   #sessions: Record<Mode, ClaudeSession> = {
-    idea: new ClaudeSession(),
-    planning: new ClaudeSession(),
-    work: new ClaudeSession(),
+    idea: named("idea"),
+    planning: named("planning"),
+    work: named("work"),
   };
 
   /**
@@ -102,6 +102,19 @@ export class Conversations {
     };
   }
 
+  /**
+   * Clears every transcript, because the backend's half of it is the window's.
+   *
+   * ClearConversation forgets every agent's session and empties the board.
+   * Making that per-mode would mean the board clearing or not depending on
+   * which mode somebody was looking at, which is a worse rule than "clear
+   * clears everything" -- so all three go, and the button says so.
+   */
+  async clear(): Promise<void> {
+    for (const session of this.all()) session.forget();
+    await this.#sessions.work.clear();
+  }
+
   setAgents(identities: Parameters<ClaudeSession["setAgents"]>[0]): void {
     for (const session of this.all()) session.setAgents(identities);
   }
@@ -128,4 +141,11 @@ export class Conversations {
   }
 
   #lastStarted: Mode | null = null;
+}
+
+/** A session that knows which conversation it is, so the backend can too. */
+function named(mode: Mode): ClaudeSession {
+  const session = new ClaudeSession();
+  session.mode = mode;
+  return session;
 }

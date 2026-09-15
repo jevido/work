@@ -10,8 +10,17 @@
     session,
     review,
     controls,
+    clear,
   }: {
     session: ClaudeSession;
+    /**
+     * Clearing, which reaches further than this transcript.
+     *
+     * Passed in rather than called on the session, because the backend's half
+     * of it forgets every agent's memory and empties the board -- so all three
+     * conversations go, and only the caller knows about the other two.
+     */
+    clear: () => void;
     review: ChangeReviewState;
     /**
      * The app's own controls, rendered at the left of the header row.
@@ -275,9 +284,9 @@
       {:else if !session.chatBusy}
         <button
           class="ghost"
-          onclick={() => session.clear()}
+          onclick={() => clear()}
           disabled={session.isEmpty}
-          title="Clears the conversation and the agents' memory of it"
+          title="Clears all three conversations, the board, and the agents' memory of them"
         >
           New chat
         </button>
