@@ -72,6 +72,26 @@ loop, not load. The budget is held in memory, so it is per server instance.
 
 ## Endpoints
 
+### `GET /` and everything not under `/v1/`
+
+The web viewer, when `WORK_SITE_DIR` names a directory holding its built files
+— which it does in the image, and does not in a local `go run .`. A path that
+is not a file in that directory answers `index.html` at 200 rather than a 404,
+because those paths belong to the client router and reloading one has to work.
+
+With no site configured the root is what every unknown path is: a 404 with
+`{"error":{"code":"not_found",…}}`.
+
+`/v1/…` is registered ahead of the root either way, so an endpoint that does
+not exist is always the JSON error and never this page. That matters more than
+it sounds: a static handler mounted in front of a JSON API breaks the API, not
+the page, by answering 200 and HTML to something that parses JSON.
+
+The viewer holds a **read** key, and reaches these endpoints from the same
+origin it was served from. That is not a convenience — the key arrives in a URL
+fragment, which only the browser ever sees, so the page and the API it calls
+have to be one origin or the key can never reach a request.
+
 ### `GET /v1/health`
 
 No auth. Liveness plus a database round-trip.

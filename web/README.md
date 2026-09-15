@@ -106,9 +106,19 @@ npm run build          # static files in web/dist
 npm run check          # svelte-check
 ```
 
-`npm run build` writes `web/dist`. Serving that from the sync server is the
-server's business, not this directory's — it needs a static handler at `/` that
-falls through to `index.html`, mounted so it does not shadow `/v1`.
+`npm run build` writes `web/dist`, and that directory is what the sync server
+serves at `/`. In production the image builds it: the `Dockerfile`'s `site`
+stage runs `npm run check && npm run build` here and copies the result to
+`/srv/site`, which is what `WORK_SITE_DIR` points at. Nothing has to be built
+and uploaded separately, and `docker build .` on a laptop produces the same
+image as the deploy.
+
+Served by hand rather than by `http.FileServer`, in `server/api/static.go`:
+anything that is not a file in the directory falls through to `index.html` at
+200, so reloading a route the client owns works, and `/v1/…` is registered
+ahead of the root so a mistyped endpoint is still a JSON 404 rather than this
+page. Locally, `WORK_SITE_DIR=../web/dist` from `server/` does the same thing
+without a container.
 
 ## Accessibility notes
 
