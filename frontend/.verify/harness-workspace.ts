@@ -400,6 +400,88 @@ setTransport({
   announce,
 };
 
+// Notes somebody took before the outline had anywhere to go, seeded before the
+// app mounts so that the store is already populated the first time it is read.
+// tab-b rather than tab-a: the suite types into tab-a from its first checks,
+// and a tab that starts with somebody else's notes in it would change what
+// every one of those means.
+try {
+  localStorage.setItem(
+    "work.outlines.v1",
+    JSON.stringify({
+      activeId: null,
+      tabs: {
+        "tab-b": {
+          mode: "idea",
+          drafts: {},
+          state: {
+            "clock": 2,
+            "seen": [
+              "old1",
+              "old2"
+            ],
+            "nodes": {
+              "kept1": {
+                "parent": "",
+                "position": "m",
+                "stamp": {
+                  "clock": 1,
+                  "actor": "before"
+                },
+                "deleted": false,
+                "fields": {
+                  "type": {
+                    "value": "idea",
+                    "stamp": {
+                      "clock": 1,
+                      "actor": "before"
+                    }
+                  },
+                  "text": {
+                    "value": "a note from before the move",
+                    "stamp": {
+                      "clock": 1,
+                      "actor": "before"
+                    }
+                  }
+                }
+              },
+              "kept2": {
+                "parent": "kept1",
+                "position": "m",
+                "stamp": {
+                  "clock": 2,
+                  "actor": "before"
+                },
+                "deleted": false,
+                "fields": {
+                  "type": {
+                    "value": "idea",
+                    "stamp": {
+                      "clock": 2,
+                      "actor": "before"
+                    }
+                  },
+                  "text": {
+                    "value": "and one nested under it",
+                    "stamp": {
+                      "clock": 2,
+                      "actor": "before"
+                    }
+                  }
+                }
+              }
+            }
+          },
+        },
+      },
+    }),
+  );
+  localStorage.removeItem("work.outlines.migrated.v1");
+} catch {
+  // A private window refusing storage is a run with nothing to carry.
+}
+
 mount(App, { target: document.getElementById("app")! });
 
 // Dynamic so it runs after the transport is installed and App is mounted.

@@ -24,6 +24,16 @@ import { Workspace, type OutlineSnapshot } from "./workspace.svelte";
 const KEY = "work.outlines.v1";
 
 /**
+ * Which tabs have had their local notes carried into the workspace.
+ *
+ * Marked rather than deleted, and marked in its own key. A crash halfway
+ * through a migration must not produce half an outline and no way back: the
+ * notes stay where they are until the mark says they arrived, and the mark is
+ * what stops it happening twice.
+ */
+const MIGRATED_KEY = "work.outlines.migrated.v1";
+
+/**
  * The store this replaced.
  *
  * Removed rather than ignored, and removed on the first read rather than left
@@ -135,4 +145,47 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+/** The outline stored for a tab, or null if there is nothing in it. */
+export function storedSnapshot(id: string): OutlineSnapshot | null {
+  return read().tabs[id] ?? null;
+}
+
+/** Whether this tab's local notes have already been carried over. */
+export function migrated(id: string): boolean {
+  try {
+    const raw = localStorage.getItem(MIGRATED_KEY);
+    if (!raw) return false;
+    const list = JSON.parse(raw);
+    return Array.isArray(list) && list.includes(id);
+  } catch {
+    // Unreadable is treated as "not yet", which risks doing it twice rather
+    // than never. The caller checks the workspace as well, so a second run
+    // finds the notes already there and does nothing.
+    return false;
+  }
+}
+
+export function markMigrated(id: string): void {
+  try {
+    const raw = localStorage.getItem(MIGRATED_KEY);
+    const list: unknown = raw ? JSON.parse(raw) : [];
+    const ids = Array.isArray(list) ? list.filter((v) => typeof v === "string") : [];
+    if (!ids.includes(id)) ids.push(id);
+    localStorage.setItem(MIGRATED_KEY, JSON.stringify(ids));
+  } catch {
+    // Nothing to be done, and nothing worth saying on a startup path.
+  }
+}
+
+/** Forgets a tab's stored outline, once it is somewhere durable. */
+export function dropStored(id: string): void {
+  const state = read();
+  delete state.tabs[id];
+  try {
+    localStorage.setItem(KEY, JSON.stringify(state));
+  } catch {
+    // See save().
+  }
 }

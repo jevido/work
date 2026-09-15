@@ -27,6 +27,7 @@ import * as Workbench from "../../../bindings/dev.jevido/work/services/workbench
 import { WORKSPACE_CHANGED, WORKSPACE_SYNC } from "../bridge/events";
 import { DEFAULT_SERVER, looksLikeReadKey, parseInvite } from "./invite";
 import { Workspace } from "./workspace.svelte";
+import { carryLocalNotes } from "./carry";
 import * as Storage from "./storage";
 
 /** How long after the last change to write the local outlines down. */
@@ -257,10 +258,16 @@ export class Workspaces {
       // workspace to send them to. LOCAL_TAB is the app with nothing joined:
       // its outline is this machine's and has nowhere else to be, which is the
       // ordinary case and not a degraded one.
+      const couldNotSend = workspace.send === null;
       workspace.send =
         view !== null && want.id !== LOCAL_TAB
           ? (edits) => Workbench.ApplyWorkspaceEdits(want.id, edits)
           : null;
+      // The moment a tab first has somewhere to send to is the moment whatever
+      // was written down locally can stop being local. Once per tab, marked so,
+      // and silent on the machines -- most of them -- where there is nothing to
+      // carry.
+      if (couldNotSend && workspace.send) void carryLocalNotes(workspace);
       next.push(workspace);
       existing.delete(want.id);
     }

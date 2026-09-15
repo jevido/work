@@ -73,6 +73,26 @@ async function run() {
   );
 
   const shot = canvas();
+  // Notes taken before the outline had anywhere to go are carried into the
+  // workspace the first time the tab has somewhere to send to. Checked early:
+  // it happens at startup, and once.
+  {
+    const carried = V()
+      .calls.filter((c: any) => c.id === 1305658848)
+      .flatMap((c: any) => (c.args?.[1] ?? []) as { kind: string; node?: string; fields?: any }[]);
+    const texts = carried.map((e) => e.fields?.text).filter(Boolean);
+    check(
+      "notes taken before the move are carried into the workspace",
+      texts.includes("a note from before the move"),
+      texts.join(" | ").slice(0, 80) || "nothing carried",
+    );
+    check("with their structure", texts.includes("and one nested under it"));
+    check(
+      "and their ids, so a task extracted from one still points at it",
+      carried.some((e) => e.node === "kept1"),
+    );
+  }
+
   check("the office is mounted", !!shot);
   if (!shot) return;
 
