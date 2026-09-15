@@ -399,3 +399,136 @@ func mustNode(t *testing.T, s *Sync, id string) ops.Node {
 	}
 	return node
 }
+
+// plan puts tasks on the active tab's plan, in the order given.
+func plan(t *testing.T, w *Workbench, tab string, entries ...[2]string) {
+	t.Helper()
+	var edits []Edit
+	for i, entry := range entries {
+		edits = append(edits, Edit{
+			Kind:     "extract-to-task",
+			Node:     "idea" + string(rune('a'+i)),
+			Task:     entry[0],
+			Position: string(rune('a' + i)),
+			Fields:   map[string]any{FieldType: TypeTask, FieldText: entry[0], FieldStatus: entry[1]},
+		})
+	}
+	if _, err := w.ApplyEdits(tab, edits); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+}
+
+func TestNextTask(t *testing.T) {
+	t.Run("an empty plan offers nothing", func(t *testing.T) {
+		w, _ := joinedWorkbench(t, newFakeOps())
+		if got, ok := w.NextTask(); ok {
+			t.Errorf("offered %+v from an empty plan", got)
+		}
+	})
+
+	t.Run("the first one still to do", func(t *testing.T) {
+		w, tab := joinedWorkbench(t, newFakeOps())
+		plan(t, w, tab, [2]string{"first", TaskTodo}, [2]string{"second", TaskTodo})
+
+		got, ok := w.NextTask()
+		if !ok {
+			t.Fatal("nothing offered from a plan with two todos")
+		}
+		if got.Text != "first" {
+			t.Errorf("offered %q, want the first in plan order", got.Text)
+		}
+	})
+
+	t.Run("a done task is passed over", func(t *testing.T) {
+		w, tab := joinedWorkbench(t, newFakeOps())
+		plan(t, w, tab, [2]string{"finished", TaskDone}, [2]string{"waiting", TaskTodo})
+
+		got, ok := w.NextTask()
+		if !ok {
+			t.Fatal("nothing offered")
+		}
+		if got.Text != "waiting" {
+			t.Errorf("offered %q, want the one after the finished task", got.Text)
+		}
+	})
+
+	t.Run("one already started is next, not skipped", func(t *testing.T) {
+		// Somebody began it and stopped. Offering the one after it would
+		// quietly skip work that is half finished.
+		w, tab := joinedWorkbench(t, newFakeOps())
+		plan(t, w, tab, [2]string{"half done", TaskTodo}, [2]string{"not started", TaskTodo})
+		// Set afterwards rather than at creation. A status written in the same
+		// batch as the task is overwritten by the board mirror adopting the new
+		// card -- which is a real thing and task 03's to deal with.
+		if _, err := w.ApplyEdits(tab, []Edit{
+			{Kind: "set-fields", Node: "half done", Fields: map[string]any{FieldStatus: TaskDoing}},
+		}); err != nil {
+			t.Fatalf("set doing: %v", err)
+		}
+
+		got, ok := w.NextTask()
+		if !ok {
+			t.Fatal("nothing offered")
+		}
+		if got.Text != "half done" {
+			t.Errorf("offered %q, want the one already in progress", got.Text)
+		}
+		if got.Status != TaskDoing {
+			t.Errorf("status = %q", got.Status)
+		}
+	})
+
+	t.Run("everything finished offers nothing", func(t *testing.T) {
+		w, tab := joinedWorkbench(t, newFakeOps())
+		plan(t, w, tab, [2]string{"one", TaskDone}, [2]string{"two", TaskDone})
+		if got, ok := w.NextTask(); ok {
+			t.Errorf("offered %+v from a finished plan", got)
+		}
+	})
+
+	t.Run("the idea it came from travels with it", func(t *testing.T) {
+		w, tab := joinedWorkbench(t, newFakeOps())
+		if _, err := w.ApplyEdits(tab, []Edit{
+			{Kind: "create-node", Node: "theidea", Fields: map[string]any{FieldType: TypeIdea, FieldText: "the reason this exists"}},
+			{Kind: "extract-to-task", Node: "theidea", Task: "t1", Position: "m",
+				Fields: map[string]any{FieldType: TypeTask, FieldText: "do the thing", FieldStatus: TaskTodo}},
+		}); err != nil {
+			t.Fatalf("plan: %v", err)
+		}
+
+		got, ok := w.NextTask()
+		if !ok {
+			t.Fatal("nothing offered")
+		}
+		if got.From != "theidea" {
+			t.Errorf("from = %q", got.From)
+		}
+		// The words, not only the id: a task without the reason it exists is a
+		// line somebody has to go and look up.
+		if got.FromText != "the reason this exists" {
+			t.Errorf("fromText = %q", got.FromText)
+		}
+	})
+
+	t.Run("a task with no words is not offered", func(t *testing.T) {
+		// Somebody started typing one and left. It cannot be run and it cannot
+		// be shown.
+		w, tab := joinedWorkbench(t, newFakeOps())
+		plan(t, w, tab, [2]string{"", TaskTodo})
+		if _, ok := w.NextTask(); ok {
+			t.Error("an empty task was offered")
+		}
+	})
+}
+
+// No workspace, no next task. The folder guard beside it is the same condition
+// adoptTasks uses -- a task that cannot be run in a folder is not one to offer
+// -- and ActivateTab already refuses a tab with no folder, so the unbound case
+// cannot be reached from the outside at all.
+func TestNextTaskNeedsAWorkspace(t *testing.T) {
+	stateHome(t)
+	w := New(agents.Default(), claude.NewRunner(""), func(string, any) {}, t.TempDir())
+	if got, ok := w.NextTask(); ok {
+		t.Errorf("offered %+v with no workspace joined", got)
+	}
+}

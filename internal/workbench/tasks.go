@@ -1,6 +1,7 @@
 package workbench
 
 import (
+	"cmp"
 	"strings"
 
 	"dev.jevido/work/internal/board"
@@ -454,4 +455,95 @@ func discoveryTexts(s *Sync, parent string) map[string]struct{} {
 		}
 	}
 	return out
+}
+
+// PlanTask is one task on the plan, as work mode needs to see it.
+//
+// Small on purpose: the id to act on, the words to show, and the idea it came
+// from. No actor, no card, no position -- position is the plan's business and
+// the only thing anybody outside it needs from the order is which one is next.
+type PlanTask struct {
+	// ID is the task node.
+	ID string `json:"id"`
+	// Text is what it says.
+	Text string `json:"text"`
+	// Status is todo, doing or done.
+	Status string `json:"status"`
+	// From is the idea this was extracted from, empty when the link is broken
+	// or was never made.
+	From string `json:"from,omitempty"`
+	// FromText is that idea's text, so a caller can show the reason without a
+	// second round trip for it.
+	FromText string `json:"fromText,omitempty"`
+}
+
+// NextTask is the first task in plan order that is still to do.
+//
+// Not done, rather than todo. A task that is already `doing` is the next task:
+// somebody started it and stopped, and offering the one after it would quietly
+// skip work that is half finished.
+//
+// Nothing is an ordinary answer, not an error. An empty plan, a tab with no
+// workspace, a tab this machine has bound to no folder, a plan where everything
+// is finished -- all four mean there is nothing to offer, and none of them is a
+// failure worth reporting as one.
+func (w *Workbench) NextTask() (PlanTask, bool) {
+	s := w.sync.Load()
+	if s == nil {
+		return PlanTask{}, false
+	}
+
+	w.wsMu.Lock()
+	var tab, dir string
+	if w.ws != nil {
+		tab = w.ws.ActiveTab
+		dir = w.tabDirLocked(tab)
+	}
+	w.wsMu.Unlock()
+	// The same condition adoptTasks uses. A task that cannot be run in a folder
+	// is not a task to offer, and a tab pointed at the directory Work was
+	// started in is a tab pointed at nothing in particular.
+	if tab == "" || dir == "" || dir == w.baseDir {
+		return PlanTask{}, false
+	}
+
+	doc := s.document()
+	// The ideas, by id, so the link back can carry its words with it. The link
+	// is described as the spine of the whole system: a task without the reason
+	// it exists is a line of text somebody has to go and look up.
+	text := map[string]string{}
+	for _, root := range doc.Tree {
+		if root.ID != tab {
+			continue
+		}
+		collectText(root.Children, text)
+	}
+
+	for _, task := range tabTasks(doc, tab) {
+		if fieldString(task, FieldStatus) == TaskDone {
+			continue
+		}
+		title := strings.TrimSpace(fieldString(task, FieldText))
+		if title == "" {
+			// A task with no words is one somebody started typing and left. It
+			// cannot be run and it cannot be shown, so it is not next.
+			continue
+		}
+		from := fieldString(task, ops.FieldExtractedFrom)
+		return PlanTask{
+			ID:       task.ID,
+			Text:     title,
+			Status:   cmp.Or(fieldString(task, FieldStatus), TaskTodo),
+			From:     from,
+			FromText: text[from],
+		}, true
+	}
+	return PlanTask{}, false
+}
+
+func collectText(nodes []ops.TreeNode, into map[string]string) {
+	for _, n := range nodes {
+		into[n.ID] = strings.TrimSpace(fieldString(n.Node, FieldText))
+		collectText(n.Children, into)
+	}
 }

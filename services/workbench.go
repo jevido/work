@@ -328,6 +328,18 @@ func (s *WorkbenchService) WorkspaceCards(tabID string) []board.Card {
 	return s.wb.WorkspaceCards(tabID)
 }
 
+// NextTask is the first task on the active tab's plan that is still to do.
+//
+// The whole task rather than its id: the caller wants to show it, and a second
+// round trip to ask what an id means is a frame of empty button.
+//
+// The second return is false when there is nothing to offer -- an empty plan,
+// no workspace, a tab this machine has bound to no folder, or a plan where
+// everything is finished. None of those is an error.
+func (s *WorkbenchService) NextTask() (workbench.PlanTask, bool) {
+	return s.wb.NextTask()
+}
+
 // Restructure asks Claude to propose changes to a tab's outline or plan.
 //
 // Returns when the run has started, not when it has answered. The proposal
