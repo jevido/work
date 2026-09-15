@@ -831,6 +831,108 @@ async function run() {
     kindsSince(beforeExtract),
   );
 
+  /* ---------------------------------------------------------------------- */
+  /* 4f. Somebody else's edit arriving                                      */
+  /* ---------------------------------------------------------------------- */
+
+  // The first version of this app in which two desktops share an outline. What
+  // makes it true is that the frontend now fetches the merged document when the
+  // cursor moves, and gives each tab its own part of it.
+
+  pickMode("idea");
+  await settle(10);
+
+  const node = (id: string, text: string, position: string, children: unknown[] = []) => ({
+    id,
+    position,
+    fields: { type: "idea", text },
+    children,
+  });
+
+  // A document for the tab that is open, with a line nothing on this machine
+  // typed.
+  V().remote({
+    cursor: 99,
+    tree: [
+      {
+        id: "tab-a",
+        position: "m",
+        fields: { text: "Work" },
+        children: [
+          node("r1", "written on another machine", "m"),
+          node("r2", "and a second one", "n", [node("r3", "nested under it", "m")]),
+        ],
+      },
+      // Another tab's outline, which must not appear in this one.
+      {
+        id: "tab-b",
+        position: "n",
+        fields: { text: "planning" },
+        children: [node("x1", "belongs to the other tab", "m")],
+      },
+    ],
+    detached: [],
+  });
+  await settle(25);
+
+  const shown = () => lines().map((l) => l.value);
+  check(
+    "a colleague's line appears without anybody reloading",
+    shown().includes("written on another machine"),
+    shown().join(" | ").slice(0, 90),
+  );
+  check("nesting comes with it", shown().includes("nested under it"));
+  check(
+    "another tab's outline stays in the other tab",
+    !shown().includes("belongs to the other tab"),
+    shown().join(" | ").slice(0, 90),
+  );
+
+  // A line being typed into is not replaced by a document arriving. The draft
+  // is what is on screen until the caret leaves, which is the property that
+  // makes remote edits survivable while somebody is mid-word.
+  // Within the typing window on purpose. A draft is what is on screen until it
+  // settles, and this is the moment a document arriving would be most
+  // destructive -- mid-word, before the edit has been committed to anything.
+  // What happens to a *committed* line that changes under a caret is task 06's
+  // question, and it has a different answer: mark it, do not silently keep
+  // either side.
+  const typing = lines()[0];
+  if (typing) {
+    typing.focus();
+    typing.value = "half a thought";
+    typing.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle(2);
+  }
+  V().remote({
+    cursor: 100,
+    tree: [
+      {
+        id: "tab-a",
+        position: "m",
+        fields: { text: "Work" },
+        children: [node("r1", "changed under the caret", "m")],
+      },
+    ],
+    detached: [],
+  });
+  await settle(8);
+  check(
+    "a document arriving does not overwrite what is being typed",
+    lines()[0]?.value === "half a thought",
+    lines()[0]?.value ?? "gone",
+  );
+
+  // And once it settles, what was typed is what goes out -- the draft was not
+  // a way of ignoring the document, only of not losing a word to it.
+  await new Promise((r) => setTimeout(r, 900));
+  await settle(10);
+  check(
+    "and what was typed is still what this machine sent",
+    editsSince(editCalls().length - 1).some((e) => e.kind === "set-fields"),
+    kindsSince(editCalls().length - 1),
+  );
+
 }
 
 run()

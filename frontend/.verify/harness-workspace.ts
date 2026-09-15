@@ -124,6 +124,7 @@ const ACTIVATE_TAB = 969308478;
 const BIND_TAB_FOLDER = 2990789672;
 const RESTRUCTURE = 3325402576;
 const APPLY_EDITS = 1305658848;
+const WORKSPACE_DOCUMENT = 2545762642;
 const WITHOUT_REVIEW = 3713443955;
 const SET_WITHOUT_REVIEW = 954902667;
 
@@ -203,6 +204,9 @@ setTransport({
       case BOARD:
       case CHANGES:
         return null;
+
+      case WORKSPACE_DOCUMENT:
+        return backend.document;
 
       case APPLY_EDITS:
         // Go's answer is the merged document. Null is what a real one returns
@@ -353,6 +357,19 @@ setTransport({
       now: note.now ?? "",
       deleted: note.deleted === true,
     });
+  },
+
+  /**
+   * A colleague's edit landing: the document moves, and the cursor with it.
+   *
+   * Both halves matter. The document is what the frontend fetches; the cursor
+   * on the sync event is what tells it to fetch. A test that only set the
+   * document would be testing a call nothing makes.
+   */
+  remote(doc: unknown) {
+    backend.document = doc;
+    backend.status = { ...backend.status, cursor: (backend.status.cursor ?? 0) + 1 };
+    push("workspace:sync", { status: backend.status });
   },
 
   /**

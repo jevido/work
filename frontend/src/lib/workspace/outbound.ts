@@ -61,9 +61,15 @@ export function editOf(op: Op): Edit {
  * idempotent, and their clocks ascend in document order so that a later local
  * edit — which takes a clock above all of them — always wins over the seed.
  */
-export function opsOf(doc: Document | null): Op[] {
+export function opsOf(doc: Document | null, tab: string): Op[] {
   if (!doc) return [];
   const out: Op[] = [];
+
+  // A document is the whole workspace: every tab, each hanging under a root
+  // node whose id is the tab's. One Workspace here is one tab, so what it
+  // adopts is that root's children -- adopting the document whole would put
+  // every other tab's outline on this tab's screen, as top-level lines.
+  const root = (doc.tree ?? []).find((n) => n.id === tab);
 
   const push = (node: WireNode, parent: string) => {
     out.push({
@@ -87,10 +93,15 @@ export function opsOf(doc: Document | null): Op[] {
     }
   };
 
-  walk(doc.tree ?? [], "");
+  walk(root?.children ?? [], "");
   // Detached nodes are not an error case to hide: they are what an eventually
   // consistent tree looks like while it converges, and sometimes once it has.
   // They keep the parent they were given, which is the node that is not there.
+  //
+  // Not filtered by tab, because a detached node is one whose parent cannot be
+  // found -- so which tab it belongs to is exactly the question that cannot be
+  // answered. Showing it in the tab that is open is better than showing it
+  // nowhere.
   for (const node of doc.detached ?? []) push(node, node.parent ?? "");
 
   return out;

@@ -164,7 +164,16 @@ export class Workspaces {
     });
     const offSync = Events.On(WORKSPACE_SYNC, (e) => {
       const payload = e.data as { status?: Status };
-      if (payload?.status) this.status = payload.status;
+      if (!payload?.status) return;
+      // The cursor is how far the log has been merged. When it moves, somebody
+      // else's edits are in the document -- and this is the first version of
+      // this app in which that is true of the outline, rather than only of the
+      // board. See events.go for why the document is fetched rather than
+      // carried: this event fires on every poll, and a merged tree on it would
+      // re-encode the workspace every few seconds to say nothing happened.
+      const moved = payload.status.cursor !== this.status?.cursor;
+      this.status = payload.status;
+      if (moved) void this.#refreshDocument();
     });
 
     void this.#firstPaint();
@@ -173,6 +182,24 @@ export class Workspaces {
       offChanged();
       offSync();
     };
+  }
+
+  /**
+   * Pulls the merged document and gives each tab its own part of it.
+   *
+   * Every tab at once rather than only the one on screen: a tab in the
+   * background whose outline is stale is a tab that shows yesterday's document
+   * the moment somebody clicks it, and the document is one call for all of
+   * them.
+   */
+  async #refreshDocument(): Promise<void> {
+    try {
+      const doc = await Workbench.WorkspaceDocument();
+      for (const workspace of this.list) workspace.adopt(doc);
+    } catch {
+      // No transport, or a backend that has not got this call. The local
+      // documents stand, which is what an unjoined machine has always done.
+    }
   }
 
   async #firstPaint(): Promise<void> {

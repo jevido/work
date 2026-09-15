@@ -687,7 +687,7 @@ export class Workspace {
   adopt(doc: Document | null): void {
     if (!doc) return;
     const rebuilt = new State();
-    for (const op of opsOf(doc)) {
+    for (const op of opsOf(doc, this.id)) {
       try {
         rebuilt.apply(op);
       } catch {
