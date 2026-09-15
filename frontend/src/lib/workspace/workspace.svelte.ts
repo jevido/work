@@ -192,6 +192,25 @@ export class Workspace {
    */
   send: ((edits: Edit[]) => Promise<Document | null>) | null = null;
 
+  /**
+   * Lines that changed elsewhere while somebody was in them.
+   *
+   * Node id to the text the document now holds. A marker rather than an
+   * overwrite: what is under the caret belongs to the person typing, and a poll
+   * arriving mid-word is not a reason to take a word off them. Cleared by
+   * leaving the line, or by taking what arrived.
+   */
+  marks = $state<Record<string, string>>({});
+
+  /**
+   * What the document said when the caret arrived, per line being edited.
+   *
+   * Compared against rather than the draft: the draft is what is being typed
+   * and changes constantly, so a comparison with it would mark a line every
+   * time anybody's own keystroke settled.
+   */
+  #baseline: Record<string, string> = {};
+
   /** Edits waiting to cross, oldest first. */
   #outbound: Edit[] = [];
   /** True while a batch is in flight, which is what serialises them. */
@@ -286,6 +305,53 @@ export class Workspace {
    * The op carries the whole line, so the one that eventually goes is the line
    * as it ends up; no intermediate state is anybody else's business.
    */
+  /**
+   * The caret arrived. The line stops taking the document's value until it
+   * leaves.
+   *
+   * Holding a draft for the whole time the line is focused is what makes that
+   * true: text() prefers a draft, so a document adopted underneath changes
+   * nothing on screen. A draft equal to the node emits nothing when it settles,
+   * so this costs no ops.
+   */
+  enter(id: string): void {
+    const now = this.text(id);
+    this.#baseline[id] = now;
+    if (this.drafts[id] === undefined) {
+      this.drafts[id] = now;
+      this.revision++;
+    }
+  }
+
+  /**
+   * The caret left. What was typed becomes an ordinary edit, and the marker
+   * goes with it.
+   *
+   * Deliberately not a second conflict system: a line that changed elsewhere
+   * and was then typed over resolves the way every other edit does -- by clock,
+   * through the merge, with a note if it loses. The marker is about the moment
+   * of typing.
+   */
+  leave(id: string): void {
+    this.#settle(id);
+    delete this.#baseline[id];
+    if (this.marks[id] !== undefined) {
+      const { [id]: _gone, ...rest } = this.marks;
+      this.marks = rest;
+    }
+  }
+
+  /** Takes what arrived, discarding what was being typed. */
+  takeArrived(id: string): void {
+    const arrived = this.marks[id];
+    if (arrived === undefined) return;
+    delete this.drafts[id];
+    this.#baseline[id] = arrived;
+    const { [id]: _gone, ...rest } = this.marks;
+    this.marks = rest;
+    this.revision++;
+  }
+
   setText(id: string, text: string): void {
     if (this.text(id) === text) return;
     this.drafts[id] = text;
@@ -633,6 +699,17 @@ export class Workspace {
     }
     if (!applied) return false;
     this.#refresh();
+
+    // A change this machine made on purpose is shown, even into a line with a
+    // caret in it. The marker exists to stop a *remote* edit landing under
+    // somebody's fingers; an approved proposal, or taking the version from
+    // elsewhere, is this person's own decision and masking it behind their own
+    // draft would look like the app ignoring them.
+    const wrote = op.fields?.[FIELD_TEXT];
+    if (typeof wrote === "string" && this.drafts[op.node] !== undefined) {
+      this.drafts[op.node] = wrote;
+      if (this.#baseline[op.node] !== undefined) this.#baseline[op.node] = wrote;
+    }
     // Optimistic first, then sent. ApplyWorkspaceEdits is a round trip and
     // typing cannot wait on one -- the character is on screen in this frame,
     // and the op it becomes is Go's business.
@@ -699,6 +776,16 @@ export class Workspace {
     this.#state = rebuilt;
     this.#replica = new Replica(actorId(), () => this.#state.clock);
     this.#refresh();
+
+    // A line somebody is in whose text moved underneath. Marked, never taken:
+    // the caret's owner decides, and until they do, what they typed is what is
+    // on screen.
+    for (const id of Object.keys(this.#baseline)) {
+      const arrived = textOf(findInTree(this.tree, id) ?? this.#detachedNode(id));
+      if (arrived === this.#baseline[id]) continue;
+      this.#baseline[id] = arrived;
+      this.marks = { ...this.marks, [id]: arrived };
+    }
   }
 
   #refresh(): void {
@@ -777,6 +864,17 @@ export class Workspace {
     const node = findInTree(this.tree, id) ?? this.#detachedNode(id);
     if (node && textOf(node) !== draft) {
       this.#emit(this.#replica.setFields(id, { [FIELD_TEXT]: draft }));
+    }
+    if (this.#baseline[id] !== undefined) {
+      // Still being typed in. The draft stays, because a line without one
+      // takes the document's value -- and the whole point of the marker is
+      // that a document arriving does not get to put its text under somebody's
+      // caret. The baseline moves to what was just written, so the next remote
+      // change is measured against what this machine believes rather than
+      // against whatever was there when the caret arrived.
+      this.#baseline[id] = draft;
+      this.revision++;
+      return;
     }
     delete this.drafts[id];
     this.revision++;

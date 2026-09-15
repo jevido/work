@@ -92,10 +92,37 @@
           placeholder={row.depth === 0 && rows.length === 1 ? "What are you thinking about?" : ""}
           oninput={(event) => ws.setText(id, event.currentTarget.value)}
           onkeydown={(event) => outline.keydown(event, row)}
-          onfocus={() => outline.focused(id)}
-          onblur={() => outline.isFocused(id) && outline.focused(null)}
+          onfocus={() => {
+            ws.enter(id);
+            outline.focused(id);
+          }}
+          onblur={() => {
+            ws.leave(id);
+            outline.isFocused(id) && outline.focused(null);
+          }}
           {@attach (el) => outline.register(id, el)}
         />
+
+        {#if ws.marks[id] !== undefined}
+          <!--
+            Changed elsewhere, while the caret was in it. Nothing has been
+            taken: what is in the box is what was typed, and this says what the
+            line says instead and offers to swap.
+
+            Said as well as shown. A row that is a different colour and silent
+            is a row somebody types into with no idea anything happened.
+          -->
+          <span class="changed" role="status">
+            <span class="what">Changed elsewhere — now “{ws.marks[id]}”</span>
+            <button
+              class="take"
+              onclick={() => ws.takeArrived(id)}
+              aria-label="Use the version from elsewhere"
+            >
+              Use theirs
+            </button>
+          </span>
+        {/if}
 
         {#if folded && row.descendants > 0}
           <!-- What folding hid. A chevron alone makes a branch of forty lines
@@ -332,5 +359,39 @@
   :focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 1px;
+  }
+
+  /* Under the line rather than beside it: the text that arrived can be long,
+     and pushing the input narrower would make the line harder to type in at
+     exactly the moment somebody is typing in it. */
+  .changed {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    padding: 2px 0 2px 2px;
+    font-size: 11px;
+    color: var(--muted);
+  }
+
+  .changed .what {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .changed .take {
+    flex-shrink: 0;
+    padding: 1px 6px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: transparent;
+    color: inherit;
+    font-size: 11px;
+    cursor: pointer;
+  }
+
+  .changed .take:hover {
+    color: var(--text, inherit);
   }
 </style>

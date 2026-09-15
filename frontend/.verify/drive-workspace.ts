@@ -953,6 +953,76 @@ async function run() {
     kindsSince(editCalls().length - 1),
   );
 
+  /* ---------------------------------------------------------------------- */
+  /* 4g. A line that changes under the caret is marked, not taken           */
+  /* ---------------------------------------------------------------------- */
+
+  pickMode("idea");
+  await settle(10);
+
+  const marker = () => $("span.changed .what");
+  const useTheirs = () =>
+    $$<HTMLButtonElement>("span.changed button").find((b) => b.textContent?.trim() === "Use theirs") ?? null;
+
+  const caretRow = lines()[0];
+  check("there is a line to put the caret in", !!caretRow);
+  if (caretRow) {
+    caretRow.focus();
+    caretRow.value = "mine, mid-word";
+    caretRow.dispatchEvent(new Event("input", { bubbles: true }));
+    // Past the debounce on purpose. Before this task, a settled draft was
+    // deleted and the next document to arrive replaced what was on screen --
+    // which is the failure this is about, and it needs the draft to be gone
+    // for the old behaviour to show.
+    await new Promise((r) => setTimeout(r, 900));
+    await settle(10);
+  }
+
+  const caretId = nodeIds()[0];
+  V().remote({
+    cursor: 501,
+    tree: [
+      {
+        id: "tab-a",
+        position: "m",
+        fields: { text: "Work" },
+        children: [
+          { id: caretId, position: "m", fields: { type: "idea", text: "theirs, arriving" }, children: [] },
+        ],
+      },
+    ],
+    detached: [],
+  });
+  await settle(25);
+
+  check(
+    "what was typed is still in the box",
+    lines()[0]?.value === "mine, mid-word",
+    lines()[0]?.value ?? "gone",
+  );
+  check("and the row says the line changed elsewhere", !!marker(), marker()?.textContent?.trim() ?? "no marker");
+  check(
+    "naming what it says now",
+    (marker()?.textContent ?? "").includes("theirs, arriving"),
+    marker()?.textContent?.trim() ?? "",
+  );
+  // Nobody, again. The marker is one of the three places a name would be easy
+  // to add and wrong to have.
+  check(
+    "and naming nobody",
+    !/\bby\b|author|actor|machine|someone|somebody/i.test(marker()?.textContent ?? ""),
+  );
+
+  check("taking theirs is offered, not done", !!useTheirs());
+  useTheirs()?.click();
+  await settle(15);
+  check(
+    "taking theirs swaps the line",
+    lines()[0]?.value === "theirs, arriving",
+    lines()[0]?.value ?? "gone",
+  );
+  check("and the marker goes with it", !marker());
+
 }
 
 run()

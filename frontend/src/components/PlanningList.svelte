@@ -187,8 +187,22 @@
                 placeholder="What needs doing?"
                 oninput={(event) => workspace.setTaskTitle(task.id, event.currentTarget.value)}
                 onkeydown={(event) => onKeydown(event, task.id, at)}
+                onfocus={() => workspace.enter(task.id)}
+                onblur={() => workspace.leave(task.id)}
                 {@attach (el) => register(task.id, el)}
               />
+
+              {#if workspace.marks[task.id] !== undefined}
+                <!--
+                  The same rule the outline follows, because a task's title is a
+                  line somebody types into like any other: what arrived is shown
+                  and offered, never taken.
+                -->
+                <p class="changed" role="status">
+                  Changed elsewhere — now &ldquo;{workspace.marks[task.id]}&rdquo;
+                  <button onclick={() => workspace.takeArrived(task.id)}>Use theirs</button>
+                </p>
+              {/if}
 
               <div class="actions">
                 <button
@@ -525,5 +539,23 @@
   :focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
+  }
+
+  .changed {
+    grid-column: 1 / -1;
+    margin: 2px 0 0;
+    font-size: 11px;
+    color: var(--muted);
+  }
+
+  .changed button {
+    margin-left: 6px;
+    padding: 1px 6px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: transparent;
+    color: inherit;
+    font-size: 11px;
+    cursor: pointer;
   }
 </style>
