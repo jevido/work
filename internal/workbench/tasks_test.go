@@ -572,3 +572,83 @@ func TestTaskPromptCarriesTheIdea(t *testing.T) {
 		t.Errorf("a task with no origin claims one: %q", without)
 	}
 }
+
+// The two mirrors meeting. Both already refuse to write a value that is already
+// there, so this is not about a loop -- it is about a status surviving the
+// first time each side sees the other.
+func TestStatusSurvivesBothMirrors(t *testing.T) {
+	t.Run("a task that is underway gets a card that is underway", func(t *testing.T) {
+		w, tab := joinedWorkbench(t, newFakeOps())
+		plan(t, w, tab, [2]string{"started elsewhere", TaskTodo})
+		if _, err := w.ApplyEdits(tab, []Edit{
+			{Kind: "set-fields", Node: "started elsewhere", Fields: map[string]any{FieldStatus: TaskDoing}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		card, ok := cardTitled(w, "started elsewhere")
+		if !ok {
+			t.Fatal("the task never reached the board")
+		}
+		if card.Status != board.StatusDoing {
+			t.Errorf("card status = %q, want doing", card.Status)
+		}
+
+		// And the plan still says so, rather than having had todo written back
+		// over it by the card it just created.
+		for _, task := range tabTasks(w.WorkspaceDocument(), tab) {
+			if task.ID != "started elsewhere" {
+				continue
+			}
+			if got := fieldString(task, FieldStatus); got != TaskDoing {
+				t.Errorf("the plan says %q after the board saw it, want doing", got)
+			}
+		}
+	})
+
+	t.Run("a task moved back to todo moves its card back", func(t *testing.T) {
+		// The direction that used to be one-way: only done was mirrored, so a
+		// correction in the plan left the card finished and the next pass wrote
+		// done back over the correction.
+		w, tab := joinedWorkbench(t, newFakeOps())
+		plan(t, w, tab, [2]string{"finished too soon", TaskTodo})
+		if _, err := w.ApplyEdits(tab, []Edit{
+			{Kind: "set-fields", Node: "finished too soon", Fields: map[string]any{FieldStatus: TaskDone}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if card, _ := cardTitled(w, "finished too soon"); card.Status != board.StatusDone {
+			t.Fatalf("card did not follow the task to done: %q", card.Status)
+		}
+
+		if _, err := w.ApplyEdits(tab, []Edit{
+			{Kind: "set-fields", Node: "finished too soon", Fields: map[string]any{FieldStatus: TaskTodo}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if card, _ := cardTitled(w, "finished too soon"); card.Status != board.StatusTodo {
+			t.Errorf("card status = %q after the plan moved it back, want todo", card.Status)
+		}
+		for _, task := range tabTasks(w.WorkspaceDocument(), tab) {
+			if task.ID == "finished too soon" && fieldString(task, FieldStatus) != TaskTodo {
+				t.Errorf("the plan was overwritten back to %q", fieldString(task, FieldStatus))
+			}
+		}
+	})
+}
+
+// Blocked has no opposite. The board has four states and the plan has three, so
+// a round trip must not invent one the plan cannot hold.
+func TestBlockedRoundTrips(t *testing.T) {
+	if got := taskStatus(board.StatusBlocked); got != TaskDoing {
+		t.Errorf("a blocked card is %q on the plan, want doing", got)
+	}
+	if got := cardStatus(TaskDoing); got != board.StatusDoing {
+		t.Errorf("doing came back as %q", got)
+	}
+	for _, status := range []string{TaskTodo, TaskDoing, TaskDone} {
+		if round := taskStatus(cardStatus(status)); round != status {
+			t.Errorf("%q round-tripped to %q", status, round)
+		}
+	}
+}

@@ -372,3 +372,58 @@ func docNodes(doc Document) func(func(ops.Node) bool) {
 		}
 	}
 }
+
+// The two mirrors do not set each other off.
+//
+// Both directions already refuse to write a value that is already there, so
+// this is not expected to fail -- it is here because a loop between them would
+// not look like a crash. It would look like the log growing by two ops a second
+// while the board sits still, and nothing else in the suite would notice.
+func TestLiveTheMirrorsDoNotEcho(t *testing.T) {
+	a, b, tab, _, _ := pair(t, "live/no-echo")
+
+	if _, err := a.ApplyEdits(tab, []Edit{
+		{Kind: "create-node", Node: "echo1", Fields: map[string]any{FieldType: TypeIdea, FieldText: "an idea"}},
+		{Kind: "extract-to-task", Node: "echo1", Task: "echot1", Position: "m",
+			Fields: map[string]any{FieldType: TypeTask, FieldText: "a task to finish"}},
+	}); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	converged(t, a, b)
+
+	settled := drain(t, a).Head
+
+	if _, err := a.ApplyEdits(tab, []Edit{
+		{Kind: "set-fields", Node: "echot1", Fields: map[string]any{FieldStatus: TaskDone}},
+	}); err != nil {
+		t.Fatalf("mark done: %v", err)
+	}
+	converged(t, a, b)
+	afterDone := drain(t, a).Head
+
+	// A handful, not a stream. The exact number depends on what the board
+	// mirrors back alongside it, and the point is that it is bounded.
+	if grew := afterDone - settled; grew > 4 {
+		t.Errorf("marking one task done wrote %d ops", grew)
+	}
+
+	// And then it stops. Three more cycles with nobody touching anything must
+	// write nothing at all -- this is the assertion a loop fails.
+	for range 3 {
+		drain(t, a)
+		drain(t, b)
+	}
+	if quiet := drain(t, a).Head; quiet != afterDone {
+		t.Errorf("the log grew by %d with nobody editing: the two mirrors are feeding each other", quiet-afterDone)
+	}
+
+	// Both sides agree about the task, which is the outcome all this is for.
+	converged(t, a, b)
+	for _, w := range []*Workbench{a, b} {
+		for _, task := range tabTasks(w.WorkspaceDocument(), tab) {
+			if task.ID == "echot1" && fieldString(task, FieldStatus) != TaskDone {
+				t.Errorf("a replica says the task is %q", fieldString(task, FieldStatus))
+			}
+		}
+	}
+}

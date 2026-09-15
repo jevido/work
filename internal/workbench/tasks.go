@@ -124,10 +124,15 @@ func (w *Workbench) adoptTasks() {
 		// already for.
 		id := w.board.Add("", "", title)
 		w.linkTask(id, task.ID)
-		if status := fieldString(task, FieldStatus); status == TaskDone {
+		// The task's status, not only "done". A card is created todo and
+		// taskOps writes a card's status back, so a task that was already
+		// underway got a todo card and then had todo written over it. Not a
+		// loop -- both sides refuse to write a value that is already there --
+		// but a status lost the first time the two mirrors met.
+		if status := cardStatus(fieldString(task, FieldStatus)); status != board.StatusTodo {
 			// A task already finished elsewhere arrives finished, rather than
 			// as work to do that somebody has to close by hand.
-			w.board.SetStatus(id, board.StatusDone, "")
+			w.board.SetStatus(id, status, "")
 		}
 		changed = true
 	}
@@ -151,8 +156,11 @@ func (w *Workbench) syncCard(card board.Card, task ops.Node, title string) bool 
 	// planning, or on another machine, and the card follows. The reverse -- a
 	// task moved back to todo under a card that is running -- is deliberately
 	// not followed; see the note at the top of this file.
-	if fieldString(task, FieldStatus) == TaskDone && card.Status != board.StatusDone {
-		w.board.SetStatus(card.ID, board.StatusDone, "")
+	// Every status, not only done. Mirroring one direction of one value meant
+	// a task moved back to todo in the plan left its card sitting in done, and
+	// the next board-to-plan pass wrote done back over the correction.
+	if want := cardStatus(fieldString(task, FieldStatus)); want != card.Status {
+		w.board.SetStatus(card.ID, want, "")
 		changed = true
 	}
 	return changed
@@ -294,6 +302,22 @@ func taskOps(s *Sync, tab string, links map[string]string, cards []board.Card) (
 // task is started and not finished, which is what doing means, and calling it
 // todo would say nobody had picked it up. An unknown column -- a board written
 // by a newer release -- reads the same way rather than being dropped.
+// cardStatus is taskStatus the other way round.
+//
+// Blocked has no opposite: the board has four states and the plan has three,
+// and a blocked card is doing with a reason attached. Mapping it back to doing
+// is what stops a round trip inventing a state the plan cannot hold.
+func cardStatus(status string) board.Status {
+	switch status {
+	case TaskDone:
+		return board.StatusDone
+	case TaskDoing:
+		return board.StatusDoing
+	default:
+		return board.StatusTodo
+	}
+}
+
 func taskStatus(status board.Status) string {
 	switch status {
 	case board.StatusTodo:
