@@ -1,0 +1,636 @@
+# Runs the tests, on every push, for both Go modules in this repository, and
+# typechecks the two frontends against the Go they call.
+#
+# There are two Go modules, and that is the whole reason this file exists.
+# `server/` is a nested module, so the root module's `./...` does not see it:
+# every server test — including the ones behind work.jevido.app — had never run
+# in CI at all. One job per module, each with its own working-directory, is the
+# only shape that covers both.
+#
+# The `frontend` job is here for the seam rather than for the TypeScript. The
+# Svelte side calls Go through bindings that are generated from the Go source
+# and committed, which is two ways to be wrong: the committed bindings can be
+# stale, and the code calling them can be wrong about what Go returns. So that
+# job regenerates them, fails if the regeneration changed anything, and then
+# typechecks against them — which turns a service method renamed in Go into a
+# red run instead of a runtime error in a webview.
+#
+# The server's Postgres-backed tests skip themselves when TEST_DATABASE_URL is
+# unset, which is right locally and a trap here: a workflow that forgets the
+# service would report green while testing none of the code that is actually
+# deployed. Three things stop that, and they are deliberately redundant:
+#
+#   1. WORK_REQUIRE_POSTGRES turns the skip into a failure (see
+#      server/internal/pgtest). A missing database is red, not quiet.
+#   2. A step connects to TEST_DATABASE_URL with psql and prints the server
+#      version, so the run shows the database was reachable at the exact string
+#      the tests are handed — not merely that a service block exists.
+#   3. Every run asserts, from `go test -json`, that the database-backed
+#      packages reported passing tests and skipped none, and writes the counts
+#      into the run summary. Deleting the guard in Go does not make this pass.
+name: ci
+
+on:
+  # A deploy with nothing to deploy: re-runs the checks and then pushes the
+  # current main to Coolify. This is the way back from a deploy that failed for
+  # a reason outside this repository — a full disk, a registry timeout — without
+  # having to invent a commit.
+  workflow_dispatch:
+
+  push:
+    # Every branch, because that is how this repository is worked: people push
+    # to a branch and the checks have to be attached to the commit. A pushed
+    # branch that later opens a pull request shows these runs on the pull
+    # request already, so there is no `pull_request:` trigger to double them.
+    # The gap that leaves is a pull request from a fork, which gets no run.
+    #
+    # Not on tags: release.yml pushes one for every release, and re-testing the
+    # commit that was just tested adds nothing.
+    tags-ignore: ["**"]
+
+permissions:
+  contents: read
+
+# A branch only needs its newest commit tested. Unlike release, nothing here
+# produces an artifact that a cancelled run would leave half-written.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  desktop:
+    name: desktop module
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GTK and WebKit
+        # main.go and services/ are cgo against gtk4 and webkitgtk-6.0 through
+        # Wails, so `go vet ./...` cannot even typecheck them without the
+        # headers. Same pair as release.yml, for the same reason: nothing sets
+        # the `gtk3` build tag.
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libgtk-4-dev libwebkitgtk-6.0-dev
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Stand in for the embedded frontend
+        # main.go has `//go:embed all:frontend/dist`, and frontend/dist is
+        # gitignored, so the root package does not compile from a clean
+        # checkout. This job is about the Go code; release.yml is what builds
+        # the real frontend and proves the two fit together. A placeholder is
+        # enough to let the embed resolve.
+        run: |
+          set -euo pipefail
+          mkdir -p frontend/dist
+          echo '<!-- placeholder: ci does not build the frontend -->' > frontend/dist/index.html
+
+      - name: gofmt
+        # The module's own package directories, listed rather than `gofmt -l .`:
+        # a bare dot would walk into server/, which is a different module with
+        # its own job.
+        run: |
+          set -euo pipefail
+          unformatted=$(gofmt -l $(go list -f '{{.Dir}}' ./...))
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt would rewrite these files:"
+            echo "$unformatted"
+            exit 1
+          fi
+          echo "gofmt is clean."
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        # -race because internal/ops is reached from more than one goroutine in
+        # the app, and -count=1 because a cached PASS proves nothing about this
+        # commit.
+        run: |
+          set -o pipefail
+          go test -race -count=1 -json ./... \
+            | tee "$RUNNER_TEMP/desktop.json" \
+            | jq -j 'select(.Action=="output") | .Output'
+
+      - name: Check internal/ops actually ran
+        # The merge is shared with the server and is the one package in this
+        # module the sync layer depends on, so "the job was green" has to mean
+        # "these tests ran", not "these tests were skipped or dropped from the
+        # build".
+        if: always()
+        run: |
+          set -euo pipefail
+          results="$RUNNER_TEMP/desktop.json"
+          test -s "$results" || { echo "::error::no test output to check"; exit 1; }
+
+          pkg=dev.jevido/work/internal/ops
+          passed=$(jq -r --arg p "$pkg" 'select(.Action=="pass" and .Package==$p and has("Test")) | .Test' "$results" | wc -l)
+          skipped=$(jq -r --arg p "$pkg" 'select(.Action=="skip" and .Package==$p and has("Test")) | .Test' "$results")
+
+          {
+            echo "### desktop module"
+            echo
+            echo "- \`$pkg\`: **$passed** tests passed"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -n "$skipped" ]; then
+            echo "::error::$pkg skipped tests: $skipped"
+            exit 1
+          fi
+          if [ "$passed" -lt 1 ]; then
+            echo "::error::$pkg reported no passing tests; the merge was not exercised"
+            exit 1
+          fi
+          echo "$pkg: $passed passed, none skipped."
+
+  server:
+    name: server module
+    runs-on: ubuntu-24.04
+
+    services:
+      postgres:
+        # The same 17-alpine as docker-compose.yml and as production, because
+        # what these tests check — FOR UPDATE making a sequence gapless, a
+        # unique index catching a racing insert, jsonb round-tripping an op —
+        # is server behaviour, not driver behaviour.
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: work
+          POSTGRES_PASSWORD: work
+          POSTGRES_DB: work_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U work -d work_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      # 127.0.0.1, not localhost: the service port is published on IPv4 only,
+      # and a resolver that answers ::1 first turns this into a connection
+      # refused that looks like a broken test.
+      TEST_DATABASE_URL: postgres://work:work@127.0.0.1:5432/work_test?sslmode=disable
+      # The promise that the line above is real. server/internal/pgtest fails
+      # instead of skipping when this is set, so a database that is configured
+      # but unreachable cannot pass as "nothing to run".
+      WORK_REQUIRE_POSTGRES: "1"
+
+    defaults:
+      run:
+        working-directory: server
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # The server module's own go.mod. It has a `replace` back up to the
+          # root module for internal/ops, which is why the whole repository is
+          # checked out and not just this directory.
+          go-version-file: server/go.mod
+          cache: true
+          cache-dependency-path: server/go.sum
+
+      - name: Prove the database is reachable
+        # Not a formality. This connects with the exact TEST_DATABASE_URL the
+        # tests are given, so the run carries evidence that the string works
+        # rather than evidence that a service block was written.
+        run: |
+          set -euo pipefail
+          version=$(psql "$TEST_DATABASE_URL" -tAc 'select version()')
+          echo "$version"
+          case "$version" in
+            "PostgreSQL 17"*) ;;
+            *) echo "::error::expected PostgreSQL 17, got: $version"; exit 1 ;;
+          esac
+          {
+            echo "### server module"
+            echo
+            echo "- database: \`$version\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: gofmt
+        run: |
+          set -euo pipefail
+          unformatted=$(gofmt -l $(go list -f '{{.Dir}}' ./...))
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt would rewrite these files:"
+            echo "$unformatted"
+            exit 1
+          fi
+          echo "gofmt is clean."
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        # -race is not optional here: the store's gapless sequence and the
+        # rate limiter are both concurrency claims, and the tests that make
+        # them run goroutines on purpose.
+        run: |
+          set -o pipefail
+          go test -race -count=1 -json ./... \
+            | tee "$RUNNER_TEMP/server.json" \
+            | jq -j 'select(.Action=="output") | .Output'
+
+      - name: Check the Postgres tests ran rather than skipped
+        # The independent check. WORK_REQUIRE_POSTGRES lives in Go and could be
+        # removed there; this reads the machine-readable test output and holds
+        # the workflow to its own claim.
+        if: always()
+        run: |
+          set -euo pipefail
+          results="$RUNNER_TEMP/server.json"
+          test -s "$results" || { echo "::error::no test output to check"; exit 1; }
+
+          # Both packages that need the database: the store against Postgres,
+          # and the end-to-end tests in package main that put the real handlers
+          # in front of it.
+          backed="dev.jevido/work/server/store dev.jevido/work/server"
+
+          failed=0
+          {
+            echo
+            echo "| package | passed | skipped |"
+            echo "| --- | --- | --- |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          for pkg in $backed; do
+            passed=$(jq -r --arg p "$pkg" 'select(.Action=="pass" and .Package==$p and has("Test")) | .Test' "$results" | wc -l)
+            skipped=$(jq -r --arg p "$pkg" 'select(.Action=="skip" and .Package==$p and has("Test")) | .Test' "$results")
+            if [ -z "$skipped" ]; then count=0; else count=$(echo "$skipped" | wc -l); fi
+            echo "| \`$pkg\` | $passed | $count |" >> "$GITHUB_STEP_SUMMARY"
+
+            if [ -n "$skipped" ]; then
+              echo "::error::$pkg skipped tests that need the database: $(echo "$skipped" | tr '\n' ' ')"
+              failed=1
+            fi
+            if [ "$passed" -lt 1 ]; then
+              echo "::error::$pkg reported no passing tests; the database-backed suite did not run"
+              failed=1
+            fi
+            echo "$pkg: $passed passed, $count skipped."
+          done
+          exit "$failed"
+
+  frontend:
+    name: frontend and bindings
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GTK and WebKit
+        # Needed to generate the bindings, not to typecheck them: `wails3
+        # generate bindings` builds the app's own packages to read the service
+        # types out of them, and those packages are cgo against gtk4 and
+        # webkitgtk-6.0. Same pair as the other jobs and as release.yml.
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libgtk-4-dev libwebkitgtk-6.0-dev
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          # Both frontends. web/ is the read-only viewer and has its own
+          # lockfile; caching one and not the other would leave half the job
+          # installing from the registry every run.
+          cache-dependency-path: |
+            frontend/package-lock.json
+            web/package-lock.json
+
+      - name: Install wails3
+        # Pinned to the version in go.mod, exactly as release.yml pins it: the
+        # CLI generates the bindings the frontend imports, so a newer CLI than
+        # the library is a way to typecheck against a backend that was never
+        # shipped.
+        run: go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.18
+
+      - name: Stand in for the embedded frontend
+        # For the same reason the desktop job does it: main.go has
+        # `//go:embed all:frontend/dist`, the directory is gitignored, and
+        # generating bindings typechecks the package that embeds it. The real
+        # dist is built further down, over the top of this.
+        run: |
+          set -euo pipefail
+          mkdir -p frontend/dist
+          echo '<!-- placeholder: replaced by the build below -->' > frontend/dist/index.html
+
+      - name: Generate the bindings
+        # -clean, so a binding for something that no longer exists cannot
+        # survive into the typecheck below and make a deleted method look
+        # callable.
+        run: wails3 generate bindings -clean=true -ts -i
+
+      - name: Check the committed bindings are current
+        # frontend/bindings is generated *and* committed -- the frontend
+        # imports it, so a checkout has to be able to build without a Go
+        # toolchain. That makes staleness possible, and staleness here is a
+        # frontend typechecking against a backend that no longer exists. This
+        # is the whole reason regeneration happens in CI rather than being
+        # trusted to whoever last changed a service.
+        run: |
+          set -euo pipefail
+          if ! git diff --quiet --exit-code -- frontend/bindings; then
+            echo "::error::the committed bindings are out of date; run 'wails3 generate bindings -clean=true -ts -i' and commit frontend/bindings"
+            git diff --stat -- frontend/bindings
+            exit 1
+          fi
+          echo "the committed bindings match the Go source."
+
+      - name: Check the workspace calls reached the frontend
+        # A named assertion rather than trusting that generation succeeded.
+        # These are the methods the Svelte side needs in order to join a
+        # workspace, bind a tab, draw the badge and write the outline; a
+        # service method that stops being exported generates no binding and
+        # fails no typecheck until something calls it.
+        run: |
+          set -euo pipefail
+          bindings=frontend/bindings/dev.jevido/work/services/workbenchservice.ts
+          test -f "$bindings" || {
+            echo "::error::$bindings was not generated"
+            exit 1
+          }
+          missing=()
+          for fn in CreateWorkspace JoinWorkspace LeaveWorkspace WorkspaceKeys \
+                    BindTabFolder NewTab ActivateTab CloseTab \
+                    SyncStatus SyncNow WorkspaceDocument WorkspaceCards \
+                    ApplyWorkspaceEdits; do
+            grep -qE "export function $fn\b" "$bindings" || missing+=("$fn")
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::these service methods have no binding: ${missing[*]}"
+            exit 1
+          fi
+          echo "every workspace call has a binding."
+
+      - name: Install frontend dependencies
+        # `npm ci`, not `npm install`: the lockfile is the version set that was
+        # tested, and a CI run that resolves its own is testing something else.
+        run: npm ci
+        working-directory: frontend
+
+      - name: Typecheck the desktop frontend
+        # svelte-check against the generated bindings, which is the whole
+        # point of the job: this is where a Go type that changed shape shows
+        # up as a compile error on the Svelte side.
+        run: npm run check
+        working-directory: frontend
+
+      - name: Build the desktop frontend
+        # main.go embeds frontend/dist, so a frontend that typechecks and does
+        # not bundle is a release that cannot be built. Cheaper to find out
+        # here than in release.yml.
+        run: npm run build
+        working-directory: frontend
+
+      - name: Install viewer dependencies
+        run: npm ci
+        working-directory: web
+
+      - name: Typecheck and build the viewer
+        # No bindings here, deliberately: the viewer talks to the server over
+        # HTTP and imports nothing from Go. It is in this job rather than its
+        # own because it shares the Node setup and takes seconds.
+        run: |
+          set -euo pipefail
+          npm run check
+          npm run build
+        working-directory: web
+
+  deploy:
+    name: deploy the sync server
+    # All three, because the image contains all three's output now: the
+    # Dockerfile's site stage builds web/ into /srv/site, so a viewer that does
+    # not typecheck is a deploy that fails in the builder. Better to learn that
+    # from the job whose name says "frontend" than from a rollout log.
+    #
+    # This comment used to say the opposite, and was right when it was written:
+    # the image held the binary and nothing else.
+    needs: [desktop, server, frontend]
+    runs-on: ubuntu-24.04
+    # Never from a fork, and never from a branch: Coolify builds the branch its
+    # own resource is configured for, so a deploy triggered by any other branch
+    # would build something other than what was just tested. The guard below
+    # checks that claim against the API rather than assuming it.
+    if: >-
+      github.repository == 'jevido/work'
+      && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+    concurrency:
+      # Not the ci-${{ github.ref }} group above: that one cancels in progress,
+      # and a cancelled deploy is a half-finished rollout. Deploys queue.
+      group: deploy-sync-server
+      cancel-in-progress: false
+    env:
+      # The Coolify resource for work.jevido.app: a "Docker Compose" app built
+      # from this repository's own docker-compose.yml, with the domain held in
+      # the resource rather than in the file. Not a secret -- it identifies a
+      # resource and authorises nothing -- and hardcoded rather than hidden so
+      # this workflow says what it deploys.
+      RESOURCE: ecybnfgoyf5aytbefsf9mkot
+      COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
+      COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The whole history, because the path filter below diffs the *push*
+          # and a push can carry any number of commits. A shallow clone was
+          # the first version of this and it was wrong: HEAD^..HEAD sees only
+          # the last commit, so a server change in an earlier commit of the
+          # same push would be tested and then not deployed.
+          fetch-depth: 0
+
+      - name: Check the credentials are here
+        # Loudly, and before anything else. A missing secret on this
+        # repository's main is a broken deploy pipeline, and the failure mode
+        # worth avoiding is the one where it looks like a successful run that
+        # simply chose not to deploy.
+        run: |
+          set -euo pipefail
+          test -n "${COOLIFY_URL:-}" || { echo "::error::COOLIFY_URL is not set"; exit 1; }
+          test -n "${COOLIFY_TOKEN:-}" || { echo "::error::COOLIFY_TOKEN is not set"; exit 1; }
+
+      - name: Decide whether anything the server runs actually changed
+        id: scope
+        # The image build runs `go test ./...` inside it, so a deploy is not
+        # free: it is a rebuild plus a rollout. A commit that only touched the
+        # frontend produces a byte-identical server, and redeploying it
+        # restarts a healthy service for nothing.
+        #
+        # The paths are exactly what the Dockerfile copies, plus the two files
+        # that describe the deployment itself. A manual run skips the question.
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "reason=manual run" >> "$GITHUB_OUTPUT"
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The whole push, not the last commit of it. A branch's first push
+          # reports an all-zero "before", which has nothing to diff against:
+          # that deploys, because it cannot be shown not to need to.
+          before=${{ github.event.before }}
+          if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
+            echo "reason=no previous commit to compare against" >> "$GITHUB_OUTPUT"
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed=$(git diff --name-only "$before" "${{ github.sha }}" -- \
+            server/ internal/ops/ go.mod go.sum Dockerfile .dockerignore \
+            docker-compose.yml web/)
+          if [ -z "$changed" ]; then
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+            echo "Nothing the server is built from changed; not redeploying." \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "deploy=true" >> "$GITHUB_OUTPUT"
+          {
+            echo "### deploy"
+            echo
+            echo "Triggered by changes to:"
+            echo '```'
+            echo "$changed"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check Coolify builds the branch that was just tested
+        if: steps.scope.outputs.deploy == 'true'
+        # The one failure this pipeline can have that looks like a success.
+        # Coolify's deploy endpoint takes a resource, not a commit: it builds
+        # whatever branch the resource is configured for. So if the resource
+        # still points at a feature branch, a green run on main would deploy
+        # that feature branch and report a successful deploy of main.
+        #
+        # At the time of writing the resource tracks `sync-layer`, which is
+        # correct while that branch is what is being deployed and has to be
+        # changed to `main` when it merges. This step is what makes forgetting
+        # that loud.
+        run: |
+          set -euo pipefail
+          app=$(curl --fail --silent --show-error \
+            -H "Authorization: Bearer $COOLIFY_TOKEN" \
+            "$COOLIFY_URL/api/v1/applications/$RESOURCE")
+          branch=$(echo "$app" | jq -r '.git_branch')
+          echo "Coolify builds $(echo "$app" | jq -r '.git_repository')@$branch"
+          if [ "$branch" != "${{ github.ref_name }}" ]; then
+            echo "::error::the Coolify resource builds '$branch' but this run tested '${{ github.ref_name }}'; point the resource at '${{ github.ref_name }}' or deploy from '$branch'"
+            exit 1
+          fi
+
+      - name: Deploy
+        id: deploy
+        if: steps.scope.outputs.deploy == 'true'
+        run: |
+          set -euo pipefail
+          started=$(curl --fail --silent --show-error \
+            -H "Authorization: Bearer $COOLIFY_TOKEN" \
+            "$COOLIFY_URL/api/v1/deploy?uuid=$RESOURCE")
+          echo "$started" | jq .
+          uuid=$(echo "$started" | jq -r '.deployments[0].deployment_uuid // empty')
+          test -n "$uuid" || {
+            echo "::error::Coolify accepted the request without queueing a deployment"
+            exit 1
+          }
+          echo "deployment=$uuid" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for the rollout
+        if: steps.deploy.outputs.deployment != ''
+        # Triggering a deploy and calling that a success is how a broken image
+        # gets reported as shipped. Coolify's own rollout waits for the compose
+        # healthcheck -- which does a database round trip, see the Dockerfile --
+        # so "finished" here means the new container served a real request.
+        #
+        # The timeout is generous because the build runs the server's tests
+        # inside it, and tight enough that a wedged deploy does not hold a
+        # runner for an hour.
+        run: |
+          set -euo pipefail
+          uuid=${{ steps.deploy.outputs.deployment }}
+          deadline=$(( $(date +%s) + 900 ))
+          while :; do
+            body=$(curl --fail --silent --show-error \
+              -H "Authorization: Bearer $COOLIFY_TOKEN" \
+              "$COOLIFY_URL/api/v1/deployments/$uuid")
+            status=$(echo "$body" | jq -r '.status')
+            case "$status" in
+              finished)
+                echo "deployment $uuid finished."
+                exit 0
+                ;;
+              failed|cancelled-by-user)
+                echo "::error::deployment $uuid ended as $status"
+                # The log is the useful part of a failure and is the reason
+                # this prints the body rather than only the status.
+                echo "$body" | jq -r '.logs // empty' | tail -n 80
+                exit 1
+                ;;
+            esac
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::deployment $uuid was still '$status' after 15 minutes"
+              exit 1
+            fi
+            sleep 10
+          done
+
+      - name: Check work.jevido.app is serving
+        if: steps.deploy.outputs.deployment != ''
+        # From outside, through the proxy. Coolify's rollout has already
+        # checked the container from inside; this checks the thing a desktop
+        # app and a browser actually reach, which is the pair of them plus the
+        # certificate and the route.
+        #
+        # Three assertions, and the last two are the important ones. The root
+        # is a static handler mounted in front of a JSON API: mounting it
+        # wrongly does not break the page, it breaks the API, and it breaks it
+        # by answering 200 and HTML to a client that parses JSON. A check that
+        # only asks for the page would pass through exactly that failure.
+        run: |
+          set -euo pipefail
+          base=https://work.jevido.app
+
+          # Health first, and with retries: it is the one that says the new
+          # container is up at all, and everything below assumes it is.
+          for attempt in 1 2 3 4 5 6; do
+            if body=$(curl --fail --silent --show-error --max-time 10 "$base/v1/health"); then
+              echo "$body"
+              echo "- health: \`$body\`" >> "$GITHUB_STEP_SUMMARY"
+              break
+            fi
+            if [ "$attempt" = 6 ]; then
+              echo "::error::$base/v1/health did not answer after the rollout"
+              exit 1
+            fi
+            echo "attempt $attempt: not serving yet"
+            sleep 10
+          done
+
+          # The page. `<div id="app"` is what web/index.html mounts into --
+          # re-check that line if this ever fails on a page that looks fine in
+          # a browser.
+          code=$(curl --silent --show-error --max-time 10 --location \
+            -o /tmp/index.html -w '%{http_code}' "$base/")
+          test "$code" = "200" || { echo "::error::GET / answered $code"; exit 1; }
+          grep -q '<div id="app"' /tmp/index.html \
+            || { echo "::error::GET / did not return the viewer's page"; exit 1; }
+          echo "- viewer: served at \`/\`" >> "$GITHUB_STEP_SUMMARY"
+
+          # And an unknown API path, which must still be JSON and still be 404.
+          nope=$(curl --silent --max-time 10 -o /tmp/nope.json -w '%{http_code}' "$base/v1/nope")
+          test "$nope" = "404" || { echo "::error::GET /v1/nope answered $nope, want 404"; exit 1; }
+          grep -q '"not_found"' /tmp/nope.json \
+            || { echo "::error::an unknown API path is not answering the JSON error shape"; exit 1; }
