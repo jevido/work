@@ -6,6 +6,42 @@
 import * as json$0 from "../../../../encoding/json/models.js";
 
 /**
+ * Kind is what an op does.
+ */
+export enum Kind {
+    /**
+     * The Go zero value for the underlying type of the enum.
+     */
+    $zero = "",
+
+    /**
+     * KindCreateNode creates a node with a placement and initial fields.
+     */
+    KindCreateNode = "create-node",
+
+    /**
+     * KindSetFields merges field values into a node, one field at a time.
+     */
+    KindSetFields = "set-fields",
+
+    /**
+     * KindDeleteNode tombstones a node, permanently.
+     */
+    KindDeleteNode = "delete-node",
+
+    /**
+     * KindMoveNode re-parents a node and repositions it among its siblings.
+     */
+    KindMoveNode = "move-node",
+
+    /**
+     * KindExtractToTask creates a task node out of an existing node and links
+     * the two together.
+     */
+    KindExtractToTask = "extract-to-task",
+};
+
+/**
  * Node is one node as it stands after a merge. It is a snapshot: changing it
  * changes nothing in the [State] it came from.
  */

@@ -15,6 +15,7 @@ export type {
     ChangesEvent,
     ClaudeEvent,
     Document,
+    Edit,
     Keys,
     PlanStep,
     RunEvent,

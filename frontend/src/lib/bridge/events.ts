@@ -31,6 +31,39 @@ export const CHAT_FINISHED = "chat:finished";
 export const BOARD_UPDATED = "board:updated";
 
 /**
+ * The tool call a restructuring proposal arrives as.
+ *
+ * Not an event of its own. A proposal is Claude asking to change the outline,
+ * and Claude asks for things by calling a tool -- so it reaches the frontend
+ * the same way every other tool call does, over `claude:tool`, and this is the
+ * name to match on. The payload is the tool's input, read by
+ * lib/workspace/proposal.ts, which refuses anything that is not a set of
+ * operations over named nodes.
+ *
+ * Matching on a name rather than adding an event keeps the backend out of it:
+ * a proposal is reviewed before anything is written, so the only thing that
+ * has to understand one is whatever is going to apply it, which is here.
+ */
+export const PROPOSE_TOOL = "propose_restructure";
+
+/**
+ * The workspace itself changed: joined, left, or its tabs moved. Carries the
+ * sync status with it, so a join does not need a second round trip to draw
+ * the indicator.
+ */
+export const WORKSPACE_CHANGED = "workspace:changed";
+
+/**
+ * Where sync stands -- online, syncing, offline or rejected, how many ops are
+ * waiting, and how far behind the server this machine is.
+ *
+ * Pushed rather than polled. The frontend used to run its own loop and its own
+ * outbox; it does not any more, so this event and WorkbenchService.SyncStatus
+ * are the only two places the badge's state comes from.
+ */
+export const WORKSPACE_SYNC = "workspace:sync";
+
+/**
  * A newer release exists. Emitted by the update check at startup, not in
  * answer to anything the user did, so whatever shows it has to be interruptible
  * rather than modal.

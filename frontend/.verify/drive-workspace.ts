@@ -1,0 +1,548 @@
+/**
+ * Drives the rewired workspace surface and reports what actually happened.
+ *
+ * The frontend's own sync stack is gone -- transport.ts, sync.svelte.ts,
+ * replica's outbox and the storage that held a write key -- and everything the
+ * tab strip, the sync badge and the join dialog show now comes from
+ * WorkbenchService over IPC. The checks below are in three groups:
+ *
+ *   1. nothing on the wire, and the workspace read over bindings;
+ *   2. the DOM identities that must survive a rewire -- the same <canvas>,
+ *      the same <textarea>, a mode toggle that is still checked;
+ *   3. the states a person has to be able to tell apart: refused from
+ *      offline, a tab with no folder from one that has one.
+ *
+ * Nothing here reads a flag the app set about itself. Requests are counted by
+ * wrapping fetch, paints by wrapping the 2d context, and identity by holding
+ * the element and comparing it with ===.
+ */
+
+const results: { name: string; pass: boolean; detail: string }[] = [];
+const V = () => (window as any).__verify;
+
+function check(name: string, pass: boolean, detail = "") {
+  results.push({ name, pass, detail });
+  console.log(`${pass ? "PASS" : "FAIL"} ${name}${detail ? " -- " + detail : ""}`);
+}
+
+const frame = () => new Promise((r) => requestAnimationFrame(() => r(null)));
+async function settle(n = 12) {
+  for (let i = 0; i < n; i++) await frame();
+}
+
+const $ = <T extends Element>(sel: string) => document.querySelector<T>(sel);
+const $$ = <T extends Element>(sel: string) => [...document.querySelectorAll<T>(sel)];
+
+const tabs = () => $$<HTMLButtonElement>('[role="tab"]');
+const tabNamed = (name: string) => tabs().find((t) => t.textContent?.trim() === name) ?? null;
+const canvas = () => $<HTMLCanvasElement>("canvas");
+const composer = () => $<HTMLTextAreaElement>("aside textarea");
+const badge = () => $<HTMLElement>(".badge");
+const modeRadios = () => $$<HTMLInputElement>('.modebar input[type="radio"]');
+const checkedMode = () => modeRadios().find((r) => r.checked)?.value ?? null;
+
+/** Presses a radio the way a person does: the change event, not the property. */
+function pickMode(value: string) {
+  const radio = modeRadios().find((r) => r.value === value);
+  if (!radio) throw new Error(`no ${value} radio`);
+  radio.click();
+}
+
+function key(el: Element, k: string, extra: KeyboardEventInit = {}) {
+  el.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, ...extra }));
+}
+
+async function run() {
+  await settle(30);
+
+  /* ---------------------------------------------------------------------- */
+  /* 1. The rewire: bindings in, nothing on the wire                         */
+  /* ---------------------------------------------------------------------- */
+
+  const ids = () => V().calls.map((c: any) => c.id);
+  check(
+    "the workspace was read over bindings, not fetched",
+    ids().includes(1679766508) && ids().includes(1753161623) && ids().includes(1767437727),
+    `Workspaces/Workspace/SyncStatus in ${ids().length} calls`,
+  );
+
+  check(
+    "the tab strip is the backend's tabs",
+    tabs().map((t) => t.textContent?.trim()).join(",") === "work,planning",
+    tabs().map((t) => t.textContent?.trim()).join(",") || "no tabs",
+  );
+
+  const shot = canvas();
+  check("the office is mounted", !!shot);
+  if (!shot) return;
+
+  /* ---------------------------------------------------------------------- */
+  /* 2. Identities that must survive the rewire                              */
+  /* ---------------------------------------------------------------------- */
+
+  const canvasBefore = canvas();
+  const composerBefore = composer();
+  check("the console has a composer", !!composerBefore);
+
+  // A mode switch. Idea and planning mount and unmount; work keeps its box.
+  pickMode("idea");
+  await settle(20);
+  check("switching to idea draws the outline", !!$(".idea"));
+  check(
+    "the same <canvas> element after a mode switch",
+    canvas() === canvasBefore,
+    canvas() === canvasBefore ? "identical node" : "the office was remounted",
+  );
+  check(
+    "the same <textarea> after a mode switch",
+    composer() === composerBefore,
+    composer() === composerBefore ? "identical node" : "the console was remounted",
+  );
+
+  // Nothing painted while the office is off screen. Measured on the context,
+  // so this is what the engine was asked to do rather than what a flag says.
+  const paintedAtSwitch = V().paints(canvasBefore);
+  await settle(45);
+  const paintedAfter = V().paints(canvasBefore);
+  check(
+    "0 draw calls into the canvas while it is hidden",
+    paintedAfter === paintedAtSwitch,
+    `${paintedAfter - paintedAtSwitch} draw calls over 45 frames of idea mode`,
+  );
+
+  // And it starts again when it is shown, or the check above proves nothing.
+  pickMode("work");
+  await settle(20);
+  check(
+    "drawing resumes when the office is shown again",
+    V().paints(canvasBefore) > paintedAfter,
+    `${V().paints(canvasBefore) - paintedAfter} draw calls after coming back`,
+  );
+
+  /* ---------------------------------------------------------------------- */
+  /* 3. The mode toggle across a tab switch                                  */
+  /* ---------------------------------------------------------------------- */
+
+  pickMode("planning");
+  await settle(20);
+  check("planning is the checked mode before switching tabs", checkedMode() === "planning");
+
+  const other = tabNamed("planning");
+  check("there is a second tab to switch to", !!other);
+  if (!other) return;
+  other.click();
+  await settle(25);
+
+  check(
+    "a tab switch keeps a checked mode in the toggle",
+    checkedMode() !== null,
+    checkedMode() ?? "nothing checked -- the radio group lost its selection",
+  );
+  check(
+    "the same <canvas> element after a tab switch",
+    canvas() === canvasBefore,
+    canvas() === canvasBefore ? "identical node" : "the office was remounted",
+  );
+  check(
+    "the same <textarea> after a tab switch",
+    composer() === composerBefore,
+    composer() === composerBefore ? "identical node" : "the console was remounted",
+  );
+
+  // The second tab has no folder here, so agents cannot run in it -- and the
+  // backend refused ActivateTab. That must be visible rather than silent.
+  check(
+    "a tab with no folder on this machine says so",
+    (($(".tab-notice")?.textContent ?? "")).includes("no folder"),
+    $(".tab-notice")?.textContent?.trim().slice(0, 90) ?? "no notice",
+  );
+  check(
+    "and offers the folder picker",
+    !!$$<HTMLButtonElement>(".tab-notice button").find(
+      (b) => b.textContent?.trim() === "Choose a folder",
+    ),
+  );
+
+  /* ---------------------------------------------------------------------- */
+  /* 4. The outline: focus through a structural edit, and detached nodes     */
+  /* ---------------------------------------------------------------------- */
+
+  tabNamed("work")!.click();
+  await settle(20);
+  pickMode("idea");
+  await settle(20);
+
+  let lines = () => $$<HTMLInputElement>('input[aria-label="Outline line"]');
+  if (lines().length === 0) {
+    $<HTMLButtonElement>(".idea .primary")?.click();
+    await settle(20);
+  }
+  check("the outline has a line to type in", lines().length > 0, `${lines().length} lines`);
+  if (lines().length === 0) return;
+
+  const first = lines()[0];
+  first.focus();
+  first.value = "a line";
+  first.dispatchEvent(new Event("input", { bubbles: true }));
+  await settle(6);
+
+  // Enter splits the outline: a structural edit that replaces the row list.
+  key(first, "Enter");
+  await settle(20);
+  check(
+    "Enter adds a line",
+    lines().length >= 2,
+    `${lines().length} lines`,
+  );
+  check(
+    "focus is on the new line, not lost to the document",
+    document.activeElement instanceof HTMLInputElement &&
+      document.activeElement.getAttribute("aria-label") === "Outline line",
+    document.activeElement?.nodeName ?? "nothing",
+  );
+
+  // Tab indents: another structural edit, on the line that has focus.
+  const focused = document.activeElement as HTMLInputElement;
+  focused.value = "under it";
+  focused.dispatchEvent(new Event("input", { bubbles: true }));
+  await settle(6);
+  key(focused, "Tab");
+  await settle(20);
+  check(
+    "focus survives an indent",
+    document.activeElement === focused,
+    document.activeElement === focused ? "same input" : (document.activeElement?.nodeName ?? "nothing"),
+  );
+
+
+  /* ---------------------------------------------------------------------- */
+  /* 4b. A proposal from Claude: reviewed, not applied                       */
+  /* ---------------------------------------------------------------------- */
+
+  // Everything here goes in as a `claude:tool` call, which is how a proposal
+  // actually arrives -- there is no proposal event and no endpoint for one.
+  // The point of the section is the thing that is easiest to get wrong and
+  // worst to get wrong: nothing may reach the document before Apply.
+
+  const nodeIds = () => $$<HTMLElement>(".idea [data-node]").map((el) => el.dataset.node!);
+  const reviewPanel = () => $<HTMLElement>("section.review");
+  const reviewRows = () => $$<HTMLLIElement>("section.review ol li");
+  const reviewBoxes = () => $$<HTMLInputElement>("section.review ol input[type=checkbox]");
+  const applyButton = () =>
+    $$<HTMLButtonElement>("section.review footer button").find((b) =>
+      (b.textContent ?? "").startsWith("Apply"),
+    ) ?? null;
+  const outlineText = () => lines().map((l) => l.value).join(" | ");
+
+  // A proposal that tries to place a node itself. Refused whole: something
+  // that believes it owns sort keys cannot be trusted with the rest either.
+  V().propose({ summary: "no", ops: [{ kind: "insert", parent: "", after: null, text: "x", position: "m" }] });
+  await settle(15);
+  check(
+    "a proposal carrying a sort key is refused, not cleaned up",
+    !reviewPanel() && (($(".refused")?.textContent ?? "").includes("position")),
+    $(".refused .detail")?.textContent?.trim().slice(0, 90) ?? "nothing said",
+  );
+  $$<HTMLButtonElement>(".refused button").find((b) => b.textContent?.trim() === "Dismiss")?.click();
+  await settle(10);
+
+  const nodes = nodeIds();
+  check("the outline has nodes a proposal can name", nodes.length >= 2, `${nodes.length} nodes`);
+  if (nodes.length < 2) return;
+
+  const textBefore = outlineText();
+
+  V().propose({
+    summary: "Group the networking lines together.",
+    ops: [
+      { kind: "insert", ref: "head", parent: "", after: nodes[0], text: "Networking" },
+      { kind: "move", node: nodes[1], parent: "head", after: null },
+      { kind: "set-text", node: nodes[0], text: "The first thought" },
+      // A line nothing knows about: the document moved on under the proposal.
+      { kind: "delete", node: "n_no_such_node" },
+    ],
+  });
+  await settle(20);
+
+  check("a proposal opens a review panel", !!reviewPanel());
+  if (!reviewPanel()) return;
+
+  check(
+    "one row per operation",
+    reviewRows().length === 4,
+    `${reviewRows().length} rows`,
+  );
+
+  const says = reviewRows().map((li) => li.querySelector(".says")?.textContent?.trim() ?? "");
+  check(
+    "rows are in English, naming lines by their text",
+    says.some((t) => t.includes("Networking")) &&
+      says.some((t) => t.startsWith("Move") && t.includes("under")) &&
+      says.some((t) => t.startsWith("Reword")),
+    says.join(" / ").slice(0, 160),
+  );
+  check(
+    "no row is written in protocol terms",
+    !says.some((t) => /set-fields|move-node|create-node|delete-node|extract-to-task/.test(t)),
+    says.join(" / ").slice(0, 120),
+  );
+
+  // The stale row. Shown and unapplicable, rather than quietly dropped.
+  const staleRow = reviewRows().find((li) => li.querySelector(".why"));
+  check(
+    "an operation the document has outgrown is shown with the reason",
+    !!staleRow && (staleRow.querySelector(".why")?.textContent ?? "").includes("deleted"),
+    staleRow?.querySelector(".why")?.textContent?.trim() ?? "no blocked row",
+  );
+  check(
+    "and cannot be ticked",
+    !!staleRow?.querySelector<HTMLInputElement>("input[type=checkbox]")?.disabled,
+  );
+
+  // The whole contract: a proposal on screen has changed nothing.
+  check(
+    "nothing has been applied to the outline yet",
+    outlineText() === textBefore,
+    `${textBefore} -> ${outlineText()}`,
+  );
+
+  // Unticking the insert has to block the move that was going under it: the
+  // move names a line the insert was going to create.
+  const boxes = reviewBoxes();
+  boxes[0].checked = false;
+  boxes[0].dispatchEvent(new Event("change", { bubbles: true }));
+  await settle(15);
+  const movedRow = reviewRows()[1];
+  check(
+    "unticking an insert blocks the move that depended on it",
+    !!movedRow.querySelector(".why"),
+    movedRow.querySelector(".why")?.textContent?.trim() ?? "the move is still applicable",
+  );
+
+  // Put it back, and take the reword out instead -- a row with nothing
+  // depending on it, so Apply should land three and leave one.
+  boxes[0].checked = true;
+  boxes[0].dispatchEvent(new Event("change", { bubbles: true }));
+  await settle(10);
+  const rewordBox = reviewBoxes()[2];
+  rewordBox.checked = false;
+  rewordBox.dispatchEvent(new Event("change", { bubbles: true }));
+  await settle(15);
+
+  check(
+    "Apply counts only what it will actually write",
+    (applyButton()?.textContent ?? "").includes("2"),
+    applyButton()?.textContent?.trim() ?? "no apply button",
+  );
+
+  applyButton()!.click();
+  await settle(25);
+
+  check(
+    "applying writes the ticked rows into the outline",
+    outlineText().includes("Networking"),
+    outlineText(),
+  );
+  check(
+    "and leaves the unticked one alone",
+    !outlineText().includes("The first thought"),
+    outlineText(),
+  );
+  check(
+    "it says what it did",
+    ($("section.review .outcome")?.textContent ?? "").includes("Applied 2"),
+    $("section.review .outcome")?.textContent?.trim() ?? "said nothing",
+  );
+  check(
+    "a second press cannot apply the same insert twice",
+    applyButton()?.disabled === true,
+    applyButton()?.textContent?.trim() ?? "no apply button",
+  );
+
+  // A proposal that arrives while the office is on screen has nowhere to
+  // draw itself. It must not be dropped and must not yank anybody out of a
+  // run they are watching, so it says it is there and offers the way to it.
+  pickMode("work");
+  await settle(15);
+  const parked = $$<HTMLElement>(".refused").find((n) =>
+    (n.textContent ?? "").includes("suggested changes"),
+  );
+  check(
+    "a proposal held while the office is up says so instead of vanishing",
+    !!parked && !reviewPanel(),
+    parked?.textContent?.trim().slice(0, 80) ?? "nothing said",
+  );
+  const goReview = $$<HTMLButtonElement>(".refused button").find((b) =>
+    (b.textContent ?? "").startsWith("Review them in"),
+  );
+  check("and offers the way back to it", !!goReview, goReview?.textContent?.trim() ?? "no button");
+  goReview?.click();
+  await settle(20);
+  check("which opens the review", !!reviewPanel(), checkedMode() ?? "no mode");
+
+  $$<HTMLButtonElement>("section.review .discard").at(0)?.click();
+  await settle(15);
+  check("Discard puts the panel away", !reviewPanel());
+
+  /* ---------------------------------------------------------------------- */
+  /* 5. Refused is not offline                                              */
+  /* ---------------------------------------------------------------------- */
+
+  pickMode("work");
+  await settle(10);
+
+  V().sync({ state: "offline", pending: 3, error: "dial tcp: connection refused" });
+  await settle(15);
+  const offlineState = badge()?.dataset.state ?? "";
+  const offlineWords = badge()?.textContent?.trim() ?? "";
+  const offlineAction = $$<HTMLButtonElement>(".badge button").map((b) => b.textContent?.trim());
+  check("offline reads as offline", offlineState === "offline", `${offlineState}: ${offlineWords}`);
+  check(
+    "offline offers a retry and not a key",
+    offlineAction.includes("Retry now") && !offlineAction.includes("Use another key"),
+    offlineAction.join(" | "),
+  );
+
+  V().sync({ state: "rejected", pending: 3, error: "unknown or expired key" });
+  await settle(15);
+  const rejectedState = badge()?.dataset.state ?? "";
+  const rejectedWords = badge()?.textContent?.trim() ?? "";
+  const rejectedAction = $$<HTMLButtonElement>(".badge button").map((b) => b.textContent?.trim());
+  check(
+    "a refused key is a different state from offline",
+    rejectedState === "rejected" && rejectedState !== offlineState,
+    `${offlineState} -> ${rejectedState}`,
+  );
+  check(
+    "and different words, not just a different colour",
+    rejectedWords !== offlineWords && rejectedWords.includes("Key refused"),
+    `${offlineWords} -> ${rejectedWords}`,
+  );
+  check(
+    'a refused key offers "Use another key"',
+    rejectedAction.includes("Use another key"),
+    rejectedAction.join(" | "),
+  );
+  check(
+    "the live region says the changes are safe meanwhile",
+    ($('[role="status"][aria-live="polite"]')?.textContent ?? "").length > 0 &&
+      $$<HTMLElement>('[role="status"]').some((el) =>
+        (el.textContent ?? "").includes("Your changes are safe"),
+      ),
+  );
+
+  /* ---------------------------------------------------------------------- */
+  /* 6. A read key is refused before a tab opens                            */
+  /* ---------------------------------------------------------------------- */
+
+  const tabsBefore = tabs().length;
+  const joinCallsBefore = V().calls.filter((c: any) => c.id === 1719684323).length;
+
+  $$<HTMLButtonElement>(".badge button").find((b) => b.textContent?.trim() === "Use another key")!.click();
+  await settle(20);
+
+  const dialog = $<HTMLDialogElement>("dialog[aria-labelledby='workspace-dialog-title']");
+  check("the rekey dialog opened", !!dialog);
+  if (!dialog) return;
+
+  const field = dialog.querySelector<HTMLInputElement>('input[placeholder^="wk_"]');
+  check("the dialog has a key field", !!field);
+  if (!field) return;
+
+  field.value = "rk_" + "a".repeat(32);
+  field.dispatchEvent(new Event("input", { bubbles: true }));
+  await settle(8);
+  check(
+    "typing a read key warns before anything is submitted",
+    (dialog.querySelector(".warn")?.textContent ?? "").includes("read"),
+    dialog.querySelector(".warn")?.textContent?.trim().slice(0, 70) ?? "no warning",
+  );
+
+  dialog.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  await settle(25);
+
+  check(
+    "a read key never reaches the backend",
+    V().calls.filter((c: any) => c.id === 1719684323).length === joinCallsBefore,
+    `${V().calls.filter((c: any) => c.id === 1719684323).length - joinCallsBefore} JoinWorkspace calls`,
+  );
+  check(
+    "and no tab opened for it",
+    tabs().length === tabsBefore,
+    `${tabsBefore} -> ${tabs().length}`,
+  );
+  check(
+    "it says which kind of key it wanted",
+    (dialog.querySelector('[role="alert"]')?.textContent ?? "").includes("write key"),
+    dialog.querySelector('[role="alert"]')?.textContent?.trim().slice(0, 90) ?? "no error",
+  );
+
+  // The same field with a write key gets through, so the refusal above is
+  // about the key and not about the form being broken.
+  field.value = "wk_" + "b".repeat(32);
+  field.dispatchEvent(new Event("input", { bubbles: true }));
+  dialog.querySelector("form")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  await settle(30);
+  check(
+    "a write key does reach the backend",
+    V().calls.filter((c: any) => c.id === 1719684323).length === joinCallsBefore + 1,
+    `${V().calls.filter((c: any) => c.id === 1719684323).length - joinCallsBefore} JoinWorkspace calls`,
+  );
+
+  /* ---------------------------------------------------------------------- */
+  /* 7. Closing a tab says what it does                                     */
+  /* ---------------------------------------------------------------------- */
+
+  await settle(20);
+  const toClose = tabNamed("planning");
+  if (toClose) {
+    toClose.focus();
+    key(toClose, "Delete");
+    await settle(20);
+    const confirm = $$<HTMLDialogElement>("dialog").find((d) =>
+      (d.textContent ?? "").includes("for everyone"),
+    );
+    check(
+      "Delete on a tab asks before retiring it, and says it is for everyone",
+      !!confirm,
+      confirm?.querySelector("h2")?.textContent?.trim() ?? "no confirm",
+    );
+    check(
+      "and says the local notes stay",
+      (confirm?.textContent ?? "").includes("stay on this machine"),
+    );
+    confirm?.querySelector<HTMLButtonElement>(".ghost")?.click();
+    await settle(10);
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* 8. The whole point: not one request, for the whole session             */
+  /* ---------------------------------------------------------------------- */
+
+  await settle(30);
+  const net = V().requests as { how: string; url: string }[];
+  // The page itself is served over HTTP by the dev server, and Vite's module
+  // graph is fetched by the engine rather than by script -- neither goes
+  // through window.fetch. Anything in this list was issued by code.
+  const mine = net.filter((r) => !/\/@vite|\/node_modules|\.ts$|\.svelte/.test(r.url));
+  check(
+    "the frontend issued no requests of its own",
+    mine.length === 0,
+    mine.map((r) => `${r.how} ${r.url}`).join(" | ") || "none",
+  );
+  check(
+    "and nothing at all went to a /v1 endpoint",
+    !net.some((r) => r.url.includes("/v1")),
+    net.filter((r) => r.url.includes("/v1")).map((r) => `${r.how} ${r.url}`).join(" | ") || "none",
+  );
+}
+
+run()
+  .catch((err) => check("harness crashed", false, String(err?.stack ?? err)))
+  .finally(() => {
+    void fetch("http://127.0.0.1:7788/", {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: JSON.stringify(results),
+    });
+  });

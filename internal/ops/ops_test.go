@@ -141,6 +141,75 @@ func TestStampOrder(t *testing.T) {
 	}
 }
 
+// TestNeedsLive covers the one question the merge does not answer and the
+// server has to: which node's tombstone makes an op not worth storing.
+func TestNeedsLive(t *testing.T) {
+	tests := []struct {
+		name string
+		op   Op
+		want string // "" means the op has no live target
+	}{
+		{"create-node needs the node it creates",
+			Op{Kind: KindCreateNode, Node: "n"}, "n"},
+		{"set-fields needs the node it writes to",
+			Op{Kind: KindSetFields, Node: "n"}, "n"},
+		{"move-node needs the node it moves",
+			Op{Kind: KindMoveNode, Node: "n", Parent: "p"}, "n"},
+
+		// Not the parent. Moving under a deleted parent is how a node ends up
+		// in State.Detached, which is a state the document renders rather than
+		// an error, so the op is worth storing.
+		{"move-node does not need the parent it moves under",
+			Op{Kind: KindMoveNode, Node: "n", Parent: "gone"}, "n"},
+
+		{"extract-to-task needs the task, not the source",
+			Op{Kind: KindExtractToTask, Node: "source", Task: "t"}, "t"},
+
+		{"delete-node needs nothing", Op{Kind: KindDeleteNode, Node: "n"}, ""},
+		{"an unknown kind needs nothing", Op{Kind: "rename-everything", Node: "n"}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node, ok := tt.op.NeedsLive()
+			if ok != (tt.want != "") {
+				t.Fatalf("NeedsLive() ok = %v, want %v", ok, tt.want != "")
+			}
+			if node != tt.want {
+				t.Errorf("NeedsLive() = %q, want %q", node, tt.want)
+			}
+		})
+	}
+}
+
+// TestNeedsLiveIsNotAMergeRule pins down that the merge ignores it. An op that
+// reaches Apply is applied whatever the target's tombstone says, because rule
+// two is about a node's existence and a tombstone that swallowed later writes
+// would keep a different set of fields on every replica.
+func TestNeedsLiveIsNotAMergeRule(t *testing.T) {
+	var state State
+	for _, op := range []Op{
+		{ID: "1", Kind: KindCreateNode, Actor: "a", Clock: 1, Node: "n"},
+		{ID: "2", Kind: KindDeleteNode, Actor: "a", Clock: 2, Node: "n"},
+		{ID: "3", Kind: KindSetFields, Actor: "a", Clock: 3, Node: "n",
+			Fields: map[string]json.RawMessage{"title": json.RawMessage(`"after the delete"`)}},
+	} {
+		if _, err := state.Apply(op); err != nil {
+			t.Fatalf("applying %s: %v", op.ID, err)
+		}
+	}
+
+	node, ok := state.Node("n")
+	if !ok {
+		t.Fatal("the node is gone from the state entirely, tombstone and all")
+	}
+	if !node.Deleted {
+		t.Error("a later edit undeleted the node")
+	}
+	if got := string(node.Fields["title"]); got != `"after the delete"` {
+		t.Errorf("title = %s, want the edit merged into the tombstone", got)
+	}
+}
+
 // TestOpRoundTripsThroughJSON matters more than it looks: an op is stored as
 // JSON and read back by a different build of this program, and by a viewer
 // written in another language, so the wire shape is the contract.

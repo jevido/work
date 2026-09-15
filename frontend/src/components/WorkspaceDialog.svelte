@@ -1,6 +1,5 @@
 <script lang="ts">
-  import { looksLikeReadKey } from "../lib/workspace/transport";
-  import type { Workspace } from "../lib/workspace/workspace.svelte";
+  import { looksLikeReadKey } from "../lib/workspace/invite";
   import type { Workspaces } from "../lib/workspace/workspaces.svelte";
 
   /**
@@ -9,52 +8,53 @@
    * One component rather than four, because they are the same three fields in
    * different combinations and four dialogs would be four places to get the
    * error handling and the focus return slightly different from each other.
+   *
+   * There used to be a fifth, "share": take a workspace that exists only on
+   * this machine and put it on a server, sending its contents along. It is
+   * gone because there is no call that would do it -- the backend creates a
+   * workspace and syncs its own document, and nothing on WorkbenchService
+   * takes a document to seed one with. A button that pretended otherwise
+   * would lose whatever was in the outline.
    */
-  export type Purpose = "new" | "join" | "share" | "rekey";
+  export type Purpose = "create" | "join" | "rekey" | "tab";
 
   let {
     purpose,
     workspaces,
-    /** The workspace being shared or re-keyed. Absent for "new" and "join". */
-    target = null,
     onclose,
   }: {
     purpose: Purpose;
     workspaces: Workspaces;
-    target?: Workspace | null;
     onclose: () => void;
   } = $props();
 
   // svelte-ignore state_referenced_locally
   // Seeds, not bindings. The dialog is mounted fresh each time it opens and
-  // these are then the person's to edit -- a name that snapped back to the
-  // workspace's while it was being typed would be a form fighting its user.
-  let name = $state(target?.name ?? "");
-  // svelte-ignore state_referenced_locally
-  let server = $state(target?.base ?? workspaces.lastServer);
+  // these are then the person's to edit -- a field that snapped back while it
+  // was being typed would be a form fighting its user.
+  let server = $state(workspaces.lastServer);
+  let name = $state("");
   let signupToken = $state("");
   let invite = $state("");
-  /** "new" only: whether to make it on a server at all. */
-  let shared = $state(false);
 
   /** The read key, once there is one. The only moment the server will show it. */
   let readKey = $state<string | null>(null);
   let copied = $state(false);
 
   const TITLES: Record<Purpose, string> = {
-    new: "New workspace",
+    create: "New workspace",
     join: "Join a workspace",
-    share: "Share this workspace",
     rekey: "Use a different key",
+    tab: "New tab",
   };
 
   /**
    * A read key pasted where a write key belongs.
    *
-   * Warned about rather than blocked: the server decides, and it is the only
-   * thing that actually knows. But a read key here produces a workspace that
-   * reads fine and silently refuses every edit, and "rk_" is enough to say so
-   * before somebody spends ten minutes typing into it.
+   * Said as soon as the prefix is typed, and said again by the store, which
+   * refuses the join outright before any tab opens. The server refuses it too.
+   * Three places, and all three are the same answer: a read key here produces
+   * a workspace that loads fine and silently refuses every edit.
    */
   const readKeyWarning = $derived(
     (purpose === "join" || purpose === "rekey") && looksLikeReadKey(invite.trim()),
@@ -63,13 +63,13 @@
   const canSubmit = $derived.by(() => {
     if (workspaces.busy) return false;
     switch (purpose) {
-      case "new":
-        return name.trim() !== "" && (!shared || server.trim() !== "");
+      case "create":
+        return name.trim() !== "" && server.trim() !== "" && signupToken.trim() !== "";
       case "join":
       case "rekey":
         return invite.trim() !== "";
-      case "share":
-        return server.trim() !== "";
+      case "tab":
+        return name.trim() !== "";
     }
   });
 
@@ -78,12 +78,7 @@
     if (!canSubmit) return;
 
     switch (purpose) {
-      case "new": {
-        if (!shared) {
-          workspaces.createLocal(name);
-          onclose();
-          return;
-        }
+      case "create": {
         const made = await workspaces.createShared(server.trim(), signupToken.trim(), name);
         // The dialog stays open on success, because it is now holding the one
         // copy of the read key that will ever exist.
@@ -94,15 +89,24 @@
         if (await workspaces.join(invite, server.trim())) onclose();
         return;
       case "rekey":
-        if (target && (await workspaces.rekey(target, invite, server.trim()))) onclose();
+        if (await workspaces.rekey(invite, server.trim())) onclose();
         return;
-      case "share": {
-        if (!target) return;
-        const key = await workspaces.share(target, server.trim(), signupToken.trim());
-        if (key !== null) readKey = key;
+      case "tab":
+        if (await workspaces.newTab(name)) onclose();
         return;
-      }
     }
+  }
+
+  /**
+   * Stops syncing, from the dialog that opens when a key was refused.
+   *
+   * Here rather than anywhere else because this is where somebody ends up when
+   * the key stopped working and they do not have another one. Unsent ops are
+   * kept -- the backend leaves the outbox on disk -- so this is reversible,
+   * which is why it asks nothing before doing it.
+   */
+  async function leave() {
+    if (await workspaces.leave()) onclose();
   }
 
   async function copy() {
@@ -141,8 +145,8 @@
     {#if readKey !== null}
       <!-- Done, and now holding something that cannot be recovered. -->
       <p class="lede">
-        {purpose === "share" ? "Shared." : "Created."} This is the only time the server will
-        show the read key, so take it now.
+        Created. This is the only time the server will show the read key, so take it
+        now.
       </p>
 
       <label>
@@ -160,31 +164,20 @@
         <button type="button" class="primary" onclick={onclose}>Done</button>
       </footer>
     {:else}
-      {#if purpose === "new"}
+      {#if purpose === "create" || purpose === "tab"}
         <label>
           <span>Name</span>
           <!-- No autofocus attribute: showModal() already puts the caret in
                the first focusable thing in the dialog, which is this. -->
           <input bind:value={name} autocomplete="off" required />
         </label>
+      {/if}
 
-        <fieldset>
-          <legend>Where it lives</legend>
-          <label class="choice">
-            <input type="radio" name="where" checked={!shared} onchange={() => (shared = false)} />
-            <span>
-              <strong>Just on this machine</strong>
-              <em>No server, no keys. You can share it later without losing anything.</em>
-            </span>
-          </label>
-          <label class="choice">
-            <input type="radio" name="where" checked={shared} onchange={() => (shared = true)} />
-            <span>
-              <strong>On a server</strong>
-              <em>Syncs across your machines, and can be given a read-only link.</em>
-            </span>
-          </label>
-        </fieldset>
+      {#if purpose === "tab"}
+        <p class="note">
+          A tab is part of the workspace, so everyone in it gets this one. The folder it
+          means on this machine is chosen separately, and is never sent anywhere.
+        </p>
       {/if}
 
       {#if purpose === "join" || purpose === "rekey"}
@@ -207,14 +200,14 @@
         {/if}
       {/if}
 
-      {#if purpose !== "new" || shared}
+      {#if purpose !== "tab"}
         <label>
           <span>Server</span>
           <input bind:value={server} autocomplete="off" spellcheck="false" required />
         </label>
       {/if}
 
-      {#if (purpose === "new" && shared) || purpose === "share"}
+      {#if purpose === "create"}
         <label>
           <span>Signup token</span>
           <input bind:value={signupToken} type="password" autocomplete="off" spellcheck="false" />
@@ -230,6 +223,14 @@
       {/if}
 
       <footer>
+        {#if purpose === "rekey"}
+          <!-- The other way out. Somebody whose key stopped working and who has
+               no replacement is otherwise stuck in a dialog that cannot be
+               satisfied. Unsent changes are kept, so this is reversible. -->
+          <button type="button" class="ghost leave" onclick={leave}>
+            Leave this workspace
+          </button>
+        {/if}
         <button type="button" class="ghost" onclick={onclose}>Cancel</button>
         <button type="submit" class="primary" disabled={!canSubmit}>
           {#if workspaces.busy}
@@ -238,8 +239,8 @@
             Join
           {:else if purpose === "rekey"}
             Use this key
-          {:else if purpose === "share"}
-            Share
+          {:else if purpose === "tab"}
+            Open it
           {:else}
             Create
           {/if}
@@ -262,6 +263,12 @@
 
   dialog::backdrop {
     background: rgb(0 0 0 / 0.5);
+  }
+
+  /* Away from the two buttons that finish the dialog, so the destructive-
+     looking one is not next to the one somebody is reaching for. */
+  .leave {
+    margin-right: auto;
   }
 
   form {
@@ -311,38 +318,6 @@
     color: var(--muted);
   }
 
-  fieldset {
-    display: grid;
-    gap: 8px;
-    margin: 0;
-    padding: 10px;
-    border: 1px solid var(--line);
-    border-radius: 6px;
-  }
-
-  legend {
-    padding: 0 4px;
-    color: var(--muted);
-    font-size: 11px;
-  }
-
-  .choice {
-    display: flex;
-    align-items: start;
-    gap: 8px;
-    cursor: pointer;
-  }
-
-  .choice span {
-    display: grid;
-    gap: 1px;
-  }
-
-  .choice strong {
-    font-weight: 600;
-  }
-
-  .choice em,
   .help {
     color: var(--muted);
     font-size: 11px;

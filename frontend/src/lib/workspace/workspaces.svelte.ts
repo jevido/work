@@ -1,314 +1,432 @@
 /**
- * The open workspaces, and which one is in front.
+ * The open tabs, and which one is in front.
  *
- * A tab bar's whole job is that the thing behind each tab keeps running while
- * you are not looking at it, so every workspace here is live: its sync loop
- * is going, its outbox is draining, and switching tabs shows you a workspace
- * that has been keeping up rather than one that starts catching up when you
- * arrive.
+ * This used to be N independent workspaces, each with its own HTTP transport,
+ * its own outbox and its own push loop. It is not any more, and that is the
+ * whole point of this file: **there is one sync loop and it is in Go.** The
+ * workbench owns the queue, the merge and the keys; it fsyncs, it survives the
+ * webview's data being cleared, and it keeps pushing while this window is
+ * doing something else. A second loop up here pushing the same ops to the same
+ * server was not a redundancy, it was two writers with two clocks.
+ *
+ * So everything below is a *view* of what `WorkbenchService` reports, plus the
+ * calls that ask it to change. Nothing here talks to a server.
+ *
+ * One thing is still this side's, and is marked as such wherever it appears:
+ * the Idea and Planning outline. It is a local document per tab and does not
+ * leave this machine. That is no longer for want of somewhere to send it --
+ * `ApplyWorkspaceEdits` writes nodes through Go's queue now -- it is work not
+ * yet done. See workspace.svelte.ts, which says what moving onto it involves.
  */
-import * as Storage from "./storage";
+import { Events } from "@wailsio/runtime";
+import type {
+  Status,
+  WorkspaceView,
+} from "../../../bindings/dev.jevido/work/internal/workbench/models.js";
+import * as Workbench from "../../../bindings/dev.jevido/work/services/workbenchservice.js";
+import { WORKSPACE_CHANGED, WORKSPACE_SYNC } from "../bridge/events";
+import { DEFAULT_SERVER, looksLikeReadKey, parseInvite } from "./invite";
 import { Workspace } from "./workspace.svelte";
-import {
-  DEFAULT_SERVER,
-  createWorkspace,
-  httpTransport,
-  parseInvite,
-  SyncError,
-} from "./transport";
+import * as Storage from "./storage";
 
-/** How long after the last change to write everything down. */
+/** How long after the last change to write the local outlines down. */
 const SAVE_AFTER_MS = 800;
 
+/**
+ * The tab that exists when no workspace has been joined.
+ *
+ * Go has no tabs at all until a workspace exists -- `NewTab` answers "no
+ * workspace joined" -- and Work has always run perfectly well without one. So
+ * an unjoined machine gets exactly one tab here, with a fixed id, and it is
+ * the app as it has always been: local outline, local board, nothing on a
+ * wire. Joining replaces it with the workspace's own tabs.
+ */
+export const LOCAL_TAB = "local";
+
+/** The badge's five states, derived from what Go reports. */
+export type SyncState = "local" | "synced" | "syncing" | "offline" | "rejected";
+
 export class Workspaces {
+  /**
+   * The tabs, in Go's order, each carrying its local outline.
+   *
+   * Instances are reused across updates by id -- see `#adopt`. A workspace
+   * that was replaced on every `workspace:changed` would throw away the
+   * outline, the drafts and the mode of every tab each time the sync status
+   * moved.
+   */
   list = $state<Workspace[]>([]);
 
+  /** The tab being looked at. Always settable; see `select`. */
   activeId = $state<string | null>(null);
 
-  /** What the tabs and everything under them are showing. */
   active = $derived<Workspace | null>(
     this.list.find((w) => w.id === this.activeId) ?? this.list[0] ?? null,
   );
 
-  /** Why the last create or join did not work, for the dialog to show. */
+  /** Whether this build can talk to a workspace server at all. */
+  available = $state(false);
+
+  /** The joined workspace, or null. Null is the ordinary case. */
+  view = $state<WorkspaceView | null>(null);
+
+  joined = $derived(this.view !== null);
+
+  /** Where sync stands, workspace-wide. Go's, not ours. */
+  status = $state<Status | null>(null);
+
+  /**
+   * Which tab agents actually run in.
+   *
+   * Not necessarily the tab on screen. `ActivateTab` is refused while a run is
+   * in flight and refused for a tab with no folder on this machine, and
+   * neither of those is a reason to stop somebody looking at another tab. When
+   * the two differ, the difference is shown rather than hidden -- a tab strip
+   * that silently runs work somewhere other than where you are looking is the
+   * worst version of this.
+   */
+  runsIn = $derived<string | null>(this.view?.activeTab || null);
+
+  /** Why the last create, join or tab change did not work. */
   error = $state<string | null>(null);
 
-  /** True while a create or join is talking to a server. */
+  /** True while a call is in flight. */
   busy = $state(false);
 
-  /** The server to prefill. The last one that worked, so the second tab is a paste. */
+  /** The server to prefill: the one in use, else the last default. */
   lastServer = $state(DEFAULT_SERVER);
 
-  /** The sync loops, by workspace id, so closing a tab can stop its own. */
-  #loops = new Map<string, () => void>();
-
   /**
-   * A cheap summary of everything worth writing down.
+   * The badge's state.
    *
-   * Revisions and counts rather than documents: the save is debounced on this
-   * changing, and reading the outlines to notice that one of them changed
-   * would walk every tree on every keystroke.
+   * "local" is a machine that has joined nothing, which is a normal way to run
+   * Work and not a degraded one. The other four are Go's `Status.state`.
    */
-  stamp = $derived(
-    [
-      this.activeId,
-      ...this.list.map(
-        (w) =>
-          `${w.id}:${w.name}:${w.mode}:${w.revision}:${w.sync.seq}:${w.sync.outbox.length}:${w.base ?? ""}`,
-      ),
-    ].join("|"),
+  state = $derived<SyncState>(
+    !this.status?.joined
+      ? "local"
+      : this.status.state === "rejected"
+        ? "rejected"
+        : this.status.state === "offline"
+          ? "offline"
+          : this.status.state === "syncing" || this.status.pending > 0
+            ? "syncing"
+            : "synced",
   );
 
-  /** Reads whatever was open last time and starts all of it. */
-  restore(): void {
-    const stored = Storage.load();
-    this.list = stored.workspaces.map((snapshot) => new Workspace(snapshot));
-    this.activeId = stored.activeId ?? this.list[0]?.id ?? null;
-    for (const workspace of this.list) this.#run(workspace);
-    const shared = this.list.find((w) => w.base);
-    if (shared?.base) this.lastServer = shared.base;
+  /** Ops that have not reached the server. Workspace-wide, because Go's is. */
+  pending = $derived(this.status?.pending ?? 0);
+
+  /**
+   * How many ops behind the server this machine is.
+   *
+   * Exact, not an estimate: sequence numbers are gapless, so head minus cursor
+   * is the count. See server/README.md.
+   */
+  behind = $derived(Math.max(0, (this.status?.head ?? 0) - (this.status?.cursor ?? 0)));
+
+  /** Ops dropped because the outbox hit its cap. Non-zero means a hole. */
+  dropped = $derived(this.status?.dropped ?? 0);
+
+  /** Go's last sync failure, or null. */
+  syncError = $derived(this.status?.error?.trim() || null);
+
+  /**
+   * A cheap summary of what a save would write.
+   *
+   * Revisions and counts rather than documents: the save is debounced on this
+   * changing, and reading the outlines to notice one changed would walk every
+   * tree on every keystroke.
+   */
+  stamp = $derived(
+    [this.activeId, ...this.list.map((w) => `${w.id}:${w.mode}:${w.revision}`)].join("|"),
+  );
+
+  /**
+   * Subscribes to the backend and reads the first paint.
+   *
+   * Returns the unsubscribe, so the caller's effect has something to clean up.
+   * The event carries the same values these three calls return -- they are
+   * here because an event only fires when something changes, and a window that
+   * opened into an already-joined workspace has to draw it.
+   */
+  start(): () => void {
+    // The local tab, now, before anything is awaited. Every call below is a
+    // round trip, and a frame with no tab in it is a frame of tab strip over
+    // blank panel -- which is what an app with nothing in it looks like, on
+    // every launch, for as long as the IPC takes.
+    this.#adopt(null);
+
+    const offChanged = Events.On(WORKSPACE_CHANGED, (e) => {
+      const payload = e.data as { workspace?: WorkspaceView | null; status?: Status };
+      this.#adopt(payload?.workspace ?? null);
+      if (payload?.status) this.status = payload.status;
+    });
+    const offSync = Events.On(WORKSPACE_SYNC, (e) => {
+      const payload = e.data as { status?: Status };
+      if (payload?.status) this.status = payload.status;
+    });
+
+    void this.#firstPaint();
+
+    return () => {
+      offChanged();
+      offSync();
+    };
   }
 
+  async #firstPaint(): Promise<void> {
+    try {
+      this.available = await Workbench.Workspaces();
+    } catch {
+      // An older backend, or one built without a transport. The workspace
+      // controls stay hidden rather than offering buttons whose only outcome
+      // is an error.
+      this.available = false;
+    }
+    try {
+      this.#adopt(await Workbench.Workspace());
+    } catch {
+      this.#adopt(null);
+    }
+    try {
+      this.status = await Workbench.SyncStatus();
+    } catch {
+      this.status = null;
+    }
+  }
+
+  /**
+   * Rebuilds the tab list from what Go says, keeping the workspaces that are
+   * still there.
+   *
+   * Reuse by id is load-bearing twice over. It keeps each tab's local outline,
+   * drafts and mode across every status update -- and because the id is what
+   * the `{#each}` and the `{#key}` in App.svelte are keyed on, it is also what
+   * keeps the same textarea, the same canvas and a checked mode toggle through
+   * a change that only moved a pending count.
+   */
+  #adopt(view: WorkspaceView | null): void {
+    this.view = view;
+    if (view?.serverUrl) this.lastServer = view.serverUrl;
+
+    const existing = new Map(this.list.map((w) => [w.id, w]));
+    const wanted: { id: string; name: string; bound: boolean }[] = view
+      ? (view.tabs ?? []).map((tab) => ({
+          id: tab.id,
+          name: tab.name?.trim() || "Untitled tab",
+          bound: tab.bound,
+        }))
+      : // Unjoined: the one local tab, which is the app as it has always been.
+        [{ id: LOCAL_TAB, name: "Workspace", bound: true }];
+
+    const next: Workspace[] = [];
+    for (const want of wanted) {
+      const found = existing.get(want.id);
+      const workspace = found ?? Storage.open(want.id);
+      workspace.name = want.name;
+      workspace.bound = want.bound;
+      next.push(workspace);
+      existing.delete(want.id);
+    }
+
+    // Tabs that went away -- closed here, or retired by a colleague. Their
+    // timers are stopped; what they had written down is left on disk, because
+    // a tab a colleague closed is not a reason to destroy the notes somebody
+    // took in it.
+    for (const gone of existing.values()) gone.dispose();
+
+    this.list = next;
+    if (!next.some((w) => w.id === this.activeId)) {
+      // The tab that was in front last time, then the one agents run in, then
+      // the first. Never null while there is a tab: a panel with nothing
+      // behind it is a blank screen under a tab strip.
+      const remembered = Storage.lastActive();
+      this.activeId =
+        (remembered && next.some((w) => w.id === remembered) ? remembered : null) ??
+        (view?.activeTab && next.some((w) => w.id === view.activeTab) ? view.activeTab : null) ??
+        next[0]?.id ??
+        null;
+    }
+  }
+
+  /**
+   * Looks at a tab, and asks the backend to run in it.
+   *
+   * The two are separate on purpose and in that order. Looking is instant and
+   * cannot fail. Running there can: `ActivateTab` is refused mid-run, and
+   * refused for a tab with no folder bound on this machine. A refusal leaves
+   * the tab you clicked on screen -- taking it away again would be the app
+   * undoing a click it had already drawn -- and says why, next to the tab.
+   */
   select(id: string): void {
-    if (this.list.some((w) => w.id === id)) this.activeId = id;
+    if (!this.list.some((w) => w.id === id)) return;
+    this.activeId = id;
+    this.error = null;
+    if (!this.joined || id === this.runsIn) return;
+    void this.#run(() => Workbench.ActivateTab(id));
+  }
+
+  /** Points a tab at a project folder on this machine, with the platform picker. */
+  async bind(id: string): Promise<boolean> {
+    const path = await this.#run(() => Workbench.BindTabFolder(id));
+    // An empty path with no error is a cancelled dialog, which is not a
+    // failure and must not read as one.
+    return typeof path === "string" && path !== "";
+  }
+
+  /** Opens a new tab in the joined workspace. */
+  async newTab(name: string): Promise<boolean> {
+    const made = await this.#run(() => Workbench.NewTab(name.trim() || "Untitled"));
+    if (!made) return false;
+    this.activeId = made.id;
+    return true;
   }
 
   /**
-   * Opens a workspace that is only on this machine.
+   * Retires a tab.
    *
-   * Not every outline is worth a server. Making one local is instant, needs no
-   * network and no signup token, and `share` turns it into a shared one later
-   * without losing what is in it.
-   *
-   * It opens in Idea, because that is where a workspace somebody just decided
-   * to make actually starts.
+   * For everyone, not just here: `CloseTab` tombstones the tab node, so it
+   * goes from every machine in the workspace. Whatever asks before calling
+   * this has to say that, because nothing about a × on a tab suggests it.
    */
-  createLocal(name: string): Workspace {
-    const workspace = Workspace.create(name.trim() || "Untitled");
-    this.#add(workspace);
-    return workspace;
+  async close(id: string): Promise<boolean> {
+    if (!this.joined) return false;
+    const done = await this.#run(() => Workbench.CloseTab(id));
+    return done !== null;
   }
 
-  /**
-   * The one workspace a first run gets, so the app does not open on an empty
-   * strip with a New button.
-   *
-   * It opens in Work, and the difference from createLocal is the whole point
-   * of having a second method. Nobody asked for this workspace -- it exists
-   * because Work used to be one screen and now has three, and the person
-   * launching it after an update did not come here to write an outline. They
-   * came to the app they already had, which is the office. Idea and planning
-   * are there when they are wanted.
-   */
-  bootstrap(): Workspace {
-    const workspace = Workspace.create("Workspace");
-    workspace.mode = "work";
-    this.#add(workspace);
-    return workspace;
+  rename(id: string, name: string): void {
+    // Local, and only local. A tab's name is a field on its node in Go's
+    // document; `ApplyWorkspaceEdits` could now write it, and this does not
+    // call it, so a rename here shows a name the next `workspace:changed`
+    // silently takes away. Nothing in the UI offers this yet -- see
+    // WorkspaceTabs, where the rename key is deliberately absent -- and it
+    // should either be wired to that call or removed.
+    const workspace = this.list.find((w) => w.id === id);
+    if (workspace) workspace.name = name;
   }
 
-  /**
-   * Asks a server for a new workspace and opens it.
-   *
-   * Creation is gated by a signup token the server is configured with -- see
-   * server/README.md -- so a server that is not handing out workspaces answers
-   * 403, and that reads as "this server is not making workspaces" rather than
-   * as a bad token, because from here they are the same 403 and only one of
-   * them is something the person did.
-   */
+  /** Makes a workspace on a server and joins it. Returns the read key. */
   async createShared(
     base: string,
     signupToken: string,
     name: string,
-  ): Promise<{ workspace: Workspace; readKey: string } | null> {
-    return this.#attempt(async () => {
-      const created = await createWorkspace(base, signupToken, name.trim() || "Untitled");
-      const workspace = Workspace.join(created.info.name, base, created.writeKey);
-      this.#add(workspace);
-      this.lastServer = base;
-      return { workspace, readKey: created.readKey };
-    }, explainCreate);
+  ): Promise<{ readKey: string } | null> {
+    const view = await this.#run(
+      () => Workbench.CreateWorkspace(base.trim(), signupToken.trim(), name.trim() || "Untitled"),
+      explainCreate,
+    );
+    if (!view) return null;
+    this.#adopt(view);
+    // The read key is not on the view -- it never rides along on a payload the
+    // frontend fetches as a matter of course -- so it is asked for by name.
+    const keys = await this.#run(() => Workbench.WorkspaceKeys());
+    return { readKey: keys?.readKey ?? "" };
   }
 
   /**
    * Joins an existing workspace by key.
    *
-   * The key is checked before a tab appears. A tab that opened empty and then
-   * turned into an error badge is a workspace you have to close again, and it
-   * looks exactly like a workspace that is simply still loading -- which is a
-   * state this app has for real, so the two must not be confused.
+   * A read key is refused here, before the round trip and before anything
+   * changes on screen. The backend refuses it too -- `JoinWorkspace` checks
+   * `access` against the server -- and this is the same answer said sooner: a
+   * tab that opened, loaded somebody's board and then quietly refused every
+   * edit looks exactly like one that is still loading, which is a state this
+   * app has for real.
    */
-  async join(input: string, fallbackBase: string): Promise<Workspace | null> {
-    const invite = parseInvite(input);
-    if (!invite) {
-      this.error = "That does not look like a key or a share link.";
-      return null;
-    }
-    const base = invite.base ?? fallbackBase;
-    if (!base) {
-      this.error = "Which server is that key for?";
-      return null;
-    }
-
-    return this.#attempt(async () => {
-      const info = await httpTransport(base, invite.key).info();
-      requireWrite(info.access);
-
-      const existing = this.list.find((w) => w.base === base && w.key === invite.key);
-      if (existing) {
-        // Already open. Bringing it forward is what somebody pasting the same
-        // link twice meant, and a second tab onto one workspace is two of
-        // everything with no way to tell them apart.
-        this.activeId = existing.id;
-        return existing;
-      }
-
-      const workspace = Workspace.join(info.name || "Shared workspace", base, invite.key);
-      this.#add(workspace);
-      this.lastServer = base;
-      return workspace;
-    });
-  }
-
-  /**
-   * Puts a local workspace onto a server.
-   *
-   * A new workspace is created there and this one's content is sent to it, so
-   * nothing that was typed before sharing is lost. Returns the read key, which
-   * is the thing worth handing to somebody -- it is the only moment the server
-   * will ever show it.
-   */
-  async share(
-    workspace: Workspace,
-    base: string,
-    signupToken: string,
-  ): Promise<string | null> {
-    return this.#attempt(async () => {
-      const created = await createWorkspace(base, signupToken, workspace.name);
-      workspace.share(base, created.writeKey);
-      this.lastServer = base;
-      this.save();
-      return created.readKey;
-    }, explainCreate);
-  }
-
-  /** Points an already-open workspace at a different key. The way out of a rejection. */
-  async rekey(workspace: Workspace, input: string, fallbackBase: string): Promise<boolean> {
+  async join(input: string, fallbackBase: string): Promise<boolean> {
     const invite = parseInvite(input);
     if (!invite) {
       this.error = "That does not look like a key or a share link.";
       return false;
     }
-    const base = invite.base ?? fallbackBase;
-    const done = await this.#attempt(async () => {
-      requireWrite((await httpTransport(base, invite.key).info()).access);
-      workspace.connect(base, invite.key);
-      this.lastServer = base;
-      return true;
-    });
-    return done === true;
-  }
+    if (looksLikeReadKey(invite.key)) {
+      this.error =
+        "That is a read key. It can read the workspace and not change it — open it in the viewer, or ask for a write key.";
+      return false;
+    }
+    const base = invite.base ?? fallbackBase.trim();
+    if (!base) {
+      this.error = "Which server is that key for?";
+      return false;
+    }
 
-  rename(id: string, name: string): void {
-    const workspace = this.list.find((w) => w.id === id);
-    if (workspace) workspace.name = name;
+    const view = await this.#run(() => Workbench.JoinWorkspace(base, invite.key));
+    if (!view) return false;
+    this.#adopt(view);
+    return true;
   }
 
   /**
-   * Closes a tab.
+   * Points this machine at a different key. The way out of a rejection.
    *
-   * Local to this machine: it stops the loop and forgets the workspace here,
-   * and does not delete anything on the server -- there is no endpoint for
-   * that and no reason for a tab bar to be where you would look for one. A
-   * workspace with unsent edits is the caller's to warn about; see
-   * `unsentIn`.
+   * Joining again, because that is what it is: `JoinWorkspace` swaps the sync
+   * loop over and leaves the outbox on disk, so ops that never got out under
+   * the old key go out under the new one.
    */
-  close(id: string): void {
-    const workspace = this.list.find((w) => w.id === id);
-    if (!workspace) return;
-    // Flush anything mid-typing into the outbox first, so what is written down
-    // includes the sentence somebody was in the middle of.
-    workspace.dispose();
-    this.#loops.get(id)?.();
-    this.#loops.delete(id);
-
-    const at = this.list.findIndex((w) => w.id === id);
-    this.list = this.list.filter((w) => w.id !== id);
-    if (this.activeId === id) {
-      // The neighbour, not the first tab: closing the fourth of five should
-      // land on one of the two you were between, the way every other tab bar
-      // behaves.
-      this.activeId = (this.list[at] ?? this.list[at - 1] ?? null)?.id ?? null;
-    }
-    this.save();
+  async rekey(input: string, fallbackBase: string): Promise<boolean> {
+    return this.join(input, fallbackBase);
   }
 
-  /** Unsent edits in a workspace, for a close that would strand them. */
-  unsentIn(id: string): number {
-    const workspace = this.list.find((w) => w.id === id);
-    if (!workspace || !workspace.sync.shared) return 0;
-    return workspace.sync.pending;
+  /** Stops syncing and goes back to running purely locally. */
+  async leave(): Promise<boolean> {
+    const done = await this.#run(() => Workbench.LeaveWorkspace());
+    if (done === null) return false;
+    this.#adopt(null);
+    return true;
   }
 
-  /** Writes everything down now. */
+  /** Pushes and pulls now instead of waiting for the poll. The offline retry. */
+  retry(): void {
+    void this.#run(() => Workbench.SyncNow());
+  }
+
+  /** Writes the local outlines down now. */
   save(): void {
-    Storage.save({
-      workspaces: this.list.map((w) => w.snapshot()),
-      activeId: this.active?.id ?? null,
-    });
+    Storage.save(this.list, this.activeId);
   }
 
   /**
    * Arms the debounced save.
    *
    * Called from an effect that reads `stamp`, so a change cancels the pending
-   * timer and sets a new one -- and a burst of typing writes once at the end
-   * of it rather than once per character. Returns the cancel, which is the
-   * effect's cleanup.
+   * timer and sets a new one -- a burst of typing writes once at the end
+   * rather than once per character. Returns the cancel, which is the effect's
+   * cleanup.
    */
   scheduleSave(): () => void {
     const timer = setTimeout(() => this.save(), SAVE_AFTER_MS);
     return () => clearTimeout(timer);
   }
 
-  /** Stops every loop. For the app going away. */
+  /** Stops every tab's timers. For the app going away. */
   dispose(): void {
     for (const workspace of this.list) workspace.dispose();
-    for (const stop of this.#loops.values()) stop();
-    this.#loops.clear();
-  }
-
-  #add(workspace: Workspace): void {
-    this.list = [...this.list, workspace];
-    this.activeId = workspace.id;
-    this.#run(workspace);
-    this.save();
-  }
-
-  #run(workspace: Workspace): void {
-    this.#loops.get(workspace.id)?.();
-    this.#loops.set(workspace.id, workspace.sync.start());
   }
 
   /**
-   * Runs something that talks to a server, with the busy flag and one place
-   * that turns a failure into a sentence.
+   * Runs a backend call with the busy flag and one place that turns a failure
+   * into a sentence.
    *
    * @param describe How to word a failure. Creating a workspace and joining
-   *   one both fail with the same 403, and the two mean entirely different
-   *   things -- one is the signup token, the other is the workspace key -- so
-   *   telling somebody to check their key when they mistyped a signup token
-   *   sends them to look at the wrong field.
+   *   one fail with the same 403 and it means entirely different things --
+   *   one is the signup token, the other the workspace key -- so telling
+   *   somebody to check their key when they mistyped a signup token sends them
+   *   to look at the wrong field.
    */
-  async #attempt<T>(
-    work: () => Promise<T>,
+  async #run<T>(
+    call: () => Promise<T>,
     describe: (err: unknown) => string = explain,
   ): Promise<T | null> {
     if (this.busy) return null;
     this.busy = true;
     this.error = null;
     try {
-      return await work();
+      // void is what a Go method with no return comes back as. Normalised to
+      // a non-null marker so callers can tell "it worked" from "it failed".
+      const value = await call();
+      return (value ?? (true as unknown)) as T;
     } catch (err) {
       this.error = describe(err);
       return null;
@@ -318,52 +436,28 @@ export class Workspaces {
   }
 }
 
-/**
- * Refuses a read key where a write key belongs.
- *
- * Checked before a tab appears rather than left to the first push, which is
- * where the server would catch it. A tab that opens, loads somebody's outline
- * and then silently refuses every edit is the worst version of this: it looks
- * exactly like a workspace that is working, right up until the changes you
- * made turn out never to have left. The read-only viewer in web/ is what a
- * read key is for.
- */
-function requireWrite(access: "read" | "write"): void {
-  if (access === "write") return;
-  throw new Error(
-    "That is a read key. It can open the workspace and not change it — open it in the viewer, or ask for a write key.",
-  );
-}
-
-/**
- * A failure, as something a person can do something about.
- *
- * The server's own message is used where there is one, because it knows more
- * than this does -- but the three cases below are ones where what the server
- * says ("forbidden") is true and useless, and what the person needs to know
- * is which of their two inputs was wrong.
- */
 function explainCreate(err: unknown): string {
-  if (err instanceof SyncError && err.failure === "rejected") {
-    // The contract gives one 403 for both, and the server cannot tell us
-    // which -- so the message names both rather than guessing.
+  const text = explain(err);
+  if (/forbidden|403/i.test(text)) {
+    // The contract gives one 403 for both and the server cannot say which, so
+    // the message names both rather than guessing.
     return "That server would not accept this signup token. It may be wrong, or the server may not be handing out new workspaces.";
   }
-  return explain(err);
+  return text;
 }
 
+/**
+ * A backend error, as a sentence.
+ *
+ * Go's errors are wrapped for logs -- "workbench: join workspace: unauthorized:
+ * unknown or expired key" -- and the prefixes are the package's, not the
+ * user's. They are stripped and the rest is punctuated, so the live region
+ * reads as a sentence rather than as a stack of colons.
+ */
 function explain(err: unknown): string {
-  if (err instanceof SyncError) {
-    switch (err.failure) {
-      case "rejected":
-        return "That key was refused. Check it is the whole key, and that it has not been rotated.";
-      case "rate-limited":
-        return "That server is asking us to slow down. Try again in a moment.";
-      case "unreachable":
-        return "That server could not be reached.";
-      default:
-        return err.message;
-    }
-  }
-  return err instanceof Error ? err.message : String(err);
+  const raw = (err instanceof Error ? err.message : String(err)).trim();
+  if (raw === "") return "That did not work, and the backend did not say why.";
+  const text = raw.replace(/^(workbench|services|sync|ops):\s*/i, "").trim();
+  const capitalised = text[0].toUpperCase() + text.slice(1);
+  return /[.!?]$/.test(capitalised) ? capitalised : `${capitalised}.`;
 }

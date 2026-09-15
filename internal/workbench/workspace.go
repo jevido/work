@@ -232,6 +232,12 @@ func (w *Workbench) adopt(ws *config.Workspace, save bool) error {
 		}
 	}
 	w.publishWorkspace()
+
+	// The journal has already been replayed by newSync, so the active tab's
+	// plan is readable before a single byte has crossed the network. Adopting
+	// it here is what makes opening Work on a plane show the tasks you left
+	// rather than an empty board.
+	w.adoptTasks()
 	return nil
 }
 
@@ -431,6 +437,12 @@ func (w *Workbench) BindTab(tabID, dir string) error {
 		return err
 	}
 	w.publishWorkspace()
+
+	// A bound folder is the condition the board's source waits on, so the
+	// plan arrives the moment the tab has somewhere to run.
+	if active {
+		w.adoptTasks()
+	}
 	return nil
 }
 
@@ -481,6 +493,11 @@ func (w *Workbench) ActivateTab(tabID string) error {
 	// active, so it is republished under it. Without this, cards made before
 	// any tab was active would never reach the workspace at all.
 	w.publishBoard()
+
+	// And then the new tab's own plan. Order matters: republishing first
+	// means the cards that were already here keep their place, and the tasks
+	// adopted below are added after them rather than interleaved.
+	w.adoptTasks()
 	return nil
 }
 
@@ -572,6 +589,11 @@ func (w *Workbench) absorb(s *Sync) {
 	}
 	w.wsMu.Unlock()
 
+	// Unconditionally, and before the tab bookkeeping below returns early: a
+	// page of ops that changed no tab at all routinely changes the plan, and
+	// that is the board's source.
+	w.adoptTasks()
+
 	if !changed {
 		return
 	}
@@ -606,6 +628,17 @@ func (w *Workbench) shareBoard(cards []board.Card) {
 		s.publish()
 		return
 	}
+	// The progress of any card adopted from a plan task, written back onto
+	// the task itself. Appended to the same batch rather than applied
+	// separately so a status change is still one fsync, whether or not the
+	// card came from the plan.
+	progress, err := taskOps(s, tab, w.taskLinks(), cards)
+	if err != nil {
+		s.setErr(err)
+		s.publish()
+		return
+	}
+	batch = append(batch, progress...)
 	if len(batch) == 0 {
 		return
 	}

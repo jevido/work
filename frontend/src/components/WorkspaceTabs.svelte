@@ -15,9 +15,7 @@
     onjoin: () => void;
   } = $props();
 
-  /** The tab being renamed, if any. */
-  let renaming = $state<string | null>(null);
-  /** The tab a close would strand unsent changes in. */
+  /** The tab a close would retire for everybody. */
   let confirming = $state<Workspace | null>(null);
 
   const tabEls = new Map<string, HTMLElement>();
@@ -30,38 +28,28 @@
   }
 
   /**
-   * Whether a tab has something wrong with it.
+   * What is wrong with one tab, as opposed to with the workspace.
    *
-   * A tab bar exists so the things behind the other tabs keep going, which
-   * means the other tabs are exactly where a problem will happen unwatched.
-   * The mark is on the tab and the sentence is on the badge: a dot is enough
-   * to make somebody look, and not enough to say what happened.
+   * This used to carry the sync state, which was per workspace when a
+   * workspace was a tab. It is not any more: there is one workspace and one
+   * sync loop behind all of these, so a refused key is not a fact about the
+   * third tab -- putting a red dot on every tab for one key would be noise
+   * with no way to act on it. The badge in the mode bar says that, once.
+   *
+   * What is genuinely per tab is whether this machine has a folder for it. A
+   * tab a colleague made arrives unbound, agents cannot run in it until
+   * somebody points it at a project, and that is invisible until you try.
    */
-  function trouble(workspace: Workspace): "none" | "waiting" | "refused" {
-    // A workspace that was never shared cannot be behind: there is nowhere
-    // for it to be behind. Marking one would put a warning dot on every tab
-    // of an app nobody has connected to a server.
-    if (!workspace.sync.shared) return "none";
-    const state = workspace.sync.state;
-    if (state === "rejected") return "refused";
-    if (state === "offline" || workspace.sync.pending > 0) return "waiting";
-    return "none";
+  function unbound(workspace: Workspace): boolean {
+    return workspaces.joined && !workspace.bound;
   }
 
   /** What a tab is announced as, which is more than what it is labelled with. */
   function describe(workspace: Workspace): string {
-    switch (trouble(workspace)) {
-      case "refused":
-        return `${workspace.name}, key refused`;
-      case "waiting": {
-        const n = workspace.sync.pending;
-        return n === 0
-          ? `${workspace.name}, offline`
-          : `${workspace.name}, ${n} unsaved ${n === 1 ? "change" : "changes"}`;
-      }
-      default:
-        return workspace.name;
-    }
+    const parts = [workspace.name];
+    if (unbound(workspace)) parts.push("no folder on this machine");
+    if (workspaces.joined && workspaces.runsIn === workspace.id) parts.push("agents run here");
+    return parts.join(", ");
   }
 
   /**
@@ -74,6 +62,13 @@
    * explain which of the two the arrows move between; the × is still there for
    * the pointer, and is skipped by the keyboard because the keyboard has a
    * better way.
+   *
+   * There is no F2 any more. Renaming was local -- a tab's name is a field on
+   * its node in the workspace document, nothing here wrote one, and a rename
+   * that the next workspace:changed silently undid would be worse than not
+   * offering it. `ApplyWorkspaceEdits` can write that field now, so renaming
+   * is buildable again; it has not been built, and `Workspaces.rename` is
+   * still local-only, so the key stays off rather than half-working.
    */
   function onKeydown(event: KeyboardEvent, at: number) {
     const list = workspaces.list;
@@ -95,45 +90,40 @@
         event.preventDefault();
         askClose(list[at]);
         return;
-      case "F2":
-        event.preventDefault();
-        renaming = list[at].id;
-        return;
       default:
         return;
     }
     event.preventDefault();
     const next = list[target];
     if (!next) return;
-    // Selection follows focus, which is right when switching is instant and
-    // cheap: every tab is already live and already caught up.
+    // Selection follows focus, which is right when switching is instant: the
+    // outline behind every tab is already in memory.
     workspaces.select(next.id);
     tabEls.get(next.id)?.focus();
   }
 
+  /**
+   * Always asks.
+   *
+   * Closing a tab retires it for everyone in the workspace -- it tombstones
+   * the tab node, and a tombstone is permanent -- so there is no version of
+   * this that is safe enough to do on a keystroke without saying so. The
+   * previous confirm only appeared when this machine had unsent changes,
+   * which was the least of what this does.
+   */
   function askClose(workspace: Workspace) {
-    if (workspaces.unsentIn(workspace.id) > 0) {
-      confirming = workspace;
-      return;
-    }
-    close(workspace);
+    if (!workspaces.joined) return;
+    confirming = workspace;
   }
 
-  function close(workspace: Workspace) {
+  async function close(workspace: Workspace) {
     const list = workspaces.list;
     const at = list.findIndex((w) => w.id === workspace.id);
     confirming = null;
-    workspaces.close(workspace.id);
-    // Focus the tab that took its place, or the strip's new first tab.
+    await workspaces.close(workspace.id);
+    // Focus the tab that took its place, or the strip's new last tab.
     const next = workspaces.list[at] ?? workspaces.list[at - 1] ?? null;
     if (next) queueMicrotask(() => tabEls.get(next.id)?.focus());
-  }
-
-  function commitRename(id: string, value: string) {
-    const name = value.trim();
-    if (name !== "") workspaces.rename(id, name);
-    renaming = null;
-    queueMicrotask(() => tabEls.get(id)?.focus());
   }
 
   function confirmDialog(node: HTMLDialogElement) {
@@ -151,54 +141,36 @@
   >
     {#each workspaces.list as workspace, at (workspace.id)}
       {@const selected = workspaces.active?.id === workspace.id}
-      {@const mark = trouble(workspace)}
-      <div class="tab" class:selected data-trouble={mark}>
-        {#if renaming === workspace.id}
-          <!-- The rename replaces the tab rather than opening over it: the tab
-               is the label, and a dialog to change a label is a dialog to
-               change one word. -->
-          <input
-            class="rename"
-            value={workspace.name}
-            aria-label="Rename {workspace.name}"
-            {@attach (el) => {
-              el.focus();
-              el.select();
-            }}
-            onblur={(event) => commitRename(workspace.id, event.currentTarget.value)}
-            onkeydown={(event) => {
-              if (event.key === "Enter") commitRename(workspace.id, event.currentTarget.value);
-              if (event.key === "Escape") {
-                renaming = null;
-                queueMicrotask(() => tabEls.get(workspace.id)?.focus());
-              }
-            }}
-          />
-        {:else}
-          <button
-            role="tab"
-            id="workspace-tab-{workspace.id}"
-            aria-selected={selected}
-            aria-controls={panelId}
-            aria-label={describe(workspace)}
-            tabindex={selected ? 0 : -1}
-            onclick={() => workspaces.select(workspace.id)}
-            ondblclick={() => (renaming = workspace.id)}
-            onkeydown={(event) => onKeydown(event, at)}
-            {@attach (el) => register(workspace.id, el)}
-          >
-            {#if mark !== "none"}
-              <span class="mark" aria-hidden="true"></span>
-            {/if}
-            <span class="name">{workspace.name}</span>
-          </button>
+      {@const needsFolder = unbound(workspace)}
+      <div class="tab" class:selected data-trouble={needsFolder ? "unbound" : "none"}>
+        <button
+          role="tab"
+          id="workspace-tab-{workspace.id}"
+          aria-selected={selected}
+          aria-controls={panelId}
+          aria-label={describe(workspace)}
+          tabindex={selected ? 0 : -1}
+          onclick={() => workspaces.select(workspace.id)}
+          onkeydown={(event) => onKeydown(event, at)}
+          {@attach (el) => register(workspace.id, el)}
+        >
+          {#if needsFolder}
+            <span class="mark" aria-hidden="true"></span>
+          {/if}
+          <span class="name">{workspace.name}</span>
+        </button>
 
+        {#if workspaces.joined}
           <!--
             Pointer only, on purpose. The keyboard closes a tab with Delete,
             which the tab pattern already reserves for it; a focusable × here
             would double the number of stops in the strip to save nobody a
             keystroke. aria-hidden because the tab's own Delete is the whole
             of what a screen reader should be told about closing.
+
+            Only when a workspace is joined: the one tab an unjoined machine
+            has is not a tab anything could close, and a × that does nothing
+            is worse than no ×.
           -->
           <button
             class="close"
@@ -219,24 +191,32 @@
   </div>
 
   <div class="add">
-    <button onclick={onnew}>New</button>
-    <button onclick={onjoin}>Join</button>
+    <!-- What "New" means depends on whether there is a workspace to put a tab
+         in, and the word has to follow: a button labelled "New" that makes a
+         workspace on a server when you wanted a tab is the same click with two
+         meanings. -->
+    <button onclick={onnew}>{workspaces.joined ? "New tab" : "New workspace"}</button>
+    {#if !workspaces.joined}
+      <button onclick={onjoin}>Join</button>
+    {/if}
   </div>
 </div>
 
 {#if confirming}
-  {@const unsent = workspaces.unsentIn(confirming.id)}
   <dialog {@attach confirmDialog} onclose={() => (confirming = null)} aria-labelledby="close-title">
-    <h2 id="close-title">Close {confirming.name}?</h2>
+    <h2 id="close-title">Close {confirming.name} for everyone?</h2>
     <p>
-      {unsent} {unsent === 1 ? "change has" : "changes have"} not reached the server yet.
-      Closing this tab forgets {unsent === 1 ? "it" : "them"} — this machine is the only
-      place {unsent === 1 ? "it exists" : "they exist"}.
+      This tab belongs to the workspace, not to this machine. Closing it retires it for
+      everybody who has joined, and there is no undo — the workspace has no way to bring
+      a closed tab back.
+    </p>
+    <p>
+      The notes you have written in it here stay on this machine.
     </p>
     <footer>
       <button class="ghost" onclick={() => (confirming = null)}>Keep it open</button>
       <button class="danger" onclick={() => confirming && close(confirming)}>
-        Close and lose {unsent === 1 ? "it" : "them"}
+        Close it for everyone
       </button>
     </footer>
   </dialog>
@@ -301,19 +281,17 @@
     white-space: nowrap;
   }
 
-  /* A workspace that is not keeping up, marked where you can see it without
-     switching to it. The colour says which kind; the badge on the tab you are
-     in says the rest. */
+  /* A tab with no folder on this machine, marked where you can see it without
+     switching to it. Hollow rather than filled: it is something still to do,
+     not something that went wrong. The label says which, for anyone who
+     cannot see the difference between two six-pixel dots. */
   .mark {
     flex: none;
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background: var(--accent);
-  }
-
-  .tab[data-trouble="refused"] .mark {
-    background: var(--err);
+    background: transparent;
+    box-shadow: inset 0 0 0 1.5px var(--accent);
   }
 
   .close {
@@ -334,18 +312,6 @@
 
   .close:hover {
     color: var(--err);
-  }
-
-  .rename {
-    width: 160px;
-    margin: 3px 4px;
-    padding: 2px 6px;
-    border: 1px solid var(--accent);
-    border-radius: 4px;
-    background: var(--bg);
-    color: inherit;
-    font: inherit;
-    font-size: 12px;
   }
 
   .none {

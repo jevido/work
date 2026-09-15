@@ -53,6 +53,30 @@ export function Agents(): $CancellablePromise<workbench$0.AgentStatus[] | null> 
 }
 
 /**
+ * ApplyWorkspaceEdits writes idea and planning edits into a tab's document and
+ * hands back the merged result.
+ * 
+ * This is the call the outline did not have. Before it, the frontend had its
+ * own replica -- its own actor, its own Lamport clock, its own outbox in
+ * localStorage -- which made two writers out of one machine, and the outline
+ * could not leave the webview it was typed in. Now the edit is described here
+ * and everything only this machine may mint is minted once, by the Sync that
+ * owns the workspace: the op ID, the actor, the clock.
+ * 
+ * It returns the whole document rather than nothing, so the caller sees its
+ * own edit merged without a second round trip that could race the sync loop.
+ * An edit that reached this call is on disk before it returns; reaching the
+ * server is the second stage and happens afterwards, or offline, later.
+ * 
+ * ErrNoTransport comes back on a machine that has joined no workspace, which
+ * is the ordinary case and not an error to show: there is no shared document
+ * to write to, and the caller keeps its own.
+ */
+export function ApplyWorkspaceEdits(tabID: string, edits: workbench$0.Edit[] | null): $CancellablePromise<workbench$0.Document> {
+    return $Call.ByID(1305658848, tabID, edits);
+}
+
+/**
  * BindTabFolder asks the user which project on this machine a tab means,
  * using the platform's own folder picker, and remembers the answer.
  * 

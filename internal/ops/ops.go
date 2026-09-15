@@ -150,6 +150,38 @@ type Op struct {
 // Stamp is the op's position in the merge order.
 func (o Op) Stamp() Stamp { return Stamp{Clock: o.Clock, Actor: o.Actor} }
 
+// NeedsLive reports the node whose tombstone makes this op pointless, if there
+// is one.
+//
+// It is not a merge rule and the merge never calls it: an op that reaches
+// [State.Apply] is applied whatever has been deleted, because rule two is about
+// existence and a tombstone that swallowed later writes would not converge. It
+// is the rule for whether an op is worth *storing*, which is the one question
+// the server has to answer that the merge does not. The answer lives here so
+// that the server does not need a second opinion about what the kinds mean.
+//
+// Three kinds have no live target:
+//
+//   - KindDeleteNode. Deleting what is already deleted is the outcome the
+//     caller asked for, and refusing it would put a client in a retry loop over
+//     an op it cannot drop any other way.
+//   - KindExtractToTask names the task it creates, not the node it came from.
+//     Extracting from a node that was deleted meanwhile is defined and useful —
+//     the tombstone ends up recording where its content went — so the source
+//     being gone is not a reason to refuse the op. The task being gone is.
+//   - An op whose kind this package does not know. [Op.Validate] is what
+//     refuses those; answering "nothing" here keeps the two checks from
+//     disagreeing about an op neither should accept.
+func (o Op) NeedsLive() (string, bool) {
+	switch o.Kind {
+	case KindCreateNode, KindSetFields, KindMoveNode:
+		return o.Node, true
+	case KindExtractToTask:
+		return o.Task, true
+	}
+	return "", false
+}
+
 // Validate reports whether the op is one this package can apply.
 //
 // Every op is checked, including ones read back from the server's own log: the

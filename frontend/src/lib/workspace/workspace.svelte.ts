@@ -1,12 +1,40 @@
 /**
- * One workspace: its document, which mode it is showing, and its connection to
- * the server that holds it.
+ * One tab's outline: its document, and which mode it is showing.
  *
- * Every edit goes through a method here, and every method does the same three
- * things in the same order -- mint the op, merge it locally, hand it to the
- * outbox. Components read `tree`, `rows` and `tasks` and never write. That is
- * what makes the pending count trustworthy: there is no way to change a
- * workspace that does not also count as a change.
+ * **Local. Nothing here reaches a server.** This used to own a transport, an
+ * outbox and a sequence number, and that was the second sync loop -- pointed
+ * at the same workspace the Go side was already pushing to, with its own
+ * actor and its own clock. The workspace, its keys, its queue and its merge
+ * are Go's now; see workspaces.svelte.ts.
+ *
+ * What stayed is the Idea and Planning outline, which is **local to this
+ * machine**: it persists in localStorage, it does not sync, and nothing in
+ * the app shows it as though it did.
+ *
+ * That was once because there was nowhere to put it. It is not any more --
+ * `WorkbenchService.ApplyWorkspaceEdits(tabID, edits)` landed, it takes the
+ * same five op kinds this file mints, and it returns the merged document. So
+ * the outline *can* now go through the one queue and the one merge in Go, and
+ * it should. What is below has simply not been moved yet, and moving it is
+ * more than swapping the call: the merge currently happens here and
+ * synchronously, so every method returns a document that already includes the
+ * edit, while ApplyWorkspaceEdits is a round trip. Typing has to stay
+ * optimistic across it, ErrNoTransport has to keep an unjoined machine
+ * working exactly as it does today, and storage.ts has to stop being the
+ * document's home without losing the notes already in it.
+ *
+ * Until that is done this is a per-tab local document, and the comments below
+ * describe what it does rather than what it ought to.
+ *
+ * The op machinery below stays because the document is a tree of the same
+ * shape, and rebuilding it as a plain tree would be a rewrite that changes
+ * nothing anyone can see -- and would have to be undone the day the outline
+ * gets a home in Go. It is a local document model now rather than a replica:
+ * ops are minted, applied and forgotten, and none of them is ever sent or
+ * received.
+ *
+ * Every edit goes through a method here. Components read `tree`, `rows` and
+ * `tasks` and never write.
  */
 import {
   FIELD_COLLAPSED,
@@ -29,10 +57,9 @@ import {
   type TaskState,
 } from "./model";
 import { afterIndex, atEnd, atStart, keyFor, stepped, type Bounds } from "./bounds";
+import type { ProposedOp } from "./proposal";
 import { State, type Node, type Op, type TreeNode } from "./ops";
 import { Replica, actorId } from "./replica";
-import { Sync, type Outgoing } from "./sync.svelte";
-import { httpTransport, type Transport } from "./transport";
 
 /**
  * How long typing settles before it counts as an edit worth sending.
@@ -44,18 +71,17 @@ import { httpTransport, type Transport } from "./transport";
  */
 const TYPING_SETTLE_MS = 400;
 
-/** Everything about a workspace that survives a restart. */
-export interface WorkspaceSnapshot {
-  id: string;
-  name: string;
-  /** The sync server, or null for a workspace that has never been shared. */
-  base: string | null;
-  key: string | null;
+/**
+ * Everything about a tab's outline that survives a restart.
+ *
+ * No id, no name, no server and no key. The id is the key this is filed
+ * under, the name is the tab's and comes from Go, and the credentials are not
+ * this side's to hold -- see storage.ts.
+ */
+export interface OutlineSnapshot {
   mode: Mode;
-  seq: number;
   /** The merged state, stamps and all. See State.fromJSON for why stamps. */
   state: unknown;
-  outbox: Outgoing[];
   /**
    * Lines that were mid-typing when this was written.
    *
@@ -81,10 +107,14 @@ export class Workspace {
    */
   mode = $state<Mode>("idea");
 
-  base = $state<string | null>(null);
-  key = $state<string | null>(null);
-
-  readonly sync: Sync;
+  /**
+   * Whether this machine has a project folder for this tab.
+   *
+   * Per-machine and set from Go's TabView: a tab a colleague made arrives
+   * unbound, and agents cannot run in it until someone points it at a project
+   * here. Nothing about the outline needs it; the Work pane does.
+   */
+  bound = $state(true);
 
   /**
    * The merged document.
@@ -144,65 +174,28 @@ export class Workspace {
   /** Field writes waiting to settle, by node id. See TYPING_SETTLE_MS. */
   #typing = new Map<string, ReturnType<typeof setTimeout>>();
 
-  constructor(snapshot: WorkspaceSnapshot) {
-    this.id = snapshot.id;
-    this.name = snapshot.name;
-    this.mode = MODES.includes(snapshot.mode) ? snapshot.mode : "idea";
-    this.base = snapshot.base;
-    this.key = snapshot.key;
-
-    this.#state = State.fromJSON(snapshot.state);
-    this.drafts = { ...snapshot.drafts };
+  /**
+   * @param id The tab this outline belongs to. Go's tab id when a workspace is
+   *   joined, and the fixed local one when none is -- see LOCAL_TAB.
+   * @param snapshot What storage had for that id, or null for a fresh tab.
+   */
+  constructor(id: string, snapshot: OutlineSnapshot | null) {
+    this.id = id;
+    this.mode = snapshot && MODES.includes(snapshot.mode) ? snapshot.mode : "idea";
+    this.#state = State.fromJSON(snapshot?.state ?? null);
+    this.drafts = { ...(snapshot?.drafts ?? {}) };
     this.#replica = new Replica(actorId(), () => this.#state.clock);
-
-    this.sync = new Sync((ops) => this.#merge(ops));
-    this.sync.outbox = snapshot.outbox;
-    // The outbox was merged before it was written down, so it is already in
-    // the state -- replaying it here would be a no-op by rule three anyway.
     this.#refresh();
-    this.sync.configure(this.#transport(), snapshot.seq);
+    // Restoring is not an edit. #refresh counts one, so it is taken back --
+    // otherwise every tab looks dirty the moment it is opened and the
+    // debounced save writes the whole store on startup for nothing.
+    this.revision = 0;
   }
 
-  /** A brand new, unshared workspace. */
-  static create(name: string): Workspace {
-    return new Workspace({
-      id: newId(),
-      name,
-      base: null,
-      key: null,
-      mode: "idea",
-      seq: 0,
-      state: null,
-      outbox: [],
-      drafts: {},
-    });
-  }
-
-  /** A workspace joined by key. Its content arrives from the log. */
-  static join(name: string, base: string, key: string): Workspace {
-    return new Workspace({
-      id: newId(),
-      name,
-      base,
-      key,
-      mode: "idea",
-      seq: 0,
-      state: null,
-      outbox: [],
-      drafts: {},
-    });
-  }
-
-  snapshot(): WorkspaceSnapshot {
+  snapshot(): OutlineSnapshot {
     return {
-      id: this.id,
-      name: this.name,
-      base: this.base,
-      key: this.key,
       mode: this.mode,
-      seq: this.sync.seq,
       state: this.#state.toJSON(),
-      outbox: this.sync.outbox,
       drafts: this.drafts,
     };
   }
@@ -215,71 +208,6 @@ export class Workspace {
 
   /** How much of the outline is still folded away, for the "expand all" button. */
   foldedCount = $derived(countFolded(this.tree));
-
-  /**
-   * Points this workspace at a server. Also the way out of a refused key.
-   *
-   * The sequence number resets to zero, so the whole log is read back. That is
-   * the right default for a key change -- the new key may see a different
-   * workspace entirely -- and it is cheap for the merge, which is idempotent
-   * by op id and will recognise everything it already has.
-   */
-  connect(base: string, key: string): void {
-    this.base = base;
-    this.key = key;
-    this.sync.configure(this.#transport(), 0);
-    this.revision++;
-  }
-
-  /**
-   * The ops that would rebuild this workspace from nothing.
-   *
-   * Needed because sharing a workspace that already has something in it is a
-   * real thing to want, and the merge does not keep the ops it merged -- only
-   * their ids, and only so a replay cannot get through twice. So the current
-   * document is turned back into a set of creates: one per live node, in
-   * parent-first order, carrying the fields it has now.
-   *
-   * These are new ops with new ids and fresh clocks, which is correct rather
-   * than a shortcut. They are being sent to a workspace that has never seen
-   * this content; reusing the original ids would claim a history the server's
-   * log does not have.
-   */
-  seedOps(): Op[] {
-    const ops: Op[] = [];
-    const walk = (nodes: readonly TreeNode[], parent: string) => {
-      for (const node of nodes) {
-        // Parent-first, so no create ever refers to a node that is not there
-        // yet. The merge would cope with the other order -- it creates on
-        // demand -- but a log that reads in causal order is one a person can
-        // debug.
-        ops.push(this.#replica.create(node.id, parent, node.position, { ...node.fields }));
-        walk(node.children, node.id);
-      }
-    };
-    walk(this.tree, "");
-    return ops;
-  }
-
-  /**
-   * Puts an existing local workspace onto a server.
-   *
-   * The document goes with it, and has to: an unshared workspace queues
-   * nothing -- see Sync.record -- so there is no history to replay, and
-   * without seedOps this would connect an outline full of work to an empty
-   * log and then sync the emptiness in both directions. That is the one
-   * outcome nobody would forgive.
-   */
-  share(base: string, key: string): void {
-    const seed = this.seedOps();
-    this.connect(base, key);
-    for (const op of seed) this.#emit(op);
-  }
-
-  #transport(): Transport | null {
-    if (!this.base || !this.key) return null;
-    return httpTransport(this.base, this.key);
-  }
 
   /* ---------------------------------------------------------------------- */
   /* The outline                                                            */
@@ -557,6 +485,105 @@ export class Workspace {
     return id ? (this.tasks.find((t) => t.id === id) ?? null) : null;
   }
 
+  /* ---------------------------------------------------------------------- */
+  /* Applying what Claude proposed                                          */
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * Turns one approved proposed op into a real one.
+   *
+   * This is the only door a proposal comes through, and it is a narrow one on
+   * purpose. Everything a proposal says is *relative* -- this node, under that
+   * node, after this sibling -- and everything absolute about the resulting op
+   * is minted here, now, against the document as it stands: the op id, the
+   * actor, the Lamport clock and above all the sort key. A proposal never
+   * carries a position (./proposal.ts refuses one), so there is no path by
+   * which a key computed against a stale document can reach the log.
+   *
+   * It also means an approved restructuring is indistinguishable, in the log,
+   * from the same edits made by hand. There is no "written by Claude" stamp on
+   * these ops and there is nowhere to put one: the op envelope carries a
+   * replica, not an author, and the document records what changed rather than
+   * who changed it.
+   *
+   * @param refs Ids the earlier ops of this proposal created, by the ref they
+   *   named themselves with. Written to as well as read: an insert with a ref
+   *   registers the id it got, so a later op in the same proposal can put
+   *   something under a line that did not exist when the proposal was written.
+   * @returns false when the edit was refused, which the review reports as a
+   *   failed row rather than throwing out of a click handler.
+   */
+  applyProposed(op: ProposedOp, refs: Map<string, string>): boolean {
+    // Anything half-typed goes in first, so the proposal's ops carry higher
+    // clocks than the edits they were written against -- see #settle.
+    this.#settleAll();
+
+    /** A proposal id: a real node, or one an earlier op in this set made. */
+    const real = (id: string): string => refs.get(id) ?? id;
+
+    switch (op.kind) {
+      case "set-text": {
+        const node = real(op.node);
+        if (!findInTree(this.tree, node)) return false;
+        return this.#emit(this.#replica.setFields(node, { [FIELD_TEXT]: op.text }));
+      }
+
+      case "insert": {
+        const parent = op.parent === "" ? "" : real(op.parent);
+        const bounds = this.#slotIn(parent, op.after === null ? null : real(op.after));
+        if (!bounds) return false;
+        const id = newId();
+        if (!this.#emit(this.#replica.create(id, parent, keyFor(bounds), { [FIELD_TEXT]: op.text }))) {
+          return false;
+        }
+        if (op.ref) refs.set(op.ref, id);
+        return true;
+      }
+
+      case "move": {
+        const node = real(op.node);
+        const parent = op.parent === "" ? "" : real(op.parent);
+        const moving = findInTree(this.tree, node);
+        if (!moving) return false;
+        // Refused rather than merged. A move into a node's own subtree is a
+        // cycle, and the merge resolves a cycle by detaching the branch --
+        // which on screen is lines vanishing. Review catches this before the
+        // row can be ticked; this is the same answer at the last door, for a
+        // document that changed between the check and the press.
+        if (parent === node) return false;
+        if (parent !== "" && findInTree(moving.children, parent)) return false;
+        const bounds = this.#slotIn(parent, op.after === null ? null : real(op.after));
+        if (!bounds) return false;
+        return this.#emit(this.#replica.move(node, parent, keyFor(bounds)));
+      }
+
+      case "delete":
+        return this.remove(real(op.node));
+
+      case "promote":
+        return this.promote(real(op.node)) !== null;
+
+      case "set-status":
+        return this.setTaskState(real(op.node), op.status);
+    }
+  }
+
+  /**
+   * Where a line goes inside `parentId`, relative to a sibling.
+   *
+   * Null when the named sibling is not in fact a sibling -- a proposal that
+   * says "after X, under Y" while X sits under something else is describing a
+   * document this is not, and guessing which half it meant would put the line
+   * somewhere nobody asked for.
+   */
+  #slotIn(parentId: string, afterId: string | null): Bounds | null {
+    const siblings = this.#siblingsOf(parentId);
+    if (afterId === null) return atStart(siblings);
+    const at = siblings.findIndex((s) => s.id === afterId);
+    if (at < 0) return null;
+    return afterIndex(siblings, at);
+  }
+
   /** Lets go of any timers, flushing what they were holding. */
   dispose(): void {
     this.#settleAll();
@@ -564,7 +591,14 @@ export class Workspace {
 
   /* ---------------------------------------------------------------------- */
 
-  /** Merge, then queue. The only path a change may take. */
+  /**
+   * Merges one op into the local document. The only path a change may take.
+   *
+   * There is no queue behind this: an edit here changes this machine's
+   * outline and stops. The other half is `ApplyWorkspaceEdits`, which now
+   * exists and is not yet called from here -- see the note at the top of this
+   * file for what moving onto it involves.
+   */
   #emit(op: Op): boolean {
     // apply() validates, and validation can fail on an op this app built: the
     // protocol caps a sort key at 256 bytes, and inserting between the same
@@ -581,23 +615,7 @@ export class Workspace {
     }
     if (!applied) return false;
     this.#refresh();
-    this.sync.record(op);
     return true;
-  }
-
-  #merge(ops: readonly Op[]): void {
-    let changed = 0;
-    for (const op of ops) {
-      try {
-        if (this.#state.apply(op)) changed++;
-      } catch {
-        // An op this version cannot apply -- written by a newer release, or
-        // malformed. Skipped rather than allowed to stop the catch-up: the
-        // rest of the log is still readable, and refusing all of it over one
-        // op would leave the workspace blank instead of nearly right.
-      }
-    }
-    if (changed > 0) this.#refresh();
   }
 
   #refresh(): void {
@@ -648,11 +666,11 @@ export class Workspace {
   /**
    * Sends a settling edit now.
    *
-   * Called before any structural op, so the outbox keeps the order the person
-   * made them in. Without it, typing a line and immediately indenting it sends
-   * the move first and the text after -- harmless for those two, and not
-   * harmless before a delete, where the text op would arrive with a higher
-   * clock than the tombstone it was meant to precede.
+   * Called before any structural op, so the document takes the edits in the
+   * order the person made them. Without it, typing a line and immediately
+   * indenting it applies the move first and the text after -- harmless for
+   * those two, and not harmless before a delete, where the text op would
+   * carry a higher clock than the tombstone it was meant to precede.
    */
   #settle(id: string): void {
     const timer = this.#typing.get(id);

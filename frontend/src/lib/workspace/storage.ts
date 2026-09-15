@@ -1,63 +1,104 @@
 /**
- * Workspaces on disk, such as disk is inside a webview.
+ * The local outline, per tab, such as disk is inside a webview.
  *
- * Local storage rather than the Go side, and that is a decision with a cost
- * worth writing down: it is per-webview, so a workspace made here is invisible
- * to anything else on the machine, and clearing site data loses whatever had
- * not synced. The alternative is a backend call through a service that belongs
- * to somebody else this week. When that lands, this file is the whole of what
- * changes -- nothing above it knows where a workspace is kept.
+ * This file used to hold whole workspaces: their server, their **write key**,
+ * their outbox and their merged state. None of that is here any more and none
+ * of it should ever come back. The workspace, its keys and its unsent ops are
+ * the Go side's; they live in the config file and the outbox, which fsync and
+ * which survive a webview whose site data somebody cleared. A credential in
+ * localStorage was a second copy of the one secret in this app, kept in the
+ * least durable and least protected place it could be kept.
+ *
+ * What is left is the Idea and Planning outline. It is local, it is per tab,
+ * and it does not leave this machine. `ApplyWorkspaceEdits` now gives it a
+ * home in Go, so this file is on its way out -- but not by deletion: whatever
+ * is already in this store is somebody's notes, and the move has to carry
+ * them over rather than start them again empty.
  *
  * Everything read back is checked rather than cast. The store can hold
  * anything: an older version of this app wrote it, or somebody edited it, or
  * it is half a write that was interrupted.
  */
-import type { Mode } from "./model";
-import type { Op } from "./ops";
-import type { Outgoing } from "./sync.svelte";
-import type { WorkspaceSnapshot } from "./workspace.svelte";
+import { Workspace, type OutlineSnapshot } from "./workspace.svelte";
 
-const KEY = "work.workspaces.v1";
+const KEY = "work.outlines.v1";
 
-export interface StoredState {
-  workspaces: WorkspaceSnapshot[];
+/**
+ * The store this replaced.
+ *
+ * Removed rather than ignored, and removed on the first read rather than left
+ * for a migration nobody will write. It holds write keys. Leaving it in place
+ * would mean every machine that has ever run the previous build keeps a
+ * working credential in localStorage forever, for a code path that no longer
+ * reads it -- which is the worst kind of leftover, because nothing will ever
+ * touch it again to notice.
+ */
+const RETIRED_KEY = "work.workspaces.v1";
+
+interface Stored {
   activeId: string | null;
+  tabs: Record<string, OutlineSnapshot>;
 }
 
-const EMPTY: StoredState = { workspaces: [], activeId: null };
+let cache: Stored | null = null;
 
-export function load(): StoredState {
+function read(): Stored {
+  if (cache) return cache;
+  cache = { activeId: null, tabs: {} };
+
+  try {
+    localStorage.removeItem(RETIRED_KEY);
+  } catch {
+    // Storage can be denied outright, in which case there was nothing in it.
+  }
+
   let raw: string | null = null;
   try {
     raw = localStorage.getItem(KEY);
   } catch {
-    // Storage can be denied outright. A session with no memory still works.
-    return EMPTY;
+    // A session with no memory still works.
+    return cache;
   }
-  if (!raw) return EMPTY;
+  if (!raw) return cache;
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    return EMPTY;
+    return cache;
   }
 
   const record = asRecord(parsed);
-  if (!record) return EMPTY;
+  if (!record) return cache;
 
-  const workspaces = asArray(record.workspaces)
-    .map(asSnapshot)
-    .filter((w): w is WorkspaceSnapshot => w !== null);
-
-  const activeId = typeof record.activeId === "string" ? record.activeId : null;
-  return {
-    workspaces,
-    activeId: workspaces.some((w) => w.id === activeId) ? activeId : null,
-  };
+  const tabs = asRecord(record.tabs) ?? {};
+  for (const [id, value] of Object.entries(tabs)) {
+    const snapshot = asSnapshot(value);
+    if (snapshot) cache.tabs[id] = snapshot;
+  }
+  cache.activeId = typeof record.activeId === "string" ? record.activeId : null;
+  return cache;
 }
 
-export function save(state: StoredState): void {
+/** The outline for a tab, restored if there is one and empty if there is not. */
+export function open(id: string): Workspace {
+  return new Workspace(id, read().tabs[id] ?? null);
+}
+
+/** Which tab was in front last time, for a first paint that has no other answer. */
+export function lastActive(): string | null {
+  return read().activeId;
+}
+
+export function save(workspaces: readonly Workspace[], activeId: string | null): void {
+  const state = read();
+  // Merged into what is already there rather than replacing it. A tab that is
+  // not open right now -- a colleague's tab this machine has not bound, or one
+  // that went away while the window was shut -- still has notes in it, and a
+  // save that wrote only the open tabs would quietly drop them.
+  for (const workspace of workspaces) state.tabs[workspace.id] = workspace.snapshot();
+  state.activeId = activeId;
+
   try {
     localStorage.setItem(KEY, JSON.stringify(state));
   } catch {
@@ -69,28 +110,17 @@ export function save(state: StoredState): void {
 
 /* -------------------------------------------------------------------------- */
 
-function asSnapshot(value: unknown): WorkspaceSnapshot | null {
+function asSnapshot(value: unknown): OutlineSnapshot | null {
   const r = asRecord(value);
-  if (!r || typeof r.id !== "string" || r.id === "") return null;
-
+  if (!r) return null;
   return {
-    id: r.id,
-    name: typeof r.name === "string" && r.name !== "" ? r.name : "Workspace",
-    base: nonEmpty(r.base),
-    key: nonEmpty(r.key),
-    mode: asMode(r.mode),
-    seq: typeof r.seq === "number" && Number.isFinite(r.seq) && r.seq >= 0 ? r.seq : 0,
+    mode: r.mode === "planning" || r.mode === "work" ? r.mode : "idea",
     // Handed to State.fromJSON, which validates every field it reads and
     // ignores the rest. A second validator here would be a second copy of the
-    // merge's own shape to keep in step with it.
+    // document's own shape to keep in step with it.
     state: r.state ?? null,
-    outbox: asArray(r.outbox).filter(isOutgoing),
     drafts: asDrafts(r.drafts),
   };
-}
-
-function asMode(value: unknown): Mode {
-  return value === "planning" || value === "work" ? value : "idea";
 }
 
 function asDrafts(value: unknown): Record<string, string> {
@@ -101,31 +131,8 @@ function asDrafts(value: unknown): Record<string, string> {
   return out;
 }
 
-/**
- * A queued op, loosely.
- *
- * The op itself is not validated here on purpose: it is going to be handed to
- * State.apply, which validates every op it is given -- including this one --
- * and a copy of those rules in this file would be a second place to update
- * when the protocol grows a kind.
- */
-function isOutgoing(value: unknown): value is Outgoing {
-  const r = asRecord(value);
-  if (!r) return false;
-  const op = asRecord(r.op) as Op | null;
-  return !!op && typeof op.id === "string" && op.id !== "";
-}
-
-function nonEmpty(value: unknown): string | null {
-  return typeof value === "string" && value.trim() !== "" ? value : null;
-}
-
 function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
-}
-
-function asArray(value: unknown): unknown[] {
-  return Array.isArray(value) ? value : [];
 }

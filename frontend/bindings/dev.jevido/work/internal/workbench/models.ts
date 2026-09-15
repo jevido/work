@@ -209,6 +209,58 @@ export interface Document {
 }
 
 /**
+ * Edit is one change to the outline, as the frontend describes it.
+ * 
+ * It is an ops.Op with the three parts only this machine may mint left off.
+ * The frontend used to mint them itself, with its own actor and its own
+ * Lamport clock, which made two writers out of one machine: two clocks that
+ * never saw each other decide a contested field arbitrarily. So the actor and
+ * the clock come from the one Sync that owns this workspace, the op ID comes
+ * from mintID, and what crosses the bridge is intent.
+ * 
+ * Fields are Go's `any` rather than json.RawMessage because this arrives from
+ * a webview as ordinary JSON; they are re-encoded on the way into an op.
+ */
+export interface Edit {
+    /**
+     * Kind is the op kind: create-node, set-fields, delete-node, move-node or
+     * extract-to-task. The same vocabulary as ops.Kind, deliberately, so there
+     * is not a second set of names for the same five things.
+     */
+    "kind": ops$0.Kind;
+
+    /**
+     * Node is the node to change, or the node to create. Empty on a create
+     * mints one, which is what a caller with nothing to reconcile wants.
+     */
+    "node"?: string;
+
+    /**
+     * Parent is what to hang it under. Empty means the tab itself -- the top
+     * level of that tab's outline -- not the root of the whole document.
+     */
+    "parent"?: string;
+
+    /**
+     * Position is the sort key among its siblings. Empty appends, which is
+     * what a new line at the end of an outline is. internal/workbench's
+     * position.go and the frontend's position.ts are the same algorithm, so a
+     * key either end mints is one the other can insert next to.
+     */
+    "position"?: string;
+
+    /**
+     * Task is the task node to create, for extract-to-task. Empty mints one.
+     */
+    "task"?: string;
+
+    /**
+     * Fields are the field values to write.
+     */
+    "fields"?: { [_ in string]?: any } | null;
+}
+
+/**
  * Keys are a workspace's credentials, handed over only when asked for.
  */
 export interface Keys {

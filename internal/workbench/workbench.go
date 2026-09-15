@@ -83,6 +83,15 @@ type Workbench struct {
 	// as one restored at startup.
 	syncCtx atomic.Pointer[context.Context]
 
+	// linkMu guards cardTask. Its own lock, and the innermost one: adoptTasks
+	// holds nothing while it reads a link, and nothing else ever waits on it.
+	linkMu sync.Mutex
+	// cardTask pairs a board card with the plan task it was adopted from, by
+	// board ID. Empty on a machine with no workspace, and empty for every
+	// card a run invented -- see tasks.go for why it is in memory rather than
+	// in the document.
+	cardTask map[string]string
+
 	// wsMu guards ws. It is not mu: joining a workspace writes a config file,
 	// and that has no business queueing behind a run. Where both are needed
 	// -- ActivateTab -- wsMu is taken first and mu second, never the reverse.
@@ -420,7 +429,14 @@ func (w *Workbench) ClearConversation() {
 	w.mu.Unlock()
 
 	w.board.Clear()
+	w.forgetTasks()
 	w.publishBoard()
+
+	// The plan outlives the conversation. Clearing is "start again from the
+	// tasks", not "forget what we agreed to do", so the tab's tasks come
+	// straight back as fresh cards -- with no workspace joined this does
+	// nothing and the board stays empty, exactly as it always has.
+	w.adoptTasks()
 }
 
 // applyUpdates performs Anton's board edits. The plan has already been
@@ -695,6 +711,11 @@ func (w *Workbench) runStep(
 	for attempt := 0; ; attempt++ {
 		output, err := w.executeStep(ctx, r, agent, PhaseWork, prompt, cardID)
 		out.Output = output
+		// Re-read rather than plumbed back out of executeStep, which shares
+		// them with the workspace for every path and not only this one. A
+		// reply with no marker is one strings.Contains; this is for
+		// synthesis, which has to be told what its specialists found.
+		out.Discoveries = discoveries(output)
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {
 				out.Err = err.Error()
@@ -822,6 +843,12 @@ func (w *Workbench) executeStep(
 		w.moveCard(cardID, board.StatusBlocked, err.Error())
 	default:
 		w.moveCard(cardID, board.StatusDone, "")
+		// What the turn found out goes back into the mindmap, next to the
+		// idea the task came from. Every path that runs an agent comes
+		// through here, which is why it is here and not in runStep: a task
+		// Anton kept for himself can change the plan just as much as a
+		// delegated one.
+		w.shareDiscoveries(cardID, discoveries(out))
 	}
 
 	return out, err

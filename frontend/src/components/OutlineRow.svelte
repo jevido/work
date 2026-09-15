@@ -57,7 +57,11 @@
     {@const folded = isCollapsed(row.node)}
     {@const task = ws.taskFor(id)}
     <li>
-      <div class="row" class:active={outline.isFocused(id)}>
+      <!-- The node id on the row. Not read by anything in the app -- the
+           outline works in terms of rows, not selectors -- but it is what
+           lets the verification harness name a line when it builds a
+           proposal, the same way a person names one by pointing at it. -->
+      <div class={["row", { active: outline.isFocused(id) }]} data-node={id}>
         {#if row.node.children.length > 0}
           <button
             class="fold"

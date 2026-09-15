@@ -348,6 +348,19 @@ func synthesisPrompt(task string, results []stepResult) string {
 			continue
 		}
 		fmt.Fprintf(&b, "%s replied:\n%s\n", r.AgentName, r.Output)
+		if len(r.Discoveries) > 0 {
+			// Already written into the outline, so the instruction is not to
+			// repeat them as news but to let them change the answer: a dead
+			// end one specialist hit is usually the reason another's advice
+			// has to change.
+			fmt.Fprintf(&b,
+				"\n%s also reported these, which are already recorded in the "+
+					"mindmap -- weigh them in your answer rather than listing "+
+					"them again:\n", r.AgentName)
+			for _, d := range r.Discoveries {
+				fmt.Fprintf(&b, "- %s: %s\n", d.Kind, d.Text)
+			}
+		}
 	}
 	return b.String()
 }
@@ -370,6 +383,9 @@ type stepResult struct {
 	// Retried marks a step that was blocked, waited, and ran again. Its Output
 	// is the second attempt.
 	Retried bool
+	// Discoveries are the findings this step marked in its reply, already
+	// written into the outline by the time synthesis reads them.
+	Discoveries []Discovery
 }
 
 func specialistIDs(reg Registry) []string {
@@ -392,6 +408,101 @@ func specialistIDs(reg Registry) []string {
 // reply and only the paths are trusted: who holds them is answered by the
 // claims table, which knows, rather than by the agent, which is guessing.
 const blockedMarker = "BLOCKED:"
+
+// discoveryMarker is the line a specialist writes when it finds something the
+// plan did not know: a task that is really two, a line of attack that does not
+// work, or something worth doing that came up on the way.
+//
+// Same channel as blockedMarker and for the same reason -- a specialist's turn
+// is prose -- but read differently. A block is a control signal, so only the
+// last line counts; a discovery is a note, so every marked line counts and
+// they can appear anywhere in the reply. Costing nothing is the point: no
+// extra turn, no schema, and a run that finds nothing writes nothing.
+const discoveryMarker = "DISCOVERY:"
+
+// DiscoveryKind is what sort of finding a discovery is. The three are the
+// three things that actually come back from a run and change the thinking
+// behind it.
+type DiscoveryKind string
+
+const (
+	// DiscoverySplit means the task is bigger than one task.
+	DiscoverySplit DiscoveryKind = "split"
+	// DiscoveryDeadEnd means an approach will not work, and why is worth
+	// keeping so nobody tries it again.
+	DiscoveryDeadEnd DiscoveryKind = "dead-end"
+	// DiscoveryIdea means something worth doing turned up on the way. It is
+	// the default for an unlabelled marker.
+	DiscoveryIdea DiscoveryKind = "idea"
+)
+
+// Valid reports whether a kind is one of the three. Discoveries are parsed out
+// of model-authored prose, so the label is never trusted.
+func (k DiscoveryKind) Valid() bool {
+	switch k {
+	case DiscoverySplit, DiscoveryDeadEnd, DiscoveryIdea:
+		return true
+	}
+	return false
+}
+
+// Discovery is one thing a run found, on its way into the mindmap. See
+// Workbench.shareDiscoveries.
+type Discovery struct {
+	Kind DiscoveryKind `json:"kind"`
+	Text string        `json:"text"`
+}
+
+// discoveries reads a specialist's reply for marked findings.
+//
+// A reply with no marker -- the ordinary case -- walks the lines once and
+// allocates nothing. The label is optional and unknown labels read as
+// DiscoveryIdea rather than being dropped: the sentence a specialist wrote is
+// worth more than its guess at which of three boxes it goes in.
+func discoveries(output string) []Discovery {
+	if !strings.Contains(strings.ToUpper(output), discoveryMarker) {
+		return nil
+	}
+
+	var out []Discovery
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		// Markdown gets in the way: an agent asked for a bare line will
+		// sometimes give a bullet, or bold it.
+		line = strings.TrimLeft(line, "-*# ")
+		line = strings.Trim(line, "`*_ ")
+		if !strings.HasPrefix(strings.ToUpper(line), discoveryMarker) {
+			continue
+		}
+		// The emphasis can close after the marker as easily as before it:
+		// "**DISCOVERY:** split: ...". Trimmed from both ends of what is
+		// left, which also takes a trailing bold off the sentence.
+		rest := strings.Trim(line[len(discoveryMarker):], "`*_ ")
+		if rest == "" {
+			continue
+		}
+
+		kind := DiscoveryIdea
+		// "DISCOVERY: dead-end: sharing one queue cannot work". The label is
+		// only taken when it is one of the three, so a colon inside an
+		// ordinary sentence is not mistaken for one.
+		if label, text, ok := strings.Cut(rest, ":"); ok {
+			if candidate := DiscoveryKind(strings.ToLower(strings.TrimSpace(label))); candidate.Valid() {
+				kind = candidate
+				rest = strings.TrimSpace(text)
+			}
+		}
+		if rest == "" {
+			continue
+		}
+
+		out = append(out, Discovery{Kind: kind, Text: rest})
+		if len(out) == maxDiscoveries {
+			return out
+		}
+	}
+	return out
+}
 
 // maxBlockedRetries is how many times one step may report itself blocked,
 // wait, and run again. One is enough for the case this exists for -- a file
@@ -444,6 +555,32 @@ func stepPrompt(task string, files, held []string) string {
 	b.WriteString("cheaper than working around it. Do not use that line for ")
 	b.WriteString("anything else: not for a question, not for a missing file, ")
 	b.WriteString("not for work you simply chose not to do.\n")
+
+	b.WriteString(discoveryBlock())
+	return b.String()
+}
+
+// discoveryBlock explains the discovery marker.
+//
+// It is on every step prompt rather than only on some, because what a run
+// finds out is not predictable from the task it was given -- that is what
+// makes it a discovery. The instruction is deliberately narrow about what
+// counts: an outline somebody has to read afterwards is worth less the more
+// lines it has that only restate the task.
+func discoveryBlock() string {
+	var b strings.Builder
+	b.WriteString("\nIf the work changes what anyone should think about the ")
+	b.WriteString("plan, say so on its own line and it goes back into the ")
+	b.WriteString("mindmap next to the idea this task came from:\n\n")
+	b.WriteString("    " + discoveryMarker + " split: the renderer needs its own pass\n")
+	b.WriteString("    " + discoveryMarker + " dead-end: one queue cannot serve both, the locks invert\n")
+	b.WriteString("    " + discoveryMarker + " idea: the encode cost is worth measuring on its own\n\n")
+	b.WriteString("Use \"split\" when the task is really two or more, ")
+	b.WriteString("\"dead-end\" when an approach does not work and nobody should ")
+	b.WriteString("try it again, and \"idea\" for something worth doing that came ")
+	b.WriteString("up on the way. One sentence each, at most a few per task, and ")
+	b.WriteString("only for things that outlive this run -- not for progress, not ")
+	b.WriteString("for what you did, and not for restating the task you were given.\n")
 	return b.String()
 }
 

@@ -8,6 +8,7 @@
   import OfficeCanvas from "./components/OfficeCanvas.svelte";
   import PermissionMenu from "./components/PermissionMenu.svelte";
   import PlanningList from "./components/PlanningList.svelte";
+  import ProposalReview from "./components/ProposalReview.svelte";
   import SettingsMenu from "./components/SettingsMenu.svelte";
   import SyncBadge from "./components/SyncBadge.svelte";
   import UpdateDialog from "./components/UpdateDialog.svelte";
@@ -21,6 +22,7 @@
   import { Permissions } from "./lib/permissions/permissions.svelte";
   import { AppUpdate } from "./lib/update/update.svelte";
   import { MODES, MODE_HINTS } from "./lib/workspace/model";
+  import { Review } from "./lib/workspace/review.svelte";
   import { Workspaces } from "./lib/workspace/workspaces.svelte";
 
   const session = new ClaudeSession();
@@ -67,27 +69,84 @@
   });
 
   /**
-   * The open documents.
+   * The tabs, and where sync stands.
    *
-   * Every one of them is live: its sync loop runs whether or not its tab is in
-   * front, so switching tabs shows a workspace that has been keeping up rather
-   * than one that starts catching up when you arrive. That is the whole reason
-   * a tab bar is worth having over a document picker.
+   * A view of what the Go side reports, not a second copy of it. The sync loop
+   * is the backend's and runs whether this window is looking at it or not --
+   * which is the whole reason a tab bar is worth having over a document
+   * picker, and is now true because the loop is not in the window at all.
    */
   const workspaces = new Workspaces();
+
+  /**
+   * Claude's proposed restructurings, waiting to be approved.
+   *
+   * One for the window rather than one per tab. A proposal is about the tab
+   * that was in front when Claude offered it -- it holds that tab's id -- and
+   * there is only ever one conversation, so there is only ever one thing being
+   * proposed. Nothing in it is applied until somebody presses Apply; see
+   * Review, which says why that is not a setting.
+   */
+  const proposals = new Review();
 
   let showPerf = $state(false);
 
   /** The workspace dialog, and what it is for. Null when it is closed. */
-  let dialog = $state<{ purpose: Purpose; targetId: string | null } | null>(null);
+  let dialog = $state<Purpose | null>(null);
   /** What opened it, so closing hands focus back rather than to the document. */
   let dialogOpener: HTMLElement | null = null;
 
   const active = $derived(workspaces.active);
-  const dialogTarget = $derived.by(() => {
-    const id = dialog?.targetId;
-    return id ? (workspaces.list.find((w) => w.id === id) ?? null) : null;
-  });
+
+  /**
+   * Whether the tab on screen is the tab agents run in.
+   *
+   * They can differ: ActivateTab is refused mid-run and refused for a tab with
+   * no folder here, and neither is a reason to stop somebody reading another
+   * tab. When they differ it is said, in the pane where it matters -- a window
+   * that showed one project's tab while a run wrote files in another would be
+   * lying about the only thing the office is a picture of.
+   */
+  const runsElsewhere = $derived(
+    workspaces.joined && active !== null && workspaces.runsIn !== null
+      ? workspaces.runsIn !== active.id
+      : false,
+  );
+
+  /** The tab agents are running in, when it is not the one on screen. */
+  const runningTab = $derived(
+    runsElsewhere ? (workspaces.list.find((w) => w.id === workspaces.runsIn) ?? null) : null,
+  );
+
+  /**
+   * Whether the review column is up.
+   *
+   * Tied to the tab it was proposed for, not just to there being a proposal: a
+   * restructuring names lines by id, and those ids mean nothing in another
+   * tab's outline. Switching away hides it and switching back brings it back,
+   * which is right -- it is still waiting.
+   */
+  const reviewing = $derived(
+    proposals.open &&
+      active !== null &&
+      proposals.workspaceId === active.id &&
+      (active.mode === "idea" || active.mode === "planning"),
+  );
+
+  /**
+   * A proposal held for this tab that the office is currently covering.
+   *
+   * The review only ever appears over the outline or the plan, so a proposal
+   * that lands while somebody is watching a run has nowhere to draw itself.
+   * It is not dropped and it does not drag the person out of the office --
+   * it says it is there, and offers the one click that goes to it.
+   */
+  const waiting = $derived(
+    proposals.open &&
+      active !== null &&
+      proposals.workspaceId === active.id &&
+      active.mode === "work",
+  );
 
   /** The tab strip's aria-controls target, and the panel's own id. */
   const PANEL_ID = "workspace-panel";
@@ -99,32 +158,23 @@
   $effect(() => update.listen());
 
   /**
-   * Opens whatever was open last time, and stops every sync loop on the way
-   * out.
+   * Subscribes to the backend's workspace and reads the first paint.
    *
-   * In an effect rather than at the top of this script because it starts
-   * timers and window listeners, and those need somewhere to be cleaned up.
+   * In an effect rather than at the top of this script because it subscribes
+   * to events and starts timers, and those need somewhere to be cleaned up.
    *
-   * Untracked, and it has to be: restoring writes the workspace list and then
-   * reads it back -- to pick which tab is in front, and to start a loop for
-   * each. Reading state this effect has just written makes the effect depend
-   * on it, so it re-runs, restores again, and does not stop. Without the
-   * untrack this is Svelte's effect_update_depth_exceeded on launch, and an
-   * app that draws nothing at all.
+   * Untracked, and it has to be: adopting writes the tab list and then reads
+   * it back to pick which tab is in front. Reading state this effect has just
+   * written makes the effect depend on it, so it re-runs, adopts again, and
+   * does not stop. Without the untrack this is Svelte's
+   * effect_update_depth_exceeded on launch, and an app that draws nothing.
    */
   $effect(() => {
-    untrack(() => {
-      workspaces.restore();
-      if (workspaces.list.length === 0) {
-        // A first run has no tabs, and an app whose main surface is an empty
-        // strip with a "New" button is an app that asks a question before it
-        // has shown what it is. One local workspace costs nothing and needs
-        // no server; sharing it later loses nothing. It opens on the office,
-        // for the reason in Workspaces.bootstrap.
-        workspaces.bootstrap();
-      }
-    });
-    return () => workspaces.dispose();
+    const stop = untrack(() => workspaces.start());
+    return () => {
+      stop();
+      workspaces.dispose();
+    };
   });
 
   /**
@@ -170,14 +220,24 @@
     void review.refresh();
   });
 
+  /**
+   * Proposals arrive as tool calls on the same stream the console reads.
+   *
+   * The active tab is passed as a function rather than a value, so the effect
+   * does not re-subscribe every time a tab is rebuilt from Go's view -- which
+   * is every sync status change -- and so a proposal lands in whichever tab is
+   * in front at the moment it arrives.
+   */
+  $effect(() => proposals.listen(() => untrack(() => workspaces.active)));
+
   // The console labels turns and plan steps by agent, so it follows the roster
   // rather than being handed a copy of it at startup.
   $effect(() => session.setAgents(roster.identities));
 
-  function openDialog(purpose: Purpose, targetId: string | null, from?: EventTarget | null) {
+  function openDialog(purpose: Purpose, from?: EventTarget | null) {
     dialogOpener = from instanceof HTMLElement ? from : (document.activeElement as HTMLElement);
     workspaces.error = null;
-    dialog = { purpose, targetId };
+    dialog = purpose;
   }
 
   function closeDialog() {
@@ -228,11 +288,22 @@
   <ConfigSetup {config} />
 {:else if config.open}
   <main>
+    <!--
+      What the proposal review has to say, in a region that was already there.
+
+      Mounted for the life of the window and outside every branch below. A
+      proposal arrives unasked, moves no focus and opens no dialog, so this is
+      the only thing that tells a screen reader it happened at all -- and a
+      live region created in the same breath as its first message is a region
+      nobody hears.
+    -->
+    <p class="announce" role="status" aria-live="polite">{proposals.said}</p>
+
     <WorkspaceTabs
       {workspaces}
       panelId={PANEL_ID}
-      onnew={() => openDialog("new", null)}
-      onjoin={() => openDialog("join", null)}
+      onnew={() => openDialog(workspaces.joined ? "tab" : "create")}
+      onjoin={() => openDialog("join")}
     />
 
     <div class="body">
@@ -267,12 +338,34 @@
                  name here would be the same word twice; this says what you
                  came here to do. -->
             <p class="what">{MODE_HINTS[active.mode]}</p>
-            <SyncBadge
-              workspace={active}
-              onfix={(reason) =>
-                openDialog(reason === "rekey" ? "rekey" : "share", active.id)}
-            />
+            <SyncBadge {workspaces} onfix={(purpose) => openDialog(purpose)} />
           </div>
+
+          <!-- A proposal that would not parse.
+               Said rather than swallowed: from the outside, a tool call that
+               produced nothing at all is indistinguishable from Claude
+               deciding against suggesting anything, and the two want
+               completely different things from the person reading. -->
+          {#if waiting && active}
+            <div class="refused" role="status">
+              <p>
+                Claude suggested changes to this workspace. Nothing has been
+                applied.
+              </p>
+              <button onclick={() => (active.mode = proposals.mode)}>
+                Review them in {proposals.mode === "planning" ? "Planning" : "Idea"}
+              </button>
+            </div>
+          {:else if proposals.refused}
+            <div class="refused" role="status">
+              <p>
+                Claude suggested a restructuring this version could not read, so
+                nothing was changed.
+              </p>
+              <p class="detail">{proposals.refused}</p>
+              <button onclick={() => proposals.discard()}>Dismiss</button>
+            </div>
+          {/if}
 
           <!--
             The three modes, stacked in one grid cell.
@@ -299,13 +392,27 @@
                  of which input belongs to which line -- both of which are
                  about the workspace you were in, not the one you moved to. -->
             {#key active.id}
-              {#if active.mode === "idea"}
-                <div class="pane">
-                  <IdeaOutline workspace={active} />
-                </div>
-              {:else if active.mode === "planning"}
-                <div class="pane">
-                  <PlanningList workspace={active} />
+              {#if active.mode === "idea" || active.mode === "planning"}
+                <!--
+                  The outline and, when there is one, the proposal beside it.
+
+                  Two columns rather than an overlay: every row of a proposal
+                  names lines that are on screen to its left, and a panel that
+                  covered them would turn reviewing into trusting. The second
+                  column only exists while there is something in it, so the
+                  outline has the full width the rest of the time.
+                -->
+                <div class={["pane", "split", { reviewing }]}>
+                  <div class="doc">
+                    {#if active.mode === "idea"}
+                      <IdeaOutline workspace={active} />
+                    {:else}
+                      <PlanningList workspace={active} />
+                    {/if}
+                  </div>
+                  {#if reviewing}
+                    <ProposalReview review={proposals} workspace={active} />
+                  {/if}
                 </div>
               {/if}
             {/key}
@@ -319,6 +426,39 @@
                 {#if roster.loadError}
                   <div class="load-error">{roster.loadError}</div>
                 {/if}
+                <!--
+                  Why the office is showing somebody else's project, or nobody's.
+
+                  Absolutely positioned over the office rather than given a row
+                  in the grid above it: the canvas measures itself off this box,
+                  and a banner that pushed it down would resize the office every
+                  time a tab changed. This says something about the room; it
+                  does not change the room.
+                -->
+                {#if workspaces.joined && !active.bound}
+                  <div class="tab-notice" role="status">
+                    <p>
+                      Agents have no folder for <strong>{active.name}</strong> on this
+                      machine, so nothing can run in it yet. The folder is yours and is
+                      never sent anywhere.
+                    </p>
+                    <button onclick={() => workspaces.bind(active.id)}>Choose a folder</button>
+                  </div>
+                {:else if runningTab}
+                  <div class="tab-notice" role="status">
+                    <p>
+                      Agents are running in <strong>{runningTab.name}</strong>, not in this
+                      tab. What is drawn below is that run.
+                    </p>
+                    <button onclick={() => workspaces.select(active.id)}>
+                      Run here instead
+                    </button>
+                    {#if workspaces.error}
+                      <p class="why">{workspaces.error}</p>
+                    {/if}
+                  </div>
+                {/if}
+
                 <OfficeCanvas
                   {roster}
                   {session}
@@ -336,13 +476,13 @@
             <div class="row">
               <button
                 class="primary"
-                onclick={(event) => openDialog("new", null, event.currentTarget)}
+                onclick={(event) => openDialog("create", event.currentTarget)}
               >
                 New workspace
               </button>
               <button
                 class="ghost"
-                onclick={(event) => openDialog("join", null, event.currentTarget)}
+                onclick={(event) => openDialog("join", event.currentTarget)}
               >
                 Join one by key
               </button>
@@ -377,12 +517,7 @@
 {/if}
 
 {#if dialog}
-  <WorkspaceDialog
-    purpose={dialog.purpose}
-    {workspaces}
-    target={dialogTarget}
-    onclose={closeDialog}
-  />
+  <WorkspaceDialog purpose={dialog} {workspaces} onclose={closeDialog} />
 {/if}
 
 <!-- Outside the config branches on purpose. A new release is news about the
@@ -394,6 +529,20 @@
 {/if}
 
 <style>
+  /* Off screen, not hidden: display:none and visibility:hidden both take a
+     live region out of the accessibility tree, which is where it has to be to
+     be heard. */
+  .announce {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
   main {
     display: grid;
     /* The tab strip takes its own height off the top; everything else shares
@@ -416,9 +565,18 @@
     overflow: hidden;
   }
 
+  /*
+   * Mode bar, then the "could not read that" notice when there is one, then
+   * the panes.
+   *
+   * The rows are named rather than implied because the middle one is
+   * conditional: with `auto minmax(0, 1fr)` and no notice, the panes would
+   * land in the auto row and collapse to nothing the moment the notice
+   * appeared and pushed them out of it.
+   */
   .workspace {
     display: grid;
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-rows: auto auto minmax(0, 1fr);
     min-width: 0;
     min-height: 0;
   }
@@ -428,6 +586,7 @@
   }
 
   .modebar {
+    grid-row: 1;
     display: flex;
     align-items: center;
     gap: 10px;
@@ -452,6 +611,7 @@
    * positions measured off that layout.
    */
   .panes {
+    grid-row: 3;
     display: grid;
     grid-template-areas: "pane";
     min-width: 0;
@@ -462,6 +622,36 @@
     grid-area: pane;
     min-width: 0;
     min-height: 0;
+  }
+
+  /*
+   * The outline, and the review column when there is one.
+   *
+   * The review keeps a readable, bounded width and the outline takes the rest
+   * -- the opposite would let a long proposed line set the width of the thing
+   * being restructured.
+   */
+  .split {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .split.reviewing {
+    grid-template-columns: minmax(0, 1fr) clamp(260px, 32%, 420px);
+  }
+
+  .doc {
+    min-width: 0;
+    min-height: 0;
+  }
+
+  /* One column under a narrow window. Two columns of 200px each is neither an
+     outline you can read nor a proposal you can review. */
+  @media (width < 900px) {
+    .split.reviewing {
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: minmax(0, 1fr) minmax(0, 0.9fr);
+    }
   }
 
   /*
@@ -493,6 +683,57 @@
     min-height: 0;
   }
 
+  /* Top left, opposite .load-error, which is top right. The two can be on
+     screen at once -- an agent folder that would not load and a tab with no
+     project folder are unrelated problems -- and they must not stack. */
+  .tab-notice {
+    position: absolute;
+    z-index: 3;
+    top: 10px;
+    left: 10px;
+    max-width: min(360px, 55%);
+    padding: 8px 10px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--panel);
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.5;
+  }
+
+  .tab-notice p {
+    margin: 0;
+  }
+
+  .tab-notice strong {
+    color: var(--text);
+    font-weight: 600;
+  }
+
+  .tab-notice button {
+    margin-top: 6px;
+    padding: 3px 10px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--panel-2);
+    color: var(--text);
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+  }
+
+  .tab-notice button:hover {
+    border-color: var(--accent);
+  }
+
+  /* Why "Run here instead" did not work -- a run in flight, most likely. It
+     appears under the button that produced it rather than in a corner
+     somewhere, because it is the answer to that press. */
+  .tab-notice .why {
+    margin-top: 6px;
+    color: var(--err);
+  }
+
   .load-error {
     position: absolute;
     /* Above the desk panel, which is bottom-left and cannot reach this corner
@@ -509,12 +750,51 @@
     font-size: 12px;
   }
 
+  /* Under the mode bar, across the pane. A proposal that could not be read is
+     about the whole workspace, not about a line in it. */
+  .refused {
+    grid-row: 2;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--line);
+    background: var(--panel);
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.5;
+  }
+
+  .refused p {
+    margin: 0;
+  }
+
+  .refused .detail {
+    margin-top: 2px;
+    font-family: var(--mono, monospace);
+    font-size: 11px;
+    overflow-wrap: anywhere;
+  }
+
+  .refused button {
+    margin-top: 6px;
+    padding: 3px 10px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--panel-2);
+    color: var(--text);
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+  }
+
+  .refused button:hover {
+    border-color: var(--accent);
+  }
+
   .no-workspace {
     display: grid;
     align-content: center;
     justify-items: center;
     gap: 12px;
-    grid-row: span 2;
+    grid-row: span 3;
     color: var(--muted);
   }
 

@@ -1,16 +1,24 @@
 <script lang="ts">
-  import type { SyncState } from "../lib/workspace/sync.svelte";
-  import type { Workspace } from "../lib/workspace/workspace.svelte";
+  import type { Purpose } from "./WorkspaceDialog.svelte";
+  import type { SyncState, Workspaces } from "../lib/workspace/workspaces.svelte";
 
   let {
-    workspace,
-    /** Opens the dialog that can share a workspace or replace its key. */
+    workspaces,
+    /** Opens the dialog that can replace the key. */
     onfix,
-  }: { workspace: Workspace; onfix: (reason: "share" | "rekey") => void } = $props();
+  }: { workspaces: Workspaces; onfix: (purpose: Purpose) => void } = $props();
 
-  const sync = $derived(workspace.sync);
-  const state = $derived<SyncState>(sync.state);
-  const pending = $derived(sync.pending);
+  /**
+   * All of it is the backend's.
+   *
+   * This badge used to read a sync object that lived in the webview, next to a
+   * queue that lived in the webview. Both are gone: there is one queue and one
+   * loop, in Go, and everything below is a reading of what it reports over
+   * workspace:sync.
+   */
+  const state = $derived<SyncState>(workspaces.state);
+  const pending = $derived(workspaces.pending);
+  const behind = $derived(workspaces.behind);
 
   /**
    * The badge's words.
@@ -38,18 +46,38 @@
   });
 
   const detail = $derived.by(() => {
+    const parts: string[] = [];
     switch (state) {
       case "local":
-        return "This workspace has never been shared. Nothing leaves this machine.";
+        parts.push("No workspace is joined. Nothing leaves this machine.");
+        break;
       case "synced":
-        return `Up to date with ${sync.base}.`;
+        parts.push(`Up to date with ${workspaces.view?.serverUrl ?? "the server"}.`);
+        break;
       case "syncing":
-        return "Sending your changes.";
+        parts.push("Sending your changes.");
+        if (behind > 0) parts.push(`${behind} ${changes(behind)} still to read back.`);
+        break;
       case "offline":
-        return `${sentence(sync.error, "The server could not be reached.")} Retrying by itself.`;
+        parts.push(
+          `${sentence(workspaces.syncError, "The server could not be reached.")} Retrying by itself.`,
+        );
+        break;
       case "rejected":
-        return `${sentence(sync.error, "The server would not accept this key.")} Nothing will sync until a key it accepts is supplied. Your changes are safe here in the meantime.`;
+        parts.push(
+          `${sentence(workspaces.syncError, "The server would not accept this key.")} Nothing will sync until a key it accepts is supplied. Your changes are safe here in the meantime.`,
+        );
+        break;
     }
+    // A dropped op is a hole in this machine's history that no amount of
+    // waiting fills, so it is said in every joined state rather than only in
+    // the one that is already complaining.
+    if (state !== "local" && workspaces.dropped > 0) {
+      parts.push(
+        `${workspaces.dropped} ${changes(workspaces.dropped)} were dropped because the queue filled up, and are gone.`,
+      );
+    }
+    return parts.join(" ");
   });
 
   /**
@@ -59,11 +87,14 @@
    * button and sometimes a label, both looking the same, is worse than either.
    * So the two states with something to do are buttons and the rest are not,
    * and the button ones say what they do.
+   *
+   * "local" has nothing here on purpose. There is no workspace to connect, and
+   * the two things somebody could do -- make one, join one -- are both already
+   * in the tab strip, named.
    */
   const action = $derived.by(() => {
     if (state === "rejected") return { text: "Use another key", run: () => onfix("rekey") };
-    if (state === "local") return { text: "Share", run: () => onfix("share") };
-    if (state === "offline") return { text: "Retry now", run: () => sync.retry() };
+    if (state === "offline") return { text: "Retry now", run: () => workspaces.retry() };
     return null;
   });
 
