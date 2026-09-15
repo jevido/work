@@ -166,6 +166,64 @@ tasks:
     cmds:
       - go test ./...
 
+  sync:up:
+    summary: Starts the local sync server and its Postgres
+    desc: |
+      Brings up the dev half of docker-compose.yml: the sync server on
+      http://localhost:8080 and Postgres on 127.0.0.1:5432, with a `work_test`
+      database beside the dev one for `task test:server`.
+
+      http://localhost:8080 is what to type into the desktop app's join
+      dialog, and the signup token is the word "dev". Nothing here is shared
+      with the deployment: the two production services in that file have no
+      profile and are Coolify's, these three are profiled `dev` and are not.
+
+      The database is in tmpfs, so `task sync:down` is also how you reset it.
+    cmds:
+      # server-dev by name, not a bare `up`: compose treats a service with no
+      # profile as always active, so a bare one would also start the two
+      # services Coolify deploys -- with nothing to substitute for their
+      # password. Naming this one starts it and its depends_on and nothing
+      # else. See the comment in docker-compose.yml.
+      - docker compose --profile dev up -d --build server-dev
+      - echo "sync server on http://localhost:8080 (signup token: dev)"
+
+  sync:down:
+    summary: Stops the local sync server and discards its database
+    cmds:
+      # By name for the same reason, and `down` is enough to discard the
+      # database: it lives in tmpfs, not in the named volume the deployment
+      # uses.
+      - docker compose --profile dev down server-dev postgres-dev postgres-dev-init
+
+  sync:logs:
+    summary: Follows the local sync server's log
+    cmds:
+      - docker compose --profile dev logs -f server-dev
+
+  test:server:
+    summary: Runs the sync server's tests against the local Postgres
+    desc: |
+      server/ is its own Go module, so `task test` does not reach it, and its
+      store tests skip themselves unless TEST_DATABASE_URL is set -- which is
+      the right default and a bad surprise. This sets it, and sets
+      WORK_REQUIRE_POSTGRES so a database that is configured and unreachable
+      fails instead of passing as "nothing to run". Same pair as
+      .github/workflows/ci.yml.
+
+      Needs `task sync:up` first: the database it points at is that stack's.
+    dir: server
+    deps:
+      - task: goroot:check
+    env:
+      # 127.0.0.1 rather than localhost, for the reason ci.yml gives: the port
+      # is published on IPv4 only, and a resolver answering ::1 first turns
+      # this into a connection refused that reads like a broken test.
+      TEST_DATABASE_URL: postgres://work:work@127.0.0.1:5432/work_test?sslmode=disable
+      WORK_REQUIRE_POSTGRES: "1"
+    cmds:
+      - go test -race -count=1 ./...
+
   verify:office:
     summary: Drives the office's scripted sequences without a browser
     # The simulation is plain TypeScript with no DOM in it, so this compiles
