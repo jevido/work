@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -59,16 +60,25 @@ type API struct {
 	// documents is the merged state behind GET /v1/document, one per workspace
 	// and bounded, so that a viewer polling does not replay the log each time.
 	documents *documents
+	// site is the viewer's built files, or nil when this server is API only.
+	// See static.go.
+	site fs.FS
 }
 
-// New builds the API. An empty signupToken disables workspace creation.
-func New(backing Store, signupToken string, logger *slog.Logger) *API {
+// New builds the API. An empty signupToken disables workspace creation, and a
+// nil site makes the root answer as an API endpoint that does not exist.
+//
+// The site is a parameter rather than something set afterwards: an API that is
+// only half built between New and a later call is an API that serves a 404 for
+// the page during startup, which is exactly the window a health check looks in.
+func New(backing Store, signupToken string, logger *slog.Logger, site fs.FS) *API {
 	return &API{
 		store:       backing,
 		logger:      logger,
 		signupToken: signupToken,
 		limiter:     newLimiter(),
 		documents:   newDocuments(MaxCachedDocuments),
+		site:        site,
 	}
 }
 
@@ -98,9 +108,17 @@ func (a *API) Handler() http.Handler {
 	mux.Handle("GET /v1/document", a.authed(store.AccessRead, a.document))
 	mux.Handle("/v1/document", a.plain(methodNotAllowed))
 
-	mux.Handle("/", a.plain(func(http.ResponseWriter, *http.Request) error {
+	// Every unmatched API path, before the root catches it. This pattern is
+	// more specific than "/", so it takes what the named routes above did not
+	// -- and without it a mistyped endpoint would answer 200 with the viewer's
+	// HTML to a client that parses JSON, which is a worse failure than a 404
+	// by some distance.
+	mux.Handle("/v1/", a.plain(func(http.ResponseWriter, *http.Request) error {
 		return apiError{http.StatusNotFound, "not_found", "no such endpoint"}
 	}))
+
+	// The viewer, or the same 404 as before when there is none. See static.go.
+	mux.Handle("/", a.static())
 	return mux
 }
 

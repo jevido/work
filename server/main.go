@@ -71,7 +71,7 @@ func run(ctx context.Context) error {
 
 	srv := &http.Server{
 		Addr:    cfg.addr,
-		Handler: withRequestLog(logger, api.New(backing, cfg.signupToken, logger).Handler()),
+		Handler: withRequestLog(logger, api.New(backing, cfg.signupToken, logger, nil).Handler()),
 		// Without these a single slow client holds a connection open for as
 		// long as it likes. Every one of them is short because every request
 		// here is small: the largest body allowed is a megabyte and the

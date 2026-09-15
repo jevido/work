@@ -24,7 +24,7 @@ func serve(t *testing.T, signupToken string) (*httptest.Server, *fakeStore) {
 	// Discard the logs: a test that fails should fail on an assertion, not by
 	// burying it in request lines.
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	srv := httptest.NewServer(New(backing, signupToken, logger).Handler())
+	srv := httptest.NewServer(New(backing, signupToken, logger, nil).Handler())
 	t.Cleanup(srv.Close)
 	return srv, backing
 }

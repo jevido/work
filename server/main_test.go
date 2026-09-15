@@ -58,7 +58,7 @@ func stand(t *testing.T) *client {
 
 	// Wrapped exactly as run() wraps it, so what this exercises is the handler
 	// that ships rather than one assembled for the test.
-	srv := httptest.NewServer(withRequestLog(quiet, api.New(backing, signupToken, quiet).Handler()))
+	srv := httptest.NewServer(withRequestLog(quiet, api.New(backing, signupToken, quiet, nil).Handler()))
 	t.Cleanup(srv.Close)
 	return &client{t: t, url: srv.URL}
 }
