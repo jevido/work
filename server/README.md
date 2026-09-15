@@ -447,6 +447,7 @@ Configuration is environment variables only:
 | `PORT` | `8080` | Port to listen on. |
 | `WORK_SIGNUP_TOKEN` | — | Bearer token for `POST /v1/workspaces`. Unset disables workspace creation; set, it must be at least 24 characters, because a short one leaves creation open to guessing while looking closed. |
 | `WORK_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`. |
+| `WORK_SITE_DIR` | — | Directory holding the built viewer, served at `/`. Unset serves the API only, and `/` answers the same `not_found` as any other unknown path. Checked at startup: set and missing an `index.html` is a refusal to start, not a 500 later. |
 
 Migrations are embedded in the binary and run at startup, in order, inside a
 transaction each, recorded in a `schema_migrations` table. Starting the server

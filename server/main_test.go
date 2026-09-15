@@ -17,6 +17,9 @@ import (
 	"dev.jevido/work/internal/ops"
 	"dev.jevido/work/server/api"
 	"dev.jevido/work/server/store"
+	"io/fs"
+	"path/filepath"
+	"strings"
 )
 
 // This is the only place the real handlers and the real Postgres meet, so it is
@@ -366,5 +369,100 @@ func remarshal(t *testing.T, from any, into any) {
 	}
 	if err := json.Unmarshal(encoded, into); err != nil {
 		t.Fatalf("decoding: %v", err)
+	}
+}
+
+// openSite is what decides whether this process serves a page at all, and it
+// decides at startup. These are the three answers it can give.
+func TestOpenSite(t *testing.T) {
+	t.Run("unset serves the API only", func(t *testing.T) {
+		site, err := openSite("")
+		if err != nil {
+			t.Fatalf("openSite(\"\"): %v", err)
+		}
+		if site != nil {
+			t.Error("openSite(\"\") returned a site; want nil so the root stays an API path")
+		}
+	})
+
+	t.Run("a directory with a page in it is opened", func(t *testing.T) {
+		dir := t.TempDir()
+		page := []byte(`<!doctype html><div id="app"></div>`)
+		if err := os.WriteFile(filepath.Join(dir, "index.html"), page, 0o644); err != nil {
+			t.Fatalf("writing the page: %v", err)
+		}
+
+		site, err := openSite(dir)
+		if err != nil {
+			t.Fatalf("openSite(%s): %v", dir, err)
+		}
+		got, err := fs.ReadFile(site, "index.html")
+		if err != nil {
+			t.Fatalf("reading the page back: %v", err)
+		}
+		if !bytes.Equal(got, page) {
+			t.Errorf("read %q, want %q", got, page)
+		}
+	})
+
+	t.Run("a directory without a page is fatal, and says which variable", func(t *testing.T) {
+		// Fatal rather than ignored. A WORK_SITE_DIR that is set and wrong is a
+		// mistake somebody made on purpose, and the moment to say so is before
+		// the listener opens -- not the first time a viewer follows a link.
+		for _, dir := range []string{t.TempDir(), filepath.Join(t.TempDir(), "nowhere")} {
+			_, err := openSite(dir)
+			if err == nil {
+				t.Fatalf("openSite(%s) accepted a directory with no index.html", dir)
+			}
+			if !strings.Contains(err.Error(), "WORK_SITE_DIR") {
+				t.Errorf("error = %q, want it to name WORK_SITE_DIR", err)
+			}
+			if !strings.Contains(err.Error(), dir) {
+				t.Errorf("error = %q, want it to name %s", err, dir)
+			}
+		}
+	})
+}
+
+// What openSite opens is what the handler serves. Proved together, because the
+// two being wired to each other is the only thing this task adds -- each half
+// is already covered on its own.
+func TestTheSiteReachesTheHandler(t *testing.T) {
+	dir := t.TempDir()
+	page := `<!doctype html><div id="app">viewer</div>`
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte(page), 0o644); err != nil {
+		t.Fatalf("writing the page: %v", err)
+	}
+	site, err := openSite(dir)
+	if err != nil {
+		t.Fatalf("openSite: %v", err)
+	}
+
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// A nil store, deliberately: the only request made here is for the root,
+	// and nothing behind the root touches persistence. Standing up Postgres to
+	// prove that a file is served would make this test skip on every machine
+	// that has not got one.
+	srv := httptest.NewServer(withRequestLog(quiet, api.New(nil, "", quiet, site).Handler()))
+	t.Cleanup(srv.Close)
+
+	res, err := srv.Client().Get(srv.URL + "/")
+	if err != nil {
+		t.Fatalf("GET /: %v", err)
+	}
+	defer res.Body.Close()
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatalf("reading the body: %v", err)
+	}
+
+	if res.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", res.StatusCode)
+	}
+	if string(body) != page {
+		t.Errorf("body = %q, want %q", body, page)
+	}
+	if mime := res.Header.Get("Content-Type"); !strings.Contains(mime, "text/html") {
+		t.Errorf("Content-Type = %q, want HTML", mime)
 	}
 }

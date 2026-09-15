@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -69,9 +70,19 @@ func run(ctx context.Context) error {
 		logger.Info("workspace creation is closed; set WORK_SIGNUP_TOKEN to open it")
 	}
 
+	site, err := openSite(cfg.siteDir)
+	if err != nil {
+		return err
+	}
+	if site == nil {
+		logger.Info("no viewer configured; serving the API only", "hint", "set WORK_SITE_DIR")
+	} else {
+		logger.Info("serving the viewer", "dir", cfg.siteDir)
+	}
+
 	srv := &http.Server{
 		Addr:    cfg.addr,
-		Handler: withRequestLog(logger, api.New(backing, cfg.signupToken, logger, nil).Handler()),
+		Handler: withRequestLog(logger, api.New(backing, cfg.signupToken, logger, site).Handler()),
 		// Without these a single slow client holds a connection open for as
 		// long as it likes. Every one of them is short because every request
 		// here is small: the largest body allowed is a megabyte and the
@@ -165,6 +176,29 @@ const (
 // minute turns a message that says what is wrong into a timeout that does not.
 // The budget is a parameter rather than the constant read directly so that a
 // test can prove the giving-up path without waiting a minute for it.
+// openSite opens the directory the viewer was built into, or returns nil when
+// this process is not serving one.
+//
+// A directory rather than a go:embed, and that is forced rather than chosen:
+// server/ is its own Go module, and embed cannot reach up out of its own
+// directory to web/dist. Embedding would mean copying a built bundle into this
+// module during the image build, so that `go build ./...` on a clean checkout
+// would depend on a Node build having happened first.
+//
+// Checked here, at startup, rather than on the first request. A wrong
+// WORK_SITE_DIR that only shows up as a 500 the first time somebody opens the
+// link is a deploy that went green and was not.
+func openSite(dir string) (fs.FS, error) {
+	if dir == "" {
+		return nil, nil
+	}
+	site := os.DirFS(dir)
+	if _, err := fs.Stat(site, "index.html"); err != nil {
+		return nil, fmt.Errorf("WORK_SITE_DIR=%s has no readable index.html: %w", dir, err)
+	}
+	return site, nil
+}
+
 func waitForDatabase(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, budget time.Duration) error {
 	started := time.Now()
 	deadline := started.Add(budget)

@@ -10,7 +10,7 @@ import (
 // changes rather than about what happened to be exported.
 func set(t *testing.T, values map[string]string) {
 	t.Helper()
-	for _, name := range []string{"DATABASE_URL", "PORT", "WORK_SIGNUP_TOKEN", "WORK_LOG_LEVEL"} {
+	for _, name := range []string{"DATABASE_URL", "PORT", "WORK_SIGNUP_TOKEN", "WORK_LOG_LEVEL", "WORK_SITE_DIR"} {
 		t.Setenv(name, values[name])
 	}
 }
@@ -34,6 +34,26 @@ func TestLoad(t *testing.T) {
 		// security decision and not a convenience.
 		if cfg.signupToken != "" {
 			t.Errorf("signupToken = %q, want empty so creation stays closed", cfg.signupToken)
+		}
+		// Unset is the normal case for a local run, and it means the API only.
+		// It is not an error and must never become one: every `go run .` on a
+		// machine with no built viewer on it goes through here.
+		if cfg.siteDir != "" {
+			t.Errorf("siteDir = %q, want empty", cfg.siteDir)
+		}
+	})
+
+	t.Run("WORK_SITE_DIR is kept verbatim", func(t *testing.T) {
+		// Kept, not resolved or checked. Whether the directory is really there
+		// is openSite's question, and answering it here would put the failure
+		// in the wrong message.
+		set(t, map[string]string{"DATABASE_URL": url, "WORK_SITE_DIR": "/srv/site"})
+		cfg, err := load()
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if cfg.siteDir != "/srv/site" {
+			t.Errorf("siteDir = %q, want /srv/site", cfg.siteDir)
 		}
 	})
 

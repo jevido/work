@@ -19,7 +19,10 @@ type config struct {
 	// signupToken gates workspace creation. Empty leaves the endpoint closed,
 	// which is what a server that already has its workspace wants.
 	signupToken string
-	logLevel    slog.Level
+	// siteDir holds the viewer's built files. Empty is the normal case for a
+	// local run and means this process serves the API and nothing else.
+	siteDir  string
+	logLevel slog.Level
 }
 
 func load() (config, error) {
@@ -27,6 +30,7 @@ func load() (config, error) {
 		databaseURL: os.Getenv("DATABASE_URL"),
 		addr:        ":" + cmp.Or(os.Getenv("PORT"), "8080"),
 		signupToken: os.Getenv("WORK_SIGNUP_TOKEN"),
+		siteDir:     os.Getenv("WORK_SITE_DIR"),
 	}
 	if cfg.databaseURL == "" {
 		return config{}, errors.New("DATABASE_URL is not set")
