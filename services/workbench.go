@@ -95,6 +95,26 @@ func (s *WorkbenchService) SetPermissionMode(mode string) (Permissions, error) {
 	return s.Permissions(), nil
 }
 
+// ApplyProposalsWithoutReview reports whether Claude's proposed restructurings
+// apply themselves.
+//
+// Off by default. The panel is the only approval gate this app has -- when
+// Claude edits files it writes to disk and the app only gets to look
+// afterwards, but here the app owns the write, so it can ask first.
+func (s *WorkbenchService) ApplyProposalsWithoutReview() bool {
+	return s.wb.ApplyProposalsWithoutReview()
+}
+
+// SetApplyProposalsWithoutReview changes it, and answers with what the backend
+// now holds rather than nothing -- so the control draws from the setting
+// instead of assuming its own click won.
+func (s *WorkbenchService) SetApplyProposalsWithoutReview(without bool) (bool, error) {
+	if err := s.wb.SetApplyProposalsWithoutReview(without); err != nil {
+		return s.wb.ApplyProposalsWithoutReview(), err
+	}
+	return s.wb.ApplyProposalsWithoutReview(), nil
+}
+
 // AgentProfile returns what one agent's folder says about them: the skills in
 // skills/, their PERSONALITY.md and the line Anton routes them on. The profile
 // view asks for this when it opens, rather than reading it out of the roster,

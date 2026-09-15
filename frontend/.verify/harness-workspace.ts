@@ -123,6 +123,8 @@ const CLOSE_TAB = 451949873;
 const ACTIVATE_TAB = 969308478;
 const BIND_TAB_FOLDER = 2990789672;
 const RESTRUCTURE = 3325402576;
+const WITHOUT_REVIEW = 3713443955;
+const SET_WITHOUT_REVIEW = 954902667;
 
 export const calls: { id: number; args: any[] }[] = [];
 
@@ -135,6 +137,8 @@ const backend = {
   joined: true,
   /** Makes Restructure refuse, for the path where asking is not possible. */
   restructureFails: false,
+  /** The approval gate. Off, the way a fresh install is. */
+  withoutReview: false,
   serverUrl: "https://work.jevido.app",
   tabs: [
     { id: "tab-a", name: "work", dir: "/home/jevido/Projects/work", bound: true },
@@ -196,6 +200,14 @@ setTransport({
       case BOARD:
       case CHANGES:
         return null;
+
+      case WITHOUT_REVIEW:
+        return backend.withoutReview;
+      case SET_WITHOUT_REVIEW:
+        // Answers with what it now holds, which is what the real one does so
+        // the control draws from the setting rather than its own click.
+        backend.withoutReview = Boolean(a[0]);
+        return backend.withoutReview;
 
       case RESTRUCTURE:
         // Started, not answered. The real one returns as soon as the run is

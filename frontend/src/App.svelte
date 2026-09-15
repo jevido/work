@@ -8,6 +8,7 @@
   import OfficeCanvas from "./components/OfficeCanvas.svelte";
   import PermissionMenu from "./components/PermissionMenu.svelte";
   import PlanningList from "./components/PlanningList.svelte";
+  import * as Workbench from "../bindings/dev.jevido/work/services/workbenchservice.js";
   import ProposalReview from "./components/ProposalReview.svelte";
   import { Restructuring } from "./lib/workspace/restructure.svelte";
   import SettingsMenu from "./components/SettingsMenu.svelte";
@@ -239,6 +240,19 @@
    */
   $effect(() => proposals.listen(() => untrack(() => workspaces.active)));
   $effect(() => restructuring.listen());
+
+  /*
+    The approval setting, read once when the window opens.
+
+    Read rather than assumed, and read here rather than in Review, so that the
+    default in the class stays the safe one -- a Review built before this
+    resolves waits for approval, which is the right way round to be wrong.
+  */
+  $effect(() => {
+    Workbench.ApplyProposalsWithoutReview()
+      .then((without) => (proposals.withoutReview = without))
+      .catch(() => {});
+  });
 
   // The console labels turns and plan steps by agent, so it follows the roster
   // rather than being handed a copy of it at startup.
@@ -525,7 +539,7 @@
         <ClaudeConsole {session} {review}>
           {#snippet controls()}
             <PermissionMenu {permissions} />
-            <SettingsMenu {config} />
+            <SettingsMenu {config} review={proposals} />
           {/snippet}
         </ClaudeConsole>
       </aside>

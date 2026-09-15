@@ -182,3 +182,60 @@ func TestUpdateKeepsWorkDir(t *testing.T) {
 		t.Errorf("WorkDir = %q, want it preserved", c.WorkDir)
 	}
 }
+
+// The approval gate. Off unless somebody turned it off, and off is the answer
+// for a config written before the field existed -- which is why it is the zero
+// value rather than something a migration has to arrange.
+func TestApplyProposalsWithoutReviewDefaultsOff(t *testing.T) {
+	isolate(t)
+
+	t.Run("a first run", func(t *testing.T) {
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.ApplyProposalsWithoutReview {
+			t.Error("a fresh config skips the review panel")
+		}
+	})
+
+	t.Run("a config written before the field existed", func(t *testing.T) {
+		if err := Save(Config{Root: "/tmp/agents"}); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.ApplyProposalsWithoutReview {
+			t.Error("an older config reads back as skipping the panel")
+		}
+	})
+
+	t.Run("it round-trips both ways", func(t *testing.T) {
+		// Both ways on purpose: a setting that only works in one direction is
+		// the usual bug here, and omitempty means the `false` write is the one
+		// that looks like nothing.
+		if err := Update(func(c *Config) { c.ApplyProposalsWithoutReview = true }); err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+		c, err := Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !c.ApplyProposalsWithoutReview {
+			t.Fatal("turning it on did not stick")
+		}
+
+		if err := Update(func(c *Config) { c.ApplyProposalsWithoutReview = false }); err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+		c, err = Load()
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if c.ApplyProposalsWithoutReview {
+			t.Error("turning it off again did not stick")
+		}
+	})
+}

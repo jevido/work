@@ -1,7 +1,30 @@
 <script lang="ts">
+  import type { Review } from "../lib/workspace/review.svelte";
+  import * as Workbench from "../../bindings/dev.jevido/work/services/workbenchservice.js";
   import type { Config } from "../lib/config/config.svelte";
 
-  let { config }: { config: Config } = $props();
+  let { config, review }: { config: Config; review: Review } = $props();
+
+  /**
+   * Turning the approval gate off.
+   *
+   * The wording is deliberate. Not "auto-apply", which sounds like a
+   * convenience: whoever reads "Apply Claude's changes without asking" should
+   * know what they are agreeing to, because this is the only gate the app has
+   * over a write it owns.
+   */
+  async function toggleReview(event: Event) {
+    const wanted = (event.currentTarget as HTMLInputElement).checked;
+    try {
+      // Answered with what the backend now holds rather than assuming the
+      // click won, the same way the permission toggle works.
+      review.withoutReview = await Workbench.SetApplyProposalsWithoutReview(wanted);
+    } catch {
+      // Left where it was. A setting that looks changed and is not is worse
+      // than one that refused to change.
+      review.withoutReview = await Workbench.ApplyProposalsWithoutReview();
+    }
+  }
 
   let open = $state(false);
   let root: HTMLDivElement | undefined = $state();
@@ -103,6 +126,19 @@
         Change folder location…
       </button>
 
+      <label class="toggle">
+        <input
+          type="checkbox"
+          checked={review.withoutReview}
+          onchange={toggleReview}
+        />
+        <span>Apply Claude's changes without asking</span>
+      </label>
+      <p class="hint">
+        Off, a restructuring waits in a panel with a tick per row. On, it lands as soon as
+        it arrives.
+      </p>
+
       {#if config.error}
         <p class="hint err" role="alert">{config.error}</p>
       {:else if config.note}
@@ -182,6 +218,19 @@
     line-height: 1.4;
     word-break: break-all;
     user-select: text;
+  }
+
+  .toggle {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 6px 10px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .toggle input {
+    margin: 2px 0 0;
   }
 
   button[role="menuitem"] {

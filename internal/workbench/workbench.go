@@ -1040,6 +1040,29 @@ func (w *Workbench) SetPermissionMode(mode string) (claude.PermissionMode, error
 	return parsed, nil
 }
 
+// ApplyProposalsWithoutReview reports whether a proposal from Claude applies
+// itself instead of waiting in the review panel.
+//
+// Read from the config every time rather than cached: it is read once per
+// proposal, which is rare, and a cached copy is a copy that can disagree with
+// the file after a settings change that failed to write.
+func (w *Workbench) ApplyProposalsWithoutReview() bool {
+	cfg, err := config.Load()
+	if err != nil {
+		// Unreadable config means the safe answer, which is the default one:
+		// the panel is the only gate there is.
+		return false
+	}
+	return cfg.ApplyProposalsWithoutReview
+}
+
+// SetApplyProposalsWithoutReview turns the review panel off, or back on.
+func (w *Workbench) SetApplyProposalsWithoutReview(without bool) error {
+	return config.Update(func(c *config.Config) {
+		c.ApplyProposalsWithoutReview = without
+	})
+}
+
 // UsePermissionMode applies a mode without persisting it. Startup uses it for
 // the mode already in the config file, which does not need writing back.
 func (w *Workbench) UsePermissionMode(mode claude.PermissionMode) {

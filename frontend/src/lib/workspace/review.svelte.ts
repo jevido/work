@@ -106,6 +106,19 @@ export class Review {
   open = $derived(this.proposal !== null);
 
   /**
+   * Whether a proposal applies itself instead of waiting.
+   *
+   * Off by default, and set from the backend by App. The default is the point:
+   * this panel is the only approval gate the app has. When Claude edits files
+   * it writes to disk and the app only gets to look afterwards; here the app
+   * owns the write, so it can ask first.
+   *
+   * The opt-out is for somebody who has watched it be right forty times and
+   * would rather the forty-first just happened.
+   */
+  withoutReview = $state(false);
+
+  /**
    * Takes a proposal for a workspace.
    *
    * The workspace is held by id rather than by reference: tabs are rebuilt
@@ -122,6 +135,26 @@ export class Review {
     this.#approved = Object.fromEntries(proposal.ops.map((_, at) => [at, true]));
     this.outcome = null;
     this.refused = null;
+
+    if (this.withoutReview) {
+      // Through the same path Apply uses, deliberately. Going around it would
+      // mean two ways of applying a proposal, and the second one would be the
+      // one that drifts.
+      const outcome = this.apply(workspace);
+      // apply() sets `said` in the words of somebody who pressed a button.
+      // Nobody pressed anything, so it is said again in words that explain why
+      // the outline just moved on its own.
+      this.said =
+        `Claude changed ${outcome.applied} ${outcome.applied === 1 ? "line" : "lines"} in the outline, ` +
+        `applied without asking because that setting is on` +
+        (outcome.skipped > 0 ? `. ${outcome.skipped} could not be applied` : "") +
+        ".";
+      // Cleared, because there is nothing to review. The outcome stays on
+      // screen: it is the only record that anything happened.
+      this.proposal = null;
+      return;
+    }
+
     const n = proposal.ops.length;
     const what = `Claude suggested ${n} ${n === 1 ? "change" : "changes"} to the outline. Nothing has been applied.`;
     // Where to go for it, which is not the same sentence when the office is

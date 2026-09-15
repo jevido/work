@@ -41,6 +41,16 @@ type Config struct {
 	// it has joined none. Nil is the ordinary case and the one Work has always
 	// had: no workspace means no server, no queue and no ops.
 	Workspace *Workspace `json:"workspace,omitempty"`
+	// ApplyProposalsWithoutReview skips the review panel when Claude proposes
+	// a restructuring, applying every row as it arrives.
+	//
+	// Off by default, and the zero value is the default rather than a
+	// migration -- a config written before this field existed reads back as
+	// false, which is the safe answer and needs no code to arrange.
+	//
+	// Local, not in the workspace: this is how one person wants to work, and
+	// syncing it would apply somebody else's patience to your machine.
+	ApplyProposalsWithoutReview bool `json:"applyProposalsWithoutReview,omitempty"`
 }
 
 // Workspace is a shared workbench: a server, an identity on it, and the local

@@ -590,6 +590,96 @@ async function run() {
     !net.some((r) => r.url.includes("/v1")),
     net.filter((r) => r.url.includes("/v1")).map((r) => `${r.how} ${r.url}`).join(" | ") || "none",
   );
+  /* ---------------------------------------------------------------------- */
+  /* 4c. The opt-out: applied without asking, and said out loud              */
+  /* ---------------------------------------------------------------------- */
+
+  // The default is the point of the panel, so it is checked before the
+  // opt-out: a suite that only ever ran with the setting on would not notice
+  // the gate disappearing.
+  const settingsToggle = () =>
+    $$<HTMLInputElement>('input[type=checkbox]').find((i) =>
+      (i.closest("label")?.textContent ?? "").includes("without asking"),
+    ) ?? null;
+
+  const settingsButton = $$<HTMLButtonElement>("button").find((b) =>
+    (b.getAttribute("aria-label") ?? b.textContent ?? "").toLowerCase().includes("setting"),
+  );
+  settingsButton?.click();
+  await settle(6);
+
+  const toggle = settingsToggle();
+  check("the approval gate can be turned off from settings", !!toggle);
+  check("and it is on by default", toggle?.checked === false);
+
+  if (toggle) {
+    toggle.checked = true;
+    toggle.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle(10);
+  }
+  settingsButton?.click();
+  await settle(6);
+
+  // Back to the outline first. By this point the suite has switched modes,
+  // closed a tab and had a key refused, and a proposal needs a document on
+  // screen with ids in it to name.
+  pickMode("idea");
+  await settle(10);
+
+  const target = nodeIds()[0];
+  check("there is a line for an unreviewed proposal to rename", !!target, target ?? "none");
+
+  const before = outlineText();
+  if (target) {
+    V().propose({
+      summary: "Rename the first line.",
+      ops: [{ kind: "set-text", node: target, text: "Applied without asking" }],
+    });
+    await settle(20);
+  }
+
+  check("with the setting on, nothing waits to be reviewed", !reviewPanel());
+  check(
+    "the change lands anyway",
+    outlineText() !== before && outlineText().includes("Applied without asking"),
+    outlineText(),
+  );
+  check(
+    "and it says why the outline moved on its own",
+    ($$("p.announce").map((p) => p.textContent ?? "").join(" ")).includes("without asking"),
+    $$("p.announce").map((p) => (p.textContent ?? "").trim()).filter(Boolean).join(" | ").slice(0, 120),
+  );
+  // Back off again. A setting that only works in one direction is the usual
+  // bug here, and the off leg is the one nobody tests because it is the
+  // default they started from.
+  settingsButton?.click();
+  await settle(6);
+  const again = settingsToggle();
+  check("the toggle shows it is on", again?.checked === true);
+  if (again) {
+    again.checked = false;
+    again.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle(10);
+  }
+  settingsButton?.click();
+  await settle(6);
+
+  const secondTarget = nodeIds()[0];
+  if (secondTarget) {
+    V().propose({
+      summary: "And another.",
+      ops: [{ kind: "set-text", node: secondTarget, text: "Should have waited" }],
+    });
+    await settle(20);
+  }
+  check("turning it back off makes the next proposal wait again", !!reviewPanel());
+  check(
+    "and nothing was applied while it waited",
+    !outlineText().includes("Should have waited"),
+    outlineText().slice(0, 80),
+  );
+
+
 }
 
 run()

@@ -53,6 +53,18 @@ export function Agents(): $CancellablePromise<workbench$0.AgentStatus[] | null> 
 }
 
 /**
+ * ApplyProposalsWithoutReview reports whether Claude's proposed restructurings
+ * apply themselves.
+ * 
+ * Off by default. The panel is the only approval gate this app has -- when
+ * Claude edits files it writes to disk and the app only gets to look
+ * afterwards, but here the app owns the write, so it can ask first.
+ */
+export function ApplyProposalsWithoutReview(): $CancellablePromise<boolean> {
+    return $Call.ByID(3713443955);
+}
+
+/**
  * ApplyWorkspaceEdits writes idea and planning edits into a tab's document and
  * hands back the merged result.
  * 
@@ -223,6 +235,15 @@ export function Revert(path: string): $CancellablePromise<void> {
  */
 export function SelectConfigFolder(): $CancellablePromise<string> {
     return $Call.ByID(3035609692);
+}
+
+/**
+ * SetApplyProposalsWithoutReview changes it, and answers with what the backend
+ * now holds rather than nothing -- so the control draws from the setting
+ * instead of assuming its own click won.
+ */
+export function SetApplyProposalsWithoutReview(without: boolean): $CancellablePromise<boolean> {
+    return $Call.ByID(954902667, without);
 }
 
 /**
