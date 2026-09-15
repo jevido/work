@@ -2,6 +2,7 @@ package workbench
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"dev.jevido/work/internal/agents"
@@ -530,5 +531,44 @@ func TestNextTaskNeedsAWorkspace(t *testing.T) {
 	w := New(agents.Default(), claude.NewRunner(""), func(string, any) {}, t.TempDir())
 	if got, ok := w.NextTask(); ok {
 		t.Errorf("offered %+v with no workspace joined", got)
+	}
+}
+
+func TestStartNextTaskRefusalsSayWhich(t *testing.T) {
+	// Three ways of having nothing to start, and they are not the same news.
+	t.Run("no workspace", func(t *testing.T) {
+		stateHome(t)
+		w := New(agents.Default(), claude.NewRunner(""), func(string, any) {}, t.TempDir())
+		_, err := w.StartNextTask()
+		if err == nil || !strings.Contains(err.Error(), "no workspace") {
+			t.Errorf("error = %v, want one naming the missing workspace", err)
+		}
+	})
+
+	t.Run("nothing left", func(t *testing.T) {
+		w, tab := joinedWorkbench(t, newFakeOps())
+		plan(t, w, tab, [2]string{"finished", TaskDone})
+		_, err := w.StartNextTask()
+		if err == nil || !strings.Contains(err.Error(), "nothing left") {
+			t.Errorf("error = %v, want one saying the plan is finished", err)
+		}
+	})
+}
+
+func TestTaskPromptCarriesTheIdea(t *testing.T) {
+	// A run that sees only the task has lost the reason it is being done.
+	with := taskPrompt(PlanTask{Text: "Mount the static handler", FromText: "Serve the viewer"})
+	if !strings.Contains(with, "Mount the static handler") {
+		t.Error("the prompt does not carry the task")
+	}
+	if !strings.Contains(with, "Serve the viewer") {
+		t.Error("the prompt does not carry the idea it came from")
+	}
+
+	// And a task with no link still reads as a request rather than as a task
+	// with a missing half.
+	without := taskPrompt(PlanTask{Text: "Just do this"})
+	if strings.Contains(without, "came out of an idea") {
+		t.Errorf("a task with no origin claims one: %q", without)
 	}
 }

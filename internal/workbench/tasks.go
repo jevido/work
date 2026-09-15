@@ -2,6 +2,7 @@ package workbench
 
 import (
 	"cmp"
+	"errors"
 	"strings"
 
 	"dev.jevido/work/internal/board"
@@ -546,4 +547,81 @@ func collectText(nodes []ops.TreeNode, into map[string]string) {
 		into[n.ID] = strings.TrimSpace(fieldString(n.Node, FieldText))
 		collectText(n.Children, into)
 	}
+}
+
+// StartNextTask runs the next task on the plan, and marks it as being done.
+//
+// This is the sentence the whole loop turns on: tasks are sequenced, and work
+// mode takes the next one. Before this, the order the plan held was decoration
+// -- the board showed the tasks and a person picked.
+//
+// The run carries the idea the task came from. A run that sees only "Mount the
+// static handler" has lost the reason it is being done, and that link is the
+// spine of the system rather than a nicety.
+func (w *Workbench) StartNextTask() (Task, error) {
+	next, ok := w.NextTask()
+	if !ok {
+		// Three different situations, three different sentences. "There is
+		// nothing left" and "this tab has nowhere to run" are not the same
+		// news, and only one of them is good.
+		if w.sync.Load() == nil {
+			return Task{}, errors.New("workbench: no workspace, so there is no plan to take from")
+		}
+		w.wsMu.Lock()
+		tab := ""
+		dir := ""
+		if w.ws != nil {
+			tab = w.ws.ActiveTab
+			dir = w.tabDirLocked(tab)
+		}
+		w.wsMu.Unlock()
+		if tab == "" || dir == "" || dir == w.baseDir {
+			return Task{}, errors.New("workbench: this tab has no folder on this machine, so there is nowhere to run")
+		}
+		return Task{}, errors.New("workbench: nothing left on the plan")
+	}
+
+	// Started before it is marked, so a refused run -- no CLI, one already in
+	// flight -- does not leave a task claiming to be underway with nothing
+	// working on it.
+	task, err := w.Submit("", taskPrompt(next))
+	if err != nil {
+		return Task{}, err
+	}
+
+	w.wsMu.Lock()
+	tab := ""
+	if w.ws != nil {
+		tab = w.ws.ActiveTab
+	}
+	w.wsMu.Unlock()
+	if next.Status != TaskDoing && tab != "" {
+		// Through the same edit path everything else uses. A status written
+		// here by hand would be a second writer with its own clock.
+		if _, err := w.ApplyEdits(tab, []Edit{{
+			Kind:   ops.KindSetFields,
+			Node:   next.ID,
+			Fields: map[string]any{FieldStatus: TaskDoing},
+		}}); err != nil {
+			// The run is already going, so this is worth saying and not worth
+			// failing on: the task is being done either way and the status
+			// will be corrected the next time anybody touches it.
+			w.emit(EventWorkspaceChanged, WorkspaceEvent{})
+		}
+	}
+	return task, nil
+}
+
+// taskPrompt is what the run is asked to do.
+//
+// The task, then the idea underneath it. Plainly, because this is read by
+// Claude and by whoever reads the transcript afterwards.
+func taskPrompt(next PlanTask) string {
+	var b strings.Builder
+	b.WriteString(next.Text)
+	if next.FromText != "" {
+		b.WriteString("\n\nThis came out of an idea on the map:\n\n")
+		b.WriteString(next.FromText)
+	}
+	return b.String()
 }

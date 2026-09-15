@@ -1023,6 +1023,43 @@ async function run() {
   );
   check("and the marker goes with it", !marker());
 
+  /* ---------------------------------------------------------------------- */
+  /* 4h. Work mode takes the next task                                      */
+  /* ---------------------------------------------------------------------- */
+
+  pickMode("work");
+  await settle(12);
+
+  const nextBox = () => $("section.next");
+  const nextButton = () => $<HTMLButtonElement>("section.next button");
+
+  check("with nothing on the plan, nothing is offered", !nextBox());
+
+  V().setNextTask({
+    id: "t9",
+    text: "Mount the static handler",
+    status: "todo",
+    fromText: "Serve the viewer",
+  });
+  await settle(20);
+
+  check("the next task is named", !!nextBox(), nextBox()?.textContent?.replace(/\s+/g, " ").slice(0, 80) ?? "");
+  check(
+    "and the idea it came from with it",
+    (nextBox()?.textContent ?? "").includes("Serve the viewer"),
+  );
+  // A button that does not say what it will run is one nobody presses twice.
+  check(
+    "the button says what it will run",
+    (nextButton()?.textContent ?? "").includes("Mount the static handler"),
+    nextButton()?.textContent?.trim() ?? "no button",
+  );
+
+  nextButton()?.click();
+  await settle(20);
+  check("starting it runs the one that was offered", V().started()?.text === "Mount the static handler");
+  check("and it stops being offered once it is running", !nextBox());
+
 }
 
 run()

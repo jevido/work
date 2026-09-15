@@ -4,6 +4,7 @@
   import ConfigSetup from "./components/ConfigSetup.svelte";
   import IdeaOutline from "./components/IdeaOutline.svelte";
   import KanbanBoard from "./components/KanbanBoard.svelte";
+  import NextTask from "./components/NextTask.svelte";
   import ModeToggle from "./components/ModeToggle.svelte";
   import OfficeCanvas from "./components/OfficeCanvas.svelte";
   import PermissionMenu from "./components/PermissionMenu.svelte";
@@ -462,6 +463,12 @@
             {/key}
 
             <div class="pane work" class:hidden={active.mode !== "work"}>
+              <!--
+                What the plan says to do next, above the board that shows what
+                this machine is doing. The two are different lists: the board is
+                this machine's runs, the plan is the workspace's order.
+              -->
+              <NextTask running={session.busy} />
               <KanbanBoard {board} agents={roster.identities} />
               <div class="office">
                 <!-- Why the office is empty, over the office it is empty in.

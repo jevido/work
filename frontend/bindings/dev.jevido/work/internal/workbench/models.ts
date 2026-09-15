@@ -357,6 +357,42 @@ export interface PlanStep {
 }
 
 /**
+ * PlanTask is one task on the plan, as work mode needs to see it.
+ * 
+ * Small on purpose: the id to act on, the words to show, and the idea it came
+ * from. No actor, no card, no position -- position is the plan's business and
+ * the only thing anybody outside it needs from the order is which one is next.
+ */
+export interface PlanTask {
+    /**
+     * ID is the task node.
+     */
+    "id": string;
+
+    /**
+     * Text is what it says.
+     */
+    "text": string;
+
+    /**
+     * Status is todo, doing or done.
+     */
+    "status": string;
+
+    /**
+     * From is the idea this was extracted from, empty when the link is broken
+     * or was never made.
+     */
+    "from"?: string;
+
+    /**
+     * FromText is that idea's text, so a caller can show the reason without a
+     * second round trip for it.
+     */
+    "fromText"?: string;
+}
+
+/**
  * RunEvent is the payload for every run:* event.
  */
 export interface RunEvent {

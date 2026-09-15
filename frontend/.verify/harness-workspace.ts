@@ -125,6 +125,8 @@ const BIND_TAB_FOLDER = 2990789672;
 const RESTRUCTURE = 3325402576;
 const APPLY_EDITS = 1305658848;
 const WORKSPACE_DOCUMENT = 2545762642;
+const NEXT_TASK = 2789727866;
+const START_NEXT = 3195657146;
 const WITHOUT_REVIEW = 3713443955;
 const SET_WITHOUT_REVIEW = 954902667;
 
@@ -143,6 +145,10 @@ const backend = {
   withoutReview: false,
   /** What ApplyWorkspaceEdits answers with. Null until a test sets one. */
   document: null as unknown,
+  /** What the plan says to do next, or null for a finished plan. */
+  nextTask: null as { id: string; text: string; status: string; fromText?: string } | null,
+  /** The one that was started, for a test to check it was the one offered. */
+  startedTask: null as { text: string } | null,
   serverUrl: "https://work.jevido.app",
   tabs: [
     { id: "tab-a", name: "work", dir: "/home/jevido/Projects/work", bound: true },
@@ -204,6 +210,17 @@ setTransport({
       case BOARD:
       case CHANGES:
         return null;
+
+      case NEXT_TASK:
+        // A tuple, because Go returns two values: the task and whether there
+        // is one. Nothing to offer is the ordinary answer.
+        return backend.nextTask ? [backend.nextTask, true] : [{}, false];
+      case START_NEXT:
+        if (!backend.nextTask) throw new Error("nothing left on the plan");
+        backend.startedTask = backend.nextTask;
+        backend.nextTask = null;
+        push("board:updated", { cards: [] });
+        return { id: "r9", prompt: backend.startedTask.text, agentId: "anton" };
 
       case WORKSPACE_DOCUMENT:
         return backend.document;
@@ -357,6 +374,17 @@ setTransport({
       now: note.now ?? "",
       deleted: note.deleted === true,
     });
+  },
+
+  /** Puts a task at the head of the plan. */
+  setNextTask(task: { id: string; text: string; status: string; fromText?: string } | null) {
+    backend.nextTask = task;
+    push("board:updated", { cards: [] });
+  },
+
+  /** What StartNextTask was asked to run. */
+  started() {
+    return backend.startedTask;
   },
 
   /**

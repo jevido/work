@@ -18,6 +18,7 @@ export type {
     Edit,
     Keys,
     PlanStep,
+    PlanTask,
     RunEvent,
     Status,
     SyncEvent,

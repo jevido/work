@@ -187,6 +187,20 @@ export function NewTab(name: string): $CancellablePromise<workbench$0.TabView> {
 }
 
 /**
+ * NextTask is the first task on the active tab's plan that is still to do.
+ * 
+ * The whole task rather than its id: the caller wants to show it, and a second
+ * round trip to ask what an id means is a frame of empty button.
+ * 
+ * The second return is false when there is nothing to offer -- an empty plan,
+ * no workspace, a tab this machine has bound to no folder, or a plan where
+ * everything is finished. None of those is an error.
+ */
+export function NextTask(): $CancellablePromise<[workbench$0.PlanTask, boolean]> {
+    return $Call.ByID(2789727866);
+}
+
+/**
  * Permissions returns the current mode and everything needed to describe it.
  */
 export function Permissions(): $CancellablePromise<$models.Permissions> {
@@ -255,6 +269,18 @@ export function SetApplyProposalsWithoutReview(without: boolean): $CancellablePr
  */
 export function SetPermissionMode(mode: string): $CancellablePromise<$models.Permissions> {
     return $Call.ByID(3586272062, mode);
+}
+
+/**
+ * StartNextTask runs the next task on the active tab's plan.
+ * 
+ * The order planning holds is the order work takes: this is what makes that
+ * true rather than decorative. Refused, with a reason that distinguishes them,
+ * when there is no workspace, no folder for this tab on this machine, or
+ * nothing left to do.
+ */
+export function StartNextTask(): $CancellablePromise<workbench$0.Task> {
+    return $Call.ByID(3195657146);
 }
 
 /**

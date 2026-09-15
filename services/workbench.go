@@ -340,6 +340,16 @@ func (s *WorkbenchService) NextTask() (workbench.PlanTask, bool) {
 	return s.wb.NextTask()
 }
 
+// StartNextTask runs the next task on the active tab's plan.
+//
+// The order planning holds is the order work takes: this is what makes that
+// true rather than decorative. Refused, with a reason that distinguishes them,
+// when there is no workspace, no folder for this tab on this machine, or
+// nothing left to do.
+func (s *WorkbenchService) StartNextTask() (workbench.Task, error) {
+	return s.wb.StartNextTask()
+}
+
 // Restructure asks Claude to propose changes to a tab's outline or plan.
 //
 // Returns when the run has started, not when it has answered. The proposal
