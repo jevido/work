@@ -86,6 +86,12 @@ type Request struct {
 	WorkDir string
 	// AllowedTools restricts tool access. Empty means the CLI default.
 	AllowedTools []string
+	// MCPConfigPath is a file listing MCP servers to offer the model. Empty
+	// offers none, which is every request that is not asking for a proposal.
+	//
+	// A path rather than inline JSON because the CLI takes a file, and a temp
+	// file the caller owns is something you can read when this misbehaves.
+	MCPConfigPath string
 	// JSONSchema constrains the reply to a schema-validated object, returned on
 	// the result event as Event.Structured. Empty means a normal prose reply.
 	JSONSchema string
@@ -130,32 +136,7 @@ func (r *Runner) Run(ctx context.Context, req Request, sink func(Event)) error {
 		return errors.New("claude: empty prompt")
 	}
 
-	args := []string{
-		"-p", req.Prompt,
-		"--output-format", "stream-json",
-		"--include-partial-messages",
-		"--verbose",
-	}
-	if req.Model != "" {
-		args = append(args, "--model", req.Model)
-	}
-	if req.AppendSystemPrompt != "" {
-		args = append(args, "--append-system-prompt", req.AppendSystemPrompt)
-	}
-	if req.Resume != "" {
-		args = append(args, "--resume", req.Resume)
-	}
-	if len(req.AllowedTools) > 0 {
-		args = append(args, "--allowed-tools", strings.Join(req.AllowedTools, ","))
-	}
-	if req.JSONSchema != "" {
-		args = append(args, "--json-schema", req.JSONSchema)
-	}
-	if req.PermissionMode != "" {
-		args = append(args, "--permission-mode", req.PermissionMode)
-	}
-
-	cmd := exec.CommandContext(ctx, r.Bin, args...)
+	cmd := exec.CommandContext(ctx, r.Bin, buildArgs(req)...)
 	cmd.Dir = req.WorkDir
 
 	stdout, err := cmd.StdoutPipe()
@@ -272,6 +253,43 @@ type streamEvent struct {
 // scanStream reads newline-delimited JSON and emits events. Non-JSON lines are
 // skipped: version managers and shell wrappers sometimes print a banner before
 // the CLI's own output.
+
+// buildArgs is the command line for one request.
+//
+// Split out of Run so that what reaches the CLI can be asserted without running
+// it. A flag that silently stops being sent is otherwise only found by noticing
+// that the behaviour it enabled has gone.
+func buildArgs(req Request) []string {
+	args := []string{
+		"-p", req.Prompt,
+		"--output-format", "stream-json",
+		"--include-partial-messages",
+		"--verbose",
+	}
+	if req.Model != "" {
+		args = append(args, "--model", req.Model)
+	}
+	if req.AppendSystemPrompt != "" {
+		args = append(args, "--append-system-prompt", req.AppendSystemPrompt)
+	}
+	if req.Resume != "" {
+		args = append(args, "--resume", req.Resume)
+	}
+	if len(req.AllowedTools) > 0 {
+		args = append(args, "--allowed-tools", strings.Join(req.AllowedTools, ","))
+	}
+	if req.MCPConfigPath != "" {
+		args = append(args, "--mcp-config", req.MCPConfigPath)
+	}
+	if req.JSONSchema != "" {
+		args = append(args, "--json-schema", req.JSONSchema)
+	}
+	if req.PermissionMode != "" {
+		args = append(args, "--permission-mode", req.PermissionMode)
+	}
+	return args
+}
+
 func scanStream(rd io.Reader, emit func(Event)) error {
 	sc := bufio.NewScanner(rd)
 	sc.Buffer(make([]byte, 0, 64<<10), maxLine)

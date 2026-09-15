@@ -3,6 +3,8 @@ package propose
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -323,5 +325,46 @@ func TestCancelledContextStops(t *testing.T) {
 	err := Serve(ctx, strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`+"\n"), &out)
 	if err == nil {
 		t.Error("Serve returned nil for a cancelled context")
+	}
+}
+
+func TestWriteConfig(t *testing.T) {
+	dir := t.TempDir()
+	path, err := WriteConfig(dir)
+	if err != nil {
+		t.Fatalf("WriteConfig: %v", err)
+	}
+
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading it back: %v", err)
+	}
+	var config struct {
+		MCPServers map[string]struct {
+			Command string   `json:"command"`
+			Args    []string `json:"args"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(body, &config); err != nil {
+		t.Fatalf("the config is not valid JSON: %v", err)
+	}
+
+	server, named := config.MCPServers[ServerName]
+	if !named {
+		// The key is what makes the tool arrive as FullToolName. A different
+		// one here is every proposal dropped, silently.
+		t.Fatalf("no server named %q; got %v", ServerName, config.MCPServers)
+	}
+	if len(server.Args) != 1 || server.Args[0] != "mcp" {
+		t.Errorf("args = %v, want [mcp]", server.Args)
+	}
+
+	// An absolute path, because the CLI resolves the command from its own
+	// working directory rather than from ours.
+	if !filepath.IsAbs(server.Command) {
+		t.Errorf("command = %q, which is not absolute", server.Command)
+	}
+	if _, err := os.Stat(server.Command); err != nil {
+		t.Errorf("command %q is not there: %v", server.Command, err)
 	}
 }

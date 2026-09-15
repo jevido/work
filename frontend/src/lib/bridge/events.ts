@@ -44,7 +44,19 @@ export const BOARD_UPDATED = "board:updated";
  * a proposal is reviewed before anything is written, so the only thing that
  * has to understand one is whatever is going to apply it, which is here.
  */
-export const PROPOSE_TOOL = "propose_restructure";
+/**
+ * The tool Claude calls to propose a restructuring, as it arrives on the
+ * stream.
+ *
+ * The `mcp__work__` prefix is not decoration and not optional. An MCP tool is
+ * namespaced by the server that offers it, the server is named `work` in the
+ * config the backend writes for the CLI, and the name is assembled from that
+ * in Go as propose.FullToolName. The two have to agree exactly: `Review.listen`
+ * compares this string against the tool name on the event and drops anything
+ * else without a word, so a mismatch is not an error anybody sees — it is
+ * every proposal silently never arriving.
+ */
+export const PROPOSE_TOOL = "mcp__work__propose_restructure";
 
 /**
  * The workspace itself changed: joined, left, or its tabs moved. Carries the

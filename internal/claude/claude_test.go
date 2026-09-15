@@ -1,7 +1,9 @@
 package claude
 
 import (
+	"dev.jevido/work/internal/propose"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -179,4 +181,62 @@ func TestScanStreamIgnoresUnknownMessageShapes(t *testing.T) {
 	if len(got) != 0 {
 		t.Errorf("got %+v, want nothing emitted", got)
 	}
+}
+
+// The flags a request turns into. A flag that silently stops being sent is
+// otherwise only noticed when the behaviour it enabled has gone.
+func TestBuildArgs(t *testing.T) {
+	pairs := func(args []string, flag string) []string {
+		var found []string
+		for i, a := range args {
+			if a == flag && i+1 < len(args) {
+				found = append(found, args[i+1])
+			}
+		}
+		return found
+	}
+
+	t.Run("the bare request asks for a stream and nothing else", func(t *testing.T) {
+		args := buildArgs(Request{Prompt: "hello"})
+		for _, absent := range []string{"--mcp-config", "--allowed-tools", "--model", "--resume", "--json-schema", "--permission-mode", "--append-system-prompt"} {
+			if slices.Contains(args, absent) {
+				t.Errorf("a bare request sends %s", absent)
+			}
+		}
+		if got := pairs(args, "-p"); len(got) != 1 || got[0] != "hello" {
+			t.Errorf("-p = %v, want [hello]", got)
+		}
+	})
+
+	t.Run("an MCP config becomes --mcp-config", func(t *testing.T) {
+		args := buildArgs(Request{Prompt: "hello", MCPConfigPath: "/tmp/x/mcp.json"})
+		got := pairs(args, "--mcp-config")
+		if len(got) != 1 || got[0] != "/tmp/x/mcp.json" {
+			t.Errorf("--mcp-config = %v, want [/tmp/x/mcp.json]", got)
+		}
+	})
+
+	t.Run("allowed tools are one comma-separated argument", func(t *testing.T) {
+		args := buildArgs(Request{Prompt: "hello", AllowedTools: []string{"a", "b"}})
+		got := pairs(args, "--allowed-tools")
+		if len(got) != 1 || got[0] != "a,b" {
+			t.Errorf("--allowed-tools = %v, want [a,b]", got)
+		}
+	})
+
+	t.Run("a proposal run is a stream, a config and one tool", func(t *testing.T) {
+		// The shape task 04 sends. Asserted here because it is the combination
+		// that has to work, and each half is easy to get right alone.
+		args := buildArgs(Request{
+			Prompt:        "reorganise this",
+			MCPConfigPath: "/tmp/x/mcp.json",
+			AllowedTools:  []string{propose.FullToolName},
+		})
+		if got := pairs(args, "--allowed-tools"); len(got) != 1 || got[0] != "mcp__work__propose_restructure" {
+			t.Errorf("--allowed-tools = %v", got)
+		}
+		if got := pairs(args, "--mcp-config"); len(got) != 1 {
+			t.Errorf("--mcp-config = %v", got)
+		}
+	})
 }

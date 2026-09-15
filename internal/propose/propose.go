@@ -27,6 +27,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 )
 
 const (
@@ -346,3 +348,44 @@ const inputSchema = `{
     }
   }
 }`
+
+// ConfigFile is the name WriteConfig gives the file it writes.
+const ConfigFile = "mcp.json"
+
+// WriteConfig writes an MCP config into dir pointing the CLI at this binary,
+// and returns the path to pass as --mcp-config.
+//
+// os.Executable rather than os.Args[0]: the latter is whatever the shell said,
+// which is a relative path as often as not, and the CLI resolves the command
+// from its own working directory rather than from ours.
+//
+// The server key is [ServerName], which is what makes the tool arrive as
+// [FullToolName]. The three have to agree, and they agree here because two of
+// them are derived from the third.
+func WriteConfig(dir string) (string, error) {
+	self, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("propose: finding this binary: %w", err)
+	}
+
+	body, err := json.Marshal(map[string]any{
+		"mcpServers": map[string]any{
+			ServerName: map[string]any{
+				"command": self,
+				"args":    []string{"mcp"},
+			},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("propose: encoding the config: %w", err)
+	}
+
+	path := filepath.Join(dir, ConfigFile)
+	// 0600 out of habit rather than necessity: there is no secret in here, but
+	// a file naming an executable the CLI will run is not one to leave
+	// writable by anything else on the machine.
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		return "", fmt.Errorf("propose: writing %s: %w", path, err)
+	}
+	return path, nil
+}
