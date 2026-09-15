@@ -166,6 +166,16 @@ export class ClaudeSession {
     this.chatStatus === "planning" || this.chatStatus === "working",
   );
 
+  /**
+   * What is half typed into the composer for this conversation.
+   *
+   * On the session rather than in the component, because the component does not
+   * remount when the mode changes -- that is the point of where it sits in
+   * App.svelte -- so a draft held locally would follow you from one
+   * conversation into another and appear in the one it was not meant for.
+   */
+  draft = $state("");
+
   /** True when there is nothing on screen to clear. */
   isEmpty = $derived(this.entries.length === 0);
 
@@ -228,16 +238,53 @@ export class ClaudeSession {
     return this.identify(agentId).name;
   }
 
-  /** Subscribes to backend events. Returns an unsubscribe function. */
+  /**
+   * Subscribes to backend events. Returns an unsubscribe function.
+   *
+   * Kept for a session that is the only one there is. Where several sessions
+   * share one window -- see Conversations -- the events are subscribed once and
+   * handed to the right session with [ClaudeSession.deliver], because three
+   * subscriptions to one event is three transcripts holding the same run.
+   */
   listen(): () => void {
-    const offs = [
-      Events.On(RUN_STARTED, (e) => {
+    const offs = this.handlers().map(([name, handle]) => Events.On(name, handle));
+    return () => {
+      for (const off of offs) off();
+      this.cancelFlush();
+    };
+  }
+
+  /** Hands one event to this session, by name. */
+  deliver(name: string, event: { data: any }): void {
+    this.#delivery ??= new Map(this.handlers());
+    this.#delivery.get(name)?.(event);
+  }
+
+  /** Stops the flush timer for a session that is handed events rather than
+   * subscribing to them. */
+  stop(): void {
+    this.cancelFlush();
+  }
+
+  #delivery: Map<string, (e: any) => void> | null = null;
+
+  /**
+   * Every event this session knows, paired with what it does about it.
+   *
+   * A table rather than thirteen subscriptions, so the same handlers can be
+   * reached two ways: subscribed directly, or dispatched to by whoever owns the
+   * window's subscriptions.
+   */
+  private handlers(): [string, (e: any) => void][] {
+    const on = (name: string, handle: (e: any) => void): [string, (e: any) => void] => [name, handle];
+    return [
+      on(RUN_STARTED, (e) => {
         this.runId = e.data.runId;
         this.runCostUsd = 0;
         this.status = "planning";
       }),
 
-      Events.On(RUN_PLAN, (e) => {
+      on(RUN_PLAN, (e) => {
         const who = this.identify(e.data.agentId ?? "");
         this.entries.push({
           kind: "plan",
@@ -247,7 +294,7 @@ export class ClaudeSession {
           colour: who.colour,
           mode: e.data.mode === "team" ? "team" : "self",
           reason: e.data.reason ?? "",
-          steps: (e.data.steps ?? []).map((s) => {
+          steps: (e.data.steps ?? []).map((s: any) => {
             const agent = this.identify(s.agentId);
             return {
               agentId: s.agentId,
@@ -257,7 +304,7 @@ export class ClaudeSession {
               taskId: s.taskId ?? "",
             };
           }),
-          updates: (e.data.updates ?? []).map((u) => ({
+          updates: (e.data.updates ?? []).map((u: any) => ({
             taskId: u.taskId,
             status: u.status ?? "",
             title: u.title ?? "",
@@ -267,7 +314,7 @@ export class ClaudeSession {
         this.status = "working";
       }),
 
-      Events.On(RUN_FINISHED, (e) => {
+      on(RUN_FINISHED, (e) => {
         this.flush();
         if (e.data.cancelled) {
           this.closeOpenTurns("cancelled", "run");
@@ -287,19 +334,19 @@ export class ClaudeSession {
         this.runId = null;
       }),
 
-      Events.On(CLAUDE_SESSION, (e) => {
+      on(CLAUDE_SESSION, (e) => {
         const turn = this.turnFor(e.data);
         if (turn) turn.model = e.data.model ?? "";
       }),
 
-      Events.On(CLAUDE_TEXT, (e) => this.appendText(e.data, e.data.text ?? "")),
+      on(CLAUDE_TEXT, (e) => this.appendText(e.data, e.data.text ?? "")),
 
-      Events.On(CLAUDE_THINKING, () => {
+      on(CLAUDE_THINKING, () => {
         // Thinking is streamed but not shown yet: a dedicated, collapsible
         // panel is the right home for it, not the conversation.
       }),
 
-      Events.On(CLAUDE_TOOL, (e) => {
+      on(CLAUDE_TOOL, (e) => {
         const name = e.data.toolName ?? "";
         const turn = this.turnFor(e.data);
         if (!name || !turn) return;
@@ -326,7 +373,7 @@ export class ClaudeSession {
         if (toolId) this.tools.set(toolId, turn.parts[turn.parts.length - 1] as ToolPart);
       }),
 
-      Events.On(CLAUDE_TOOL_RESULT, (e) => {
+      on(CLAUDE_TOOL_RESULT, (e) => {
         const toolId = e.data.toolId ?? "";
         if (!toolId) return;
         const part = this.tools.get(toolId);
@@ -336,7 +383,7 @@ export class ClaudeSession {
         part.call.done = true;
       }),
 
-      Events.On(CLAUDE_RESULT, (e) => {
+      on(CLAUDE_RESULT, (e) => {
         this.flush();
         if (e.data.phase === "chat") {
           this.chatCostUsd += e.data.costUsd ?? 0;
@@ -354,7 +401,7 @@ export class ClaudeSession {
         if (turn.status === "streaming") turn.status = "done";
       }),
 
-      Events.On(CLAUDE_ERROR, (e) => {
+      on(CLAUDE_ERROR, (e) => {
         this.flush();
         const message = e.data.message || "Claude failed";
         const turn = this.turnFor(e.data);
@@ -367,19 +414,19 @@ export class ClaudeSession {
       }),
 
       // A run-wide cancellation, distinct from a failure: nothing went wrong.
-      Events.On(CLAUDE_CANCELLED, () => {
+      on(CLAUDE_CANCELLED, () => {
         this.flush();
         this.closeOpenTurns("cancelled", "run");
       }),
 
       // The side channel: the coordinator answering while work is in flight.
-      Events.On(CHAT_STARTED, (e) => {
+      on(CHAT_STARTED, (e) => {
         this.chatId = e.data.runId;
         this.chatCostUsd = 0;
         this.chatStatus = "working";
       }),
 
-      Events.On(CHAT_FINISHED, (e) => {
+      on(CHAT_FINISHED, (e) => {
         this.flush();
         if (e.data.cancelled) {
           this.closeOpenTurns("cancelled", "chat");
@@ -398,11 +445,6 @@ export class ClaudeSession {
         this.chatId = null;
       }),
     ];
-
-    return () => {
-      for (const off of offs) off();
-      this.cancelFlush();
-    };
   }
 
   /**

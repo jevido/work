@@ -1060,6 +1060,68 @@ async function run() {
   check("starting it runs the one that was offered", V().started()?.text === "Mount the static handler");
   check("and it stops being offered once it is running", !nextBox());
 
+  /* ---------------------------------------------------------------------- */
+  /* 4i. A transcript per mode, in one console                              */
+  /* ---------------------------------------------------------------------- */
+
+  const composerOf = () => $<HTMLTextAreaElement>("textarea");
+
+  pickMode("idea");
+  await settle(10);
+  const consoleBox = composerOf();
+  const ideaDraft = "a half-typed thought about shape";
+  if (consoleBox) {
+    consoleBox.value = ideaDraft;
+    consoleBox.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle(6);
+  }
+
+  pickMode("planning");
+  await settle(10);
+  // The console must not have been torn down: that is what keeps scroll, focus
+  // and a draft alive across a switch, and a {#key} on the mode would undo it
+  // in one line.
+  check("the same composer element after switching mode", composerOf() === consoleBox);
+  check("but planning's composer is empty", composerOf()?.value === "", composerOf()?.value ?? "gone");
+
+  const planningDraft = "and one about execution";
+  if (composerOf()) {
+    composerOf()!.value = planningDraft;
+    composerOf()!.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle(6);
+  }
+
+  pickMode("idea");
+  await settle(10);
+  check(
+    "coming back to idea finds what was typed there",
+    composerOf()?.value === ideaDraft,
+    composerOf()?.value ?? "gone",
+  );
+
+  pickMode("planning");
+  await settle(10);
+  check("and planning still has its own", composerOf()?.value === planningDraft, composerOf()?.value ?? "gone");
+
+  // Output belongs to the conversation that asked for it. Planning is on screen
+  // when this run starts, so it is planning's -- and it stays planning's after
+  // switching away, because a run takes a while and nobody watches it.
+  const answer = "this answer belongs to planning";
+  V().stream(answer);
+  await settle(20);
+  const pageText = () => document.body.innerText;
+  check("the answer appears in the mode that asked", pageText().includes(answer));
+
+  pickMode("work");
+  await settle(20);
+  check(
+    "and not in the one that did not",
+    !pageText().includes(answer),
+    pageText().includes(answer) ? "work has planning's output" : "",
+  );
+  V().endStream();
+  await settle(8);
+
 }
 
 run()

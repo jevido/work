@@ -23,7 +23,7 @@
     controls?: Snippet;
   } = $props();
 
-  let prompt = $state("");
+
   let scroller: HTMLDivElement | undefined = $state();
   let promptEl: HTMLTextAreaElement | undefined = $state();
   let pinned = true;
@@ -74,11 +74,11 @@
   });
 
   function submit() {
-    const text = prompt;
+    const text = session.draft;
     // Only the side channel blocks the composer now: while a run is going,
     // submit puts the question to Anton instead of starting a second run.
     if (!text.trim() || session.chatBusy) return;
-    prompt = "";
+    session.draft = "";
     pinned = true;
     void session.submit(text);
   }
@@ -124,7 +124,7 @@
   // those is a forced layout, since fitComposer sets a height and then reads
   // scrollHeight back. `bind:value` already puts a keystroke through here.
   $effect(() => {
-    void prompt;
+    void session.draft;
     fitComposer();
   });
 
@@ -258,7 +258,7 @@
   <div class="composer">
     <textarea
       bind:this={promptEl}
-      bind:value={prompt}
+      bind:value={session.draft}
       onkeydown={onKeydown}
       placeholder={session.busy
         ? "Ask Anton about the work in progress…   (Shift+Enter for a new line)"
@@ -282,7 +282,7 @@
           New chat
         </button>
       {/if}
-      <button class="primary" onclick={submit} disabled={session.chatBusy || !prompt.trim()}>
+      <button class="primary" onclick={submit} disabled={session.chatBusy || !session.draft.trim()}>
         {session.busy ? "Ask" : "Send"}
       </button>
     </div>

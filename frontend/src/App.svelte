@@ -22,7 +22,7 @@
   import { Roster } from "./lib/agents/roster.svelte";
   import { TaskBoard } from "./lib/board/board.svelte";
   import { ChangeReview } from "./lib/changes/changes.svelte";
-  import { ClaudeSession } from "./lib/claude/session.svelte";
+  import { Conversations } from "./lib/claude/conversations.svelte";
   import { Config } from "./lib/config/config.svelte";
   import { Permissions } from "./lib/permissions/permissions.svelte";
   import { AppUpdate } from "./lib/update/update.svelte";
@@ -30,7 +30,16 @@
   import { Review } from "./lib/workspace/review.svelte";
   import { Workspaces } from "./lib/workspace/workspaces.svelte";
 
-  const session = new ClaudeSession();
+  /**
+   * One transcript per mode, and one set of subscriptions between them.
+   *
+   * A discussion about shape and the output of a run should not share a
+   * scrollback or a running total. What must not change is the console itself:
+   * it lives outside the mode stack below so that nothing is torn down, and
+   * handing it a different session object is not a remount.
+   */
+  const conversations = new Conversations();
+
   const board = new TaskBoard();
   const review = new ChangeReview();
   /**
@@ -119,6 +128,9 @@
 
   const active = $derived(workspaces.active);
 
+  /** The transcript for the mode on screen. */
+  const session = $derived(conversations.for(active?.mode ?? "work"));
+
   /**
    * Whether the tab on screen is the tab agents run in.
    *
@@ -173,7 +185,15 @@
   const PANEL_ID = "workspace-panel";
 
   // Backend events are wired once for the lifetime of the app.
-  $effect(() => session.listen());
+  /*
+    Which conversation new work belongs to. Read at the moment it starts rather
+    than when its output arrives: a run takes a while and people do not sit and
+    watch it, so the mode on screen when the answer comes back is routinely not
+    the one that asked.
+  */
+  conversations.current = () => active?.mode ?? "work";
+
+  $effect(() => conversations.listen());
   $effect(() => board.listen());
   $effect(() => review.listen());
   $effect(() => update.listen());
@@ -268,7 +288,7 @@
 
   // The console labels turns and plan steps by agent, so it follows the roster
   // rather than being handed a copy of it at startup.
-  $effect(() => session.setAgents(roster.identities));
+  $effect(() => conversations.setAgents(roster.identities));
 
   function openDialog(purpose: Purpose, from?: EventTarget | null) {
     dialogOpener = from instanceof HTMLElement ? from : (document.activeElement as HTMLElement);

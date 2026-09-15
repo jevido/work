@@ -376,6 +376,25 @@ setTransport({
     });
   },
 
+  /**
+   * A run answering, as the backend streams one.
+   *
+   * started() then text: a transcript is built from the stream, and which
+   * conversation it belongs to is decided by the run that opened it rather than
+   * by whatever mode is on screen when a line arrives.
+   */
+  stream(text: string, runId = "r-stream") {
+    push("run:started", { runId, agentId: "anton" });
+    // taskId, because a transcript is built of turns and a turn is keyed on
+    // one. Text without it belongs to no turn and is dropped.
+    push("claude:text", { runId, agentId: "anton", taskId: runId + ".anton1", text });
+  },
+
+  /** Ends a streamed run. */
+  endStream(runId = "r-stream") {
+    push("run:finished", { runId, agentId: "anton" });
+  },
+
   /** Puts a task at the head of the plan. */
   setNextTask(task: { id: string; text: string; status: string; fromText?: string } | null) {
     backend.nextTask = task;
