@@ -1,0 +1,25 @@
+# What never belongs in the build context.
+#
+# There was no such file until the image started building the viewer, and that
+# is what made one necessary: the site stage copies web/ wholesale, and without
+# these lines it would copy web/node_modules and a web/dist left behind by a
+# local `npm run build` -- the second of which would then shadow the fresh
+# build with whatever happened to be on the machine.
+#
+# Everything here is either generated or irrelevant to a server image. The Go
+# stage copies three named paths and is unaffected; this only shrinks what has
+# to be sent to the daemon before it starts.
+
+**/node_modules
+web/dist
+frontend/dist
+frontend/bindings
+
+bin
+.task
+.tmp-verify
+build/linux/appimage/build
+
+.git
+.github
+.claude

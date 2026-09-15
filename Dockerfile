@@ -11,6 +11,11 @@
 # Nothing about the desktop app is in this image. The dependency runs one way
 # -- the server reads internal/ops, and the app imports nothing from server/ --
 # so the only thing copied out of the parent module is that one package.
+#
+# The web viewer is, though, and it is built here rather than uploaded as a CI
+# artifact: `docker build .` on any machine then produces the thing that runs
+# in production. A deploy that depends on a file some other job happened to
+# leave behind is a deploy nobody can reproduce locally.
 
 FROM golang:1.25-alpine AS build
 
@@ -53,6 +58,27 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 go test ./...
 
+# The viewer, built with the server that serves it.
+#
+# Its own stage, so that a change to the Go source does not reinstall npm
+# dependencies and a change to the viewer does not rebuild the binary.
+FROM node:22-alpine AS site
+
+WORKDIR /web
+
+# The manifests alone first, for the same reason the Go stage copies go.mod
+# before any source: this layer changes only when a dependency does.
+COPY web/package.json web/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci
+
+COPY web/ ./
+
+# Typechecked here as well as in CI, for the same reason the stage above runs
+# go test: the check that gates an artifact belongs beside the artifact, not in
+# a job that could be skipped or reordered.
+RUN npm run check && npm run build
+
 FROM alpine:3.22
 
 # ca-certificates for a Postgres connection that uses TLS. A managed database,
@@ -65,6 +91,12 @@ RUN apk add --no-cache ca-certificates tzdata \
  && adduser -D -H -u 10001 work
 
 COPY --from=build /out/work-server /usr/local/bin/work-server
+
+# The viewer, and where the server is told to look for it. Copied before USER
+# below, so it lands root-owned and world-readable -- which is what is wanted,
+# because the server only ever reads it.
+COPY --from=site /web/dist /srv/site
+ENV WORK_SITE_DIR=/srv/site
 
 USER work
 
