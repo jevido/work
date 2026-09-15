@@ -327,6 +327,24 @@ setTransport({
     });
   },
 
+  /**
+   * A write of this machine's that did not survive.
+   *
+   * Pushed as the backend pushes it. There is no conflict endpoint and no way
+   * to ask for one -- the merge notices, and the event is the only way it
+   * reaches the window -- so a harness that called the store directly would be
+   * testing a path the app does not have.
+   */
+  conflict(note: { node: string; field?: string; yours: string; now?: string; deleted?: boolean }) {
+    push("workspace:conflict", {
+      node: note.node,
+      field: note.field ?? "text",
+      yours: note.yours,
+      now: note.now ?? "",
+      deleted: note.deleted === true,
+    });
+  },
+
   /** Ends a restructuring run, which is what gives the control back. */
   finishRestructure() {
     push("chat:finished", { runId: "p1", agentId: "anton" });

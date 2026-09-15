@@ -680,6 +680,88 @@ async function run() {
   );
 
 
+  /* ---------------------------------------------------------------------- */
+  /* 4d. A write of ours that did not survive                               */
+  /* ---------------------------------------------------------------------- */
+
+  pickMode("idea");
+  await settle(10);
+
+  const noteBox = () => $("section.notes");
+  const noteText = () => $$("section.notes li p").map((p) => p.textContent ?? "").join(" | ");
+  const noteButton = (label: string) =>
+    $$<HTMLButtonElement>("section.notes button").find((b) => b.textContent?.trim() === label) ?? null;
+
+  const lostNode = nodeIds()[0];
+  check("there is a line to lose", !!lostNode, lostNode ?? "none");
+
+  const textNow = () => lines().map((l) => l.value)[0] ?? "";
+  const replaced = textNow();
+
+  V().conflict({ node: lostNode, yours: "what I wrote", now: replaced });
+  await settle(10);
+
+  check("a lost write shows a note", !!noteBox(), noteText().slice(0, 80));
+  check("the note quotes what was written", noteText().includes("what I wrote"));
+  check("and what it says instead", noteText().includes(replaced));
+
+  // The whole design, checked in the one place it would be easiest to break.
+  check(
+    "the note names nobody",
+    !/\bby\b|author|actor|machine|someone|somebody/i.test(noteText()),
+    noteText().slice(0, 100),
+  );
+
+  // Undo is an ordinary edit, not a rollback: it goes out as an op like any
+  // keystroke, so the other side receives it and can undo in turn.
+  const editsBefore = V().calls.filter((c: any) => c.id === 1305658848).length;
+  noteButton("Undo")?.click();
+  await settle(20);
+
+  check("Undo puts the text back", textNow() === "what I wrote", textNow());
+
+  // Undo goes through setText, which is the debounced typing path, so the op is
+  // written once the caret has settled rather than on the click.
+  //
+  // KNOWN FAILING, and left failing on purpose. Nothing in the frontend calls
+  // ApplyWorkspaceEdits: workspace.svelte.ts says so at the top of the file --
+  // the Idea and Planning outline is still a per-tab local document in
+  // localStorage, and the op machinery in it mints ops, applies them and
+  // forgets them. So no outline edit reaches Go's queue, no outline edit is
+  // ever pushed, and the conflict this note describes cannot be produced by a
+  // person typing. This check is the evidence for that, and weakening it to
+  // "the text changed" would hide the gap the phase is blocked on.
+  await new Promise((r) => setTimeout(r, 900));
+  await settle(20);
+  check(
+    "and does it by writing an op, not locally",
+    V().calls.filter((c: any) => c.id === 1305658848).length > editsBefore,
+    `${V().calls.filter((c: any) => c.id === 1305658848).length - editsBefore} edits`,
+  );
+  check("the note goes when it is undone", !noteBox());
+
+  // A second loss on the same field replaces the first rather than stacking.
+  V().conflict({ node: lostNode, yours: "first", now: "theirs" });
+  await settle(8);
+  V().conflict({ node: lostNode, yours: "second", now: "theirs again" });
+  await settle(8);
+  check("one note per field, not a queue", $$("section.notes li").length === 1, noteText().slice(0, 60));
+  check("and it is the newest", noteText().includes("second"));
+
+  noteButton("Dismiss")?.click();
+  await settle(8);
+  check("a note can be dismissed", !noteBox());
+
+  // A deleted line has nothing to undo -- a delete is permanent by design --
+  // but the text is still worth keeping.
+  V().conflict({ node: lostNode, yours: "typed into a doomed line", deleted: true });
+  await settle(10);
+  check("a deleted line says so", noteText().includes("deleted"), noteText().slice(0, 80));
+  check("and still gives back what was typed", noteText().includes("typed into a doomed line"));
+  check("with no Undo, because there is nothing to undo", !noteButton("Undo"));
+  noteButton("Dismiss")?.click();
+  await settle(6);
+
 }
 
 run()

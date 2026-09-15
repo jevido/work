@@ -79,6 +79,15 @@ const (
 	// that nothing happened. The frontend calls WorkspaceDocument when the
 	// cursor on this event moves.
 	EventWorkspaceSync = "workspace:sync"
+	// EventWorkspaceConflict reports a write of this machine's that is no
+	// longer in the document: a field a newer edit replaced, or one aimed at a
+	// line that has since been deleted.
+	//
+	// Emitted only for writes this replica made. A field somebody else
+	// overwrote that this machine never touched is not a loss, it is the
+	// document moving, and reporting it would produce a note every time
+	// anybody typed anything.
+	EventWorkspaceConflict = "workspace:conflict"
 )
 
 // The workspace events above are new names rather than new fields on the
@@ -205,4 +214,28 @@ type ChangesEvent struct {
 	// Tracked is false when Work cannot tell what changed, because the working
 	// directory is not a git working tree.
 	Tracked bool `json:"tracked"`
+}
+
+// ConflictEvent is one write of this machine's that did not survive.
+//
+// It names a node and a field and never an actor. The merge needs an actor as a
+// tiebreak and the transport needs one to tell its own ops from everyone
+// else's; neither reason reaches here. A note that could say who would be a
+// note somebody writes "changed by …" into, in a workspace whose design is that
+// nobody can be named -- so the payload simply has no room for it.
+type ConflictEvent struct {
+	// Node is the line this happened to.
+	Node string `json:"node"`
+	// Field is which field lost. Empty when the node was deleted, because then
+	// it is not one field that is gone.
+	Field string `json:"field,omitempty"`
+	// Yours is the value this machine wrote, rendered as text. This is what an
+	// undo puts back and what the note quotes.
+	Yours string `json:"yours"`
+	// Now is what the document says instead. Empty when the node is deleted.
+	Now string `json:"now,omitempty"`
+	// Deleted is true when the line is gone rather than changed. A delete is
+	// permanent by design, so there is nothing to undo -- only the text to
+	// keep, which is why Yours is still here.
+	Deleted bool `json:"deleted,omitempty"`
 }

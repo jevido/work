@@ -66,6 +66,15 @@ export const PROPOSE_TOOL = "mcp__work__propose_restructure";
 export const WORKSPACE_CHANGED = "workspace:changed";
 
 /**
+ * A write of this machine's that is no longer in the document.
+ *
+ * Only ours. A field somebody else overwrote that this machine never touched is
+ * the document moving, not a loss, and a note for one of those would appear
+ * every time anybody typed anything.
+ */
+export const WORKSPACE_CONFLICT = "workspace:conflict";
+
+/**
  * Where sync stands -- online, syncing, offline or rejected, how many ops are
  * waiting, and how far behind the server this machine is.
  *

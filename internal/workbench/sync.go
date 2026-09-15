@@ -146,6 +146,10 @@ type Sync struct {
 	// current wiring rather than of this type.
 	stop     atomic.Pointer[context.CancelFunc]
 	finished chan struct{}
+	// writes is what this replica last put in each field, so that a remote
+	// write displacing one can be recognised as our loss rather than as the
+	// document merely moving. Guarded by mu, like state. See conflict.go.
+	writes writeLog
 }
 
 // newSync prepares a workspace's sync layer, rebuilding the document from
@@ -349,7 +353,17 @@ func (s *Sync) apply(batch []ops.Op) error {
 	}
 
 	s.mu.Lock()
-	_, err := s.state.ApplyAll(batch)
+	outcomes, err := s.state.MergeAll(batch)
+	// What this replica wrote is remembered here, and what it already lost is
+	// noticed here: an op of ours that did not take lost to something that had
+	// arrived first. Both come out of the one merge, under the lock, so the
+	// values reported are the ones that were actually in force.
+	var lost []ConflictEvent
+	if err == nil {
+		lost = s.writes.track(outcomes, func(node, field string) json.RawMessage {
+			return wanted(batch, node, field)
+		})
+	}
 	s.mu.Unlock()
 	if err != nil {
 		s.setErr(err)
@@ -357,9 +371,19 @@ func (s *Sync) apply(batch []ops.Op) error {
 		return err
 	}
 
+	s.report(lost)
 	s.publish()
 	s.nudge()
 	return nil
+}
+
+// report emits one event per conflict. Outside the lock: an emitter runs
+// arbitrary frontend-facing code and holding the merge lock across it would let
+// a slow listener stall every edit on the machine.
+func (s *Sync) report(found []ConflictEvent) {
+	for _, conflict := range found {
+		s.emit(EventWorkspaceConflict, conflict)
+	}
 }
 
 // reserveClocks hands out n consecutive Lamport clock values.
@@ -552,7 +576,15 @@ func (s *Sync) pull(ctx context.Context) error {
 		}
 
 		s.mu.Lock()
-		_, applyErr := s.state.ApplyAll(batch)
+		outcomes, applyErr := s.state.MergeAll(batch)
+		// Only somebody else's ops can displace ours. A page that is all our
+		// own coming back from the server is a push being confirmed, and
+		// nothing in it can have overwritten anything of ours that the local
+		// merge did not already account for.
+		var displaced []ConflictEvent
+		if applyErr == nil && foreign {
+			displaced = s.writes.displaced(outcomes)
+		}
 		s.mu.Unlock()
 		if applyErr != nil {
 			// The log outlives any one version of this binary, so an op a
@@ -570,6 +602,8 @@ func (s *Sync) pull(ctx context.Context) error {
 				return err
 			}
 		}
+
+		s.report(displaced)
 
 		if foreign && s.onRemote != nil {
 			s.onRemote(s)

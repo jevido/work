@@ -10,7 +10,9 @@
   import PlanningList from "./components/PlanningList.svelte";
   import * as Workbench from "../bindings/dev.jevido/work/services/workbenchservice.js";
   import ProposalReview from "./components/ProposalReview.svelte";
+  import ConflictNotes from "./components/ConflictNotes.svelte";
   import { Restructuring } from "./lib/workspace/restructure.svelte";
+  import { Conflicts } from "./lib/workspace/conflicts.svelte";
   import SettingsMenu from "./components/SettingsMenu.svelte";
   import SyncBadge from "./components/SyncBadge.svelte";
   import UpdateDialog from "./components/UpdateDialog.svelte";
@@ -98,6 +100,14 @@
    * per-tab instance would let two tabs both look askable.
    */
   const restructuring = new Restructuring();
+  /**
+   * Writes of this machine's that a newer edit or a delete took away.
+   *
+   * One for the window, filtered per workspace when drawn: the backend
+   * reports against a node id, and which tab holds that node is something
+   * only the tab itself knows.
+   */
+  const conflicts = new Conflicts();
 
   let showPerf = $state(false);
 
@@ -240,6 +250,7 @@
    */
   $effect(() => proposals.listen(() => untrack(() => workspaces.active)));
   $effect(() => restructuring.listen());
+  $effect(() => conflicts.listen());
 
   /*
     The approval setting, read once when the window opens.
@@ -329,6 +340,7 @@
       note that one had been asked for before anybody heard it.
     -->
     <p class="announce" role="status" aria-live="polite">{restructuring.said}</p>
+    <p class="announce" role="status" aria-live="polite">{conflicts.said}</p>
 
     <WorkspaceTabs
       {workspaces}
@@ -424,6 +436,7 @@
                  about the workspace you were in, not the one you moved to. -->
             {#key active.id}
               {#if active.mode === "idea" || active.mode === "planning"}
+                    <ConflictNotes {conflicts} workspace={active} />
                 <!--
                   The outline and, when there is one, the proposal beside it.
 
