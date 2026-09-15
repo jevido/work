@@ -100,12 +100,26 @@ func (s *State) Applied(opID string) bool {
 //
 // An invalid op returns an error and changes nothing at all: validation runs
 // before the first write, so there is no half-applied op to undo.
+//
+// Use [State.Merge] when you need to know what the op did rather than only that
+// it was new.
 func (s *State) Apply(op Op) (bool, error) {
+	outcome, err := s.Merge(op)
+	return outcome.Fresh, err
+}
+
+// Merge applies one op and reports what it did to the document.
+//
+// The same merge as [State.Apply] — this is the one that does the work, and
+// Apply is the short answer to it. See [Outcome] for why the long answer
+// exists: without it, a write that loses a stamp comparison disappears with
+// nothing anywhere able to say it ever happened.
+func (s *State) Merge(op Op) (Outcome, error) {
 	if err := op.Validate(); err != nil {
-		return false, err
+		return Outcome{OpID: op.ID}, err
 	}
 	if s.Applied(op.ID) {
-		return false, nil
+		return Outcome{OpID: op.ID}, nil
 	}
 	if s.seen == nil {
 		s.seen = make(map[string]struct{})
@@ -114,36 +128,66 @@ func (s *State) Apply(op Op) (bool, error) {
 	s.seen[op.ID] = struct{}{}
 	s.clock = max(s.clock, op.Clock)
 
+	out := Outcome{OpID: op.ID, Fresh: true}
 	stamp := op.Stamp()
+
+	// wrote records a field change against the node it landed on, and notes the
+	// node as a tombstone the first time one is written to. Writing to a
+	// tombstone is allowed -- a deleted node keeps its fields so a viewer can
+	// say what was deleted -- but to whoever wrote it, an edit that will never
+	// appear in the tree is indistinguishable from the edit vanishing, and that
+	// is worth reporting.
+	wrote := func(id string, n *node, changes ...FieldChange) {
+		for _, c := range changes {
+			c.Node = id
+			out.Fields = append(out.Fields, c)
+		}
+		if n.deleted && !slices.Contains(out.Tombstones, id) {
+			out.Tombstones = append(out.Tombstones, id)
+		}
+	}
+	moved := func(id string, n *node, change MoveChange) {
+		change.Node = id
+		out.Moves = append(out.Moves, change)
+		if n.deleted && !slices.Contains(out.Tombstones, id) {
+			out.Tombstones = append(out.Tombstones, id)
+		}
+	}
+
 	switch op.Kind {
 	case KindCreateNode:
 		target := s.touch(op.Node)
-		target.moveTo(op.Parent, op.Position, stamp)
-		target.setFields(op.Fields, stamp)
+		moved(op.Node, target, target.moveTo(op.Parent, op.Position, stamp))
+		wrote(op.Node, target, target.setFields(op.Fields, stamp)...)
 
 	case KindSetFields:
-		s.touch(op.Node).setFields(op.Fields, stamp)
+		target := s.touch(op.Node)
+		wrote(op.Node, target, target.setFields(op.Fields, stamp)...)
 
 	case KindDeleteNode:
 		// Tombstoning a node nobody has mentioned yet is deliberate: it is how a
 		// delete that overtakes the create it refers to still wins when the
 		// create catches up.
 		s.touch(op.Node).deleted = true
+		// Not reported as a tombstone write. A delete is not a loss to the
+		// replica that issued it, and it is the one op here that always takes.
 
 	case KindMoveNode:
-		s.touch(op.Node).moveTo(op.Parent, op.Position, stamp)
+		target := s.touch(op.Node)
+		moved(op.Node, target, target.moveTo(op.Parent, op.Position, stamp))
 
 	case KindExtractToTask:
 		task := s.touch(op.Task)
-		task.moveTo(op.Parent, op.Position, stamp)
-		task.setFields(op.Fields, stamp)
-		task.setField(FieldExtractedFrom, stringValue(op.Node), stamp)
+		moved(op.Task, task, task.moveTo(op.Parent, op.Position, stamp))
+		wrote(op.Task, task, task.setFields(op.Fields, stamp)...)
+		wrote(op.Task, task, task.setField(FieldExtractedFrom, stringValue(op.Node), stamp))
 		// Extracting from a node that has since been deleted still produces the
 		// task and still links back to it, so the tombstone records where its
 		// content went.
-		s.touch(op.Node).setField(FieldTaskID, stringValue(op.Task), stamp)
+		source := s.touch(op.Node)
+		wrote(op.Node, source, source.setField(FieldTaskID, stringValue(op.Task), stamp))
 	}
-	return true, nil
+	return out, nil
 }
 
 // ApplyAll merges ops in the order given and reports how many were new.
@@ -166,6 +210,28 @@ func (s *State) ApplyAll(ops []Op) (int, error) {
 	return applied, nil
 }
 
+// MergeAll merges ops in the order given and reports what each one did.
+//
+// One outcome per op, in the order given, including the ops that were already
+// applied -- their outcome has Fresh false and nothing else set. Keeping them
+// means the result lines up with the input by index, which is what a caller
+// wants when it is matching outcomes back to the ops it issued.
+//
+// Like [State.ApplyAll] it stops at the first invalid op and returns what it
+// has along with the error. Nothing needs unwinding: ops are order-independent
+// and idempotent.
+func (s *State) MergeAll(ops []Op) ([]Outcome, error) {
+	out := make([]Outcome, 0, len(ops))
+	for _, op := range ops {
+		outcome, err := s.Merge(op)
+		if err != nil {
+			return out, err
+		}
+		out = append(out, outcome)
+	}
+	return out, nil
+}
+
 // touch returns the bookkeeping for a node, creating it if this is the first op
 // to mention it.
 //
@@ -184,17 +250,32 @@ func (s *State) touch(id string) *node {
 }
 
 // moveTo places a node, if this stamp beats the one that put it where it is.
-func (n *node) moveTo(parent, position string, stamp Stamp) {
+//
+// It reports whether the placement took and where the node sat before, which is
+// what lets a caller say "your move lost" rather than nothing at all. See
+// [Outcome].
+func (n *node) moveTo(parent, position string, stamp Stamp) MoveChange {
+	change := MoveChange{WasParent: n.at.parent, WasPosition: n.at.position}
 	if !stamp.After(n.at.stamp) {
-		return
+		return change
 	}
 	n.at = placement{parent: parent, position: position, stamp: stamp}
+	change.Took = true
+	return change
 }
 
-func (n *node) setFields(fields map[string]json.RawMessage, stamp Stamp) {
-	for name, data := range fields {
-		n.setField(name, data, stamp)
+// setFields writes each field and reports what happened to each, in name order.
+//
+// Sorted because a map's iteration order is deliberately random: the resulting
+// State is the same either way, but a report that came out shuffled would make
+// the same op read differently twice and every test of it flaky.
+func (n *node) setFields(fields map[string]json.RawMessage, stamp Stamp) []FieldChange {
+	names := slices.Sorted(maps.Keys(fields))
+	changes := make([]FieldChange, 0, len(names))
+	for _, name := range names {
+		changes = append(changes, n.setField(name, fields[name], stamp))
 	}
+	return changes
 }
 
 // setField writes one field, if this stamp beats the one already there.
@@ -204,13 +285,18 @@ func (n *node) setFields(fields map[string]json.RawMessage, stamp Stamp) {
 // converge: the tombstone would then keep whichever fields happened to arrive
 // before the delete did, which is different on every replica. Rule two is about
 // the node's existence, and existence is what the tombstone decides.
-func (n *node) setField(name string, data json.RawMessage, stamp Stamp) {
+func (n *node) setField(name string, data json.RawMessage, stamp Stamp) FieldChange {
+	// Cloned, not aliased: Was outlives this call and the State may be written
+	// to again before anybody reads the report.
+	change := FieldChange{Field: name, Was: bytes.Clone(n.fields[name].data)}
 	if !stamp.After(n.fields[name].stamp) {
-		return
+		return change
 	}
 	// The caller's map outlives this call and the op it came from may be
 	// reused, so the bytes are copied rather than aliased.
 	n.fields[name] = value{data: bytes.Clone(data), stamp: stamp}
+	change.Took = true
+	return change
 }
 
 // snapshot copies a node out of the merge bookkeeping, leaving the stamps
