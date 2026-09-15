@@ -6,20 +6,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"dev.jevido/work/internal/ops"
 	"dev.jevido/work/server/api"
+	"dev.jevido/work/server/internal/pgtest"
 	"dev.jevido/work/server/store"
-	"io/fs"
-	"path/filepath"
-	"strings"
 )
 
 // This is the only place the real handlers and the real Postgres meet, so it is
@@ -42,9 +43,9 @@ type client struct {
 
 func stand(t *testing.T) *client {
 	t.Helper()
-	url := os.Getenv("TEST_DATABASE_URL")
+	url := pgtest.URL()
 	if url == "" {
-		t.Skip("TEST_DATABASE_URL is not set")
+		pgtest.Unavailable(t)
 	}
 
 	pool, err := pgxpool.New(context.Background(), url)
@@ -166,6 +167,28 @@ func TestEndToEnd(t *testing.T) {
 		reader := &client{t: t, url: c.url, key: readKey}
 		reader.do(http.MethodPost, "/v1/ops", http.StatusForbidden,
 			map[string]any{"ops": first})
+	})
+
+	t.Run("an edit to a node deleted in an earlier request is refused", func(t *testing.T) {
+		// e7 edited n3 after e6 deleted it and was accepted, because the two
+		// arrived together and a batch is a set rather than a sequence. The
+		// same edit sent on its own, now that the delete is in the log, is the
+		// one write this server refuses — and it refuses it for being aimed at
+		// something gone, never for being late: e7's clock was 900 and it
+		// landed.
+		late := []ops.Op{{ID: "e9", Kind: ops.KindSetFields, Actor: "z", Clock: 901, Node: "n3",
+			Fields: fieldsOf(t, map[string]any{"title": "too late"})}}
+		failure := c.do(http.MethodPost, "/v1/ops", http.StatusConflict, map[string]any{"ops": late})
+		if code := failure["error"].(map[string]any)["code"]; code != "node_deleted" {
+			t.Errorf("code = %v, want node_deleted", code)
+		}
+
+		// Nothing landed, so the log is where it was and the paging below still
+		// sees exactly the ops that were posted.
+		workspace := c.do(http.MethodGet, "/v1/workspace", http.StatusOK, nil)["workspace"].(map[string]any)
+		if head := workspace["head"]; head != float64(8) {
+			t.Errorf("head = %v after a refusal, want 8", head)
+		}
 	})
 
 	// Page the whole log back with a read key, the way the viewer does.

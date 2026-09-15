@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"dev.jevido/work/internal/ops"
+	"dev.jevido/work/server/store"
 )
 
 // The signup token has to clear the length the config insists on, so tests use
@@ -344,6 +345,24 @@ func TestAppendOps(t *testing.T) {
 		impostor.Fields = map[string]json.RawMessage{"title": json.RawMessage(`"different"`)}
 		resp := call(t, srv, http.MethodPost, "/v1/ops", writeKey, map[string]any{"ops": []ops.Op{impostor}})
 		expectStatus(t, resp, http.StatusBadRequest, "bad_request")
+	})
+
+	t.Run("an op targeting a deleted node is a 409, not a 400", func(t *testing.T) {
+		// Well formed, and refused because the workspace moved: the same body
+		// would have been accepted before the delete landed and will never be
+		// accepted again. A 400 would say the client sent nonsense, which is
+		// the wrong thing to tell a replica that was simply offline.
+		backing.appendErr = store.DeletedError{OpID: "e1", Node: "n_7f3c", Seq: 12}
+		t.Cleanup(func() { backing.appendErr = nil })
+
+		resp := call(t, srv, http.MethodPost, "/v1/ops", writeKey, map[string]any{"ops": []ops.Op{anOp("e1")}})
+		decoded := expectStatus(t, resp, http.StatusConflict, "node_deleted")
+		message := decoded["error"].(map[string]any)["message"].(string)
+		for _, want := range []string{"e1", "n_7f3c"} {
+			if !strings.Contains(message, want) {
+				t.Errorf("message = %q, want it to name %s", message, want)
+			}
+		}
 	})
 
 	t.Run("a store failure is a 500 and says nothing about itself", func(t *testing.T) {

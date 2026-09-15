@@ -6,7 +6,6 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"dev.jevido/work/internal/ops"
+	"dev.jevido/work/server/internal/pgtest"
 )
 
 // freshSchema gives a test an empty schema to itself, so migrations can be run
@@ -24,9 +24,9 @@ import (
 // will on a new deployment.
 func freshSchema(t *testing.T) *Store {
 	t.Helper()
-	url := os.Getenv("TEST_DATABASE_URL")
+	url := pgtest.URL()
 	if url == "" {
-		t.Skip("TEST_DATABASE_URL is not set")
+		pgtest.Unavailable(t)
 	}
 
 	name := "migrate_test_" + strings.ToLower(strings.NewReplacer("/", "_", " ", "_").Replace(t.Name()))
@@ -82,8 +82,10 @@ func TestMigrateFromEmpty(t *testing.T) {
 			}
 		}
 		// The unique index is not a nicety: it is the backstop that stops two
-		// racing requests writing the same op twice.
-		for _, index := range []string{"ops_pkey", "ops_id_per_workspace", "workspace_keys_pkey"} {
+		// racing requests writing the same op twice. Nor is ops_by_node: an
+		// append asks whether any of the nodes it targets has been deleted, and
+		// without it that question is a scan of a log that only grows.
+		for _, index := range []string{"ops_pkey", "ops_id_per_workspace", "ops_by_node", "workspace_keys_pkey"} {
 			var exists bool
 			err := s.pool.QueryRow(t.Context(),
 				`SELECT count(*) > 0 FROM pg_indexes

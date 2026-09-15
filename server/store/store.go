@@ -41,6 +41,34 @@ var (
 	ErrOpConflict = errors.New("op id already used for different content")
 )
 
+// DeletedError is an op refused because the node it targets was already
+// tombstoned when the request arrived.
+//
+// This is the only reason this server refuses an otherwise valid write. In
+// particular it never refuses one for being *stale*: a replica can be a
+// thousand ops behind, or a week offline, and everything in its outbox is still
+// accepted and merged by the clock it carries. There is no version to be behind
+// — sequence numbers order arrivals, they do not gate them — and a server that
+// rejected old writes would make being offline lossy, which is the one thing
+// the log exists to avoid.
+//
+// A node that is gone is different in kind. It is not that the write is late;
+// it is that there is nothing left to write to, and no later op brings the node
+// back. Refusing is what tells the client to stop carrying the op.
+type DeletedError struct {
+	// OpID is the op that was refused.
+	OpID string
+	// Node is the tombstone it targets.
+	Node string
+	// Seq is where the delete that tombstoned the node sits in the log, so a
+	// client can go and read it.
+	Seq int64
+}
+
+func (e DeletedError) Error() string {
+	return fmt.Sprintf("op %s targets node %s, which was deleted at seq %d", e.OpID, e.Node, e.Seq)
+}
+
 // Access is what a key may do.
 type Access string
 
@@ -259,6 +287,15 @@ func (s *Store) Append(ctx context.Context, workspaceID string, list []ops.Op) (
 		}
 
 		if len(fresh) > 0 {
+			// Only the fresh ops, and deliberately not the duplicates. An op
+			// already in the log stays reported as a duplicate even if its
+			// node has since been deleted: the server has it, saying otherwise
+			// would make a client drop an op that landed, and refusing a retry
+			// of a write that succeeded is the one answer that cannot be
+			// reconciled.
+			if err := refuseDeleted(ctx, tx, workspaceID, fresh); err != nil {
+				return err
+			}
 			head, err = insert(ctx, tx, workspaceID, head, fresh)
 			if err != nil {
 				return err
@@ -304,6 +341,82 @@ func (p priorOp) same(arriving ops.Op) bool {
 		return false
 	}
 	return string(storedJSON) == string(arrivingJSON)
+}
+
+// refuseDeleted refuses the batch if any op in it targets a node the log has
+// already tombstoned.
+//
+// Which node that is per kind is [ops.Op.NeedsLive], in the package that
+// defines what a kind means. Nothing here pattern-matches on a kind except the
+// one comparison the query cannot avoid, and that one is parameterised with the
+// constant rather than spelling the string again.
+//
+// Deletes committed *before* this request count; deletes inside the request do
+// not. That is not a shortcut. A batch is a set of ops that arrived together,
+// not a sequence to be played in array order — a client's outbox routinely
+// holds an edit and the delete that followed it, and an offline replica that
+// created a node and then deleted it has to be able to push both. Judging the
+// batch against its own interior would make acceptance depend on the order a
+// client happened to serialise it in, which is the one thing the log promises
+// not to care about.
+//
+// It runs under the workspace row lock the caller already holds, so a delete
+// cannot commit between this check and the insert that follows it.
+func refuseDeleted(ctx context.Context, tx pgx.Tx, workspaceID string, fresh []ops.Op) error {
+	seen := make(map[string]bool, len(fresh))
+	targets := make([]string, 0, len(fresh))
+	for _, op := range fresh {
+		node, ok := op.NeedsLive()
+		if !ok || seen[node] {
+			continue
+		}
+		seen[node] = true
+		targets = append(targets, node)
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+
+	// The earliest delete, because there can be more than one and the first is
+	// the one that made the node a tombstone.
+	rows, err := tx.Query(ctx,
+		`SELECT body->>'node', min(seq)
+		   FROM ops
+		  WHERE workspace_id = $1 AND body->>'kind' = $2 AND body->>'node' = ANY($3)
+		  GROUP BY 1`,
+		workspaceID, string(ops.KindDeleteNode), targets)
+	if err != nil {
+		return fmt.Errorf("checking for deleted nodes: %w", err)
+	}
+	defer rows.Close()
+
+	tombstoned := make(map[string]int64)
+	for rows.Next() {
+		var node string
+		var seq int64
+		if err := rows.Scan(&node, &seq); err != nil {
+			return fmt.Errorf("scanning a deleted node: %w", err)
+		}
+		tombstoned[node] = seq
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("checking for deleted nodes: %w", err)
+	}
+	if len(tombstoned) == 0 {
+		return nil
+	}
+
+	// Reported in the order the ops were sent, so a client retrying a batch it
+	// has pruned gets told about them one at a time in a predictable order
+	// rather than whichever the map yielded first.
+	for _, op := range fresh {
+		if node, ok := op.NeedsLive(); ok {
+			if seq, dead := tombstoned[node]; dead {
+				return DeletedError{OpID: op.ID, Node: node, Seq: seq}
+			}
+		}
+	}
+	return nil
 }
 
 // existing finds which of these op IDs the log already holds.

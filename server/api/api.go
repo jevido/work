@@ -215,6 +215,17 @@ func (a *API) appendOps(w http.ResponseWriter, r *http.Request, auth store.Auth)
 		if errors.Is(err, store.ErrOpConflict) {
 			return apiError{http.StatusBadRequest, "bad_request", err.Error()}
 		}
+		// A 409 rather than a 400, because the request was well formed and the
+		// workspace moved: the same body would have been accepted before the
+		// delete landed and will never be accepted again. The message names
+		// the op and the node for a human reading a log; a client works out
+		// which of its ops to drop by catching up on the log and merging,
+		// which tells it every tombstone at once rather than one per refused
+		// request.
+		var deleted store.DeletedError
+		if errors.As(err, &deleted) {
+			return apiError{http.StatusConflict, "node_deleted", err.Error()}
+		}
 		return err
 	}
 

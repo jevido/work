@@ -1,0 +1,23 @@
+-- An append refuses an op that targets a node the log has already tombstoned,
+-- which means asking "is there a delete-node for any of these nodes?" on every
+-- write. Without an index that is a scan of the workspace's whole log per
+-- append, and the log only grows.
+--
+-- The index is on the node rather than on (kind, node) because a node is the
+-- selective half: a handful of ops mention any one node, out of however many
+-- the board has accumulated, and the kind is then a cheap filter on those few
+-- rows. Indexing kind as well would make the entries wider to save a
+-- comparison that costs nothing.
+--
+-- It is not partial on kind either, which would be narrower still. A partial
+-- index is only usable when the planner can prove the query's WHERE implies the
+-- index's, and the query passes the kind as a parameter — the kind string lives
+-- in Go, as a constant in the ops package, and is not repeated here. A generic
+-- plan cannot make that proof, so a partial index would be built and then
+-- quietly not used.
+-- Plain CREATE INDEX, not CONCURRENTLY. Migrations run inside a transaction so
+-- that a failure leaves nothing behind, and CONCURRENTLY cannot run in one.
+-- This takes a lock that blocks writes to ops while it builds, at startup,
+-- before the listener opens — so the only thing waiting on it is this server's
+-- own first request.
+CREATE INDEX ops_by_node ON ops (workspace_id, (body ->> 'node'));

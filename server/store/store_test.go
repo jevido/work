@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"dev.jevido/work/internal/ops"
+	"dev.jevido/work/server/internal/pgtest"
 )
 
 // These tests need a real Postgres, because what they check — a row lock making
@@ -23,14 +24,21 @@ import (
 // is no database to talk to:
 //
 //	TEST_DATABASE_URL=postgres://localhost/work_test?sslmode=disable go test ./...
+//
+// CI sets WORK_REQUIRE_POSTGRES as well, which turns that skip into a failure;
+// see [pgtest].
 var shared *pgxpool.Pool
 
 func TestMain(m *testing.M) {
-	url := os.Getenv("TEST_DATABASE_URL")
+	url := pgtest.URL()
 	if url == "" {
+		if pgtest.Required() {
+			fmt.Fprintf(os.Stderr, "store: %s, but %s is set\n", pgtest.Reason, pgtest.RequireVar)
+			os.Exit(1)
+		}
 		// Not a failure. A contributor without a database still gets the rest
-		// of the suite, and CI sets the variable.
-		fmt.Fprintln(os.Stderr, "store: TEST_DATABASE_URL is not set, skipping the Postgres tests")
+		// of the suite.
+		fmt.Fprintln(os.Stderr, "store: "+pgtest.Reason)
 		os.Exit(m.Run())
 	}
 
@@ -55,7 +63,7 @@ func TestMain(m *testing.M) {
 func open(t *testing.T) *Store {
 	t.Helper()
 	if shared == nil {
-		t.Skip("TEST_DATABASE_URL is not set")
+		pgtest.Unavailable(t)
 	}
 	return New(shared)
 }
@@ -478,5 +486,209 @@ func TestUnknownWorkspace(t *testing.T) {
 	}
 	if _, err := s.Append(t.Context(), "ws_nothere", []ops.Op{anOp("x", 1)}); !errors.Is(err, ErrNoWorkspace) {
 		t.Errorf("Append = %v, want ErrNoWorkspace", err)
+	}
+}
+
+func deleteOf(id string, clock uint64, node string) ops.Op {
+	return ops.Op{ID: id, Kind: ops.KindDeleteNode, Actor: "test", Clock: clock, Node: node}
+}
+
+// editOf is anOp against a named node, for the tests that care which node an op
+// touches.
+func editOf(id string, clock uint64, node string) ops.Op {
+	op := anOp(id, clock)
+	op.Node = node
+	return op
+}
+
+func createOf(id string, clock uint64, node string) ops.Op {
+	return ops.Op{ID: id, Kind: ops.KindCreateNode, Actor: "test", Clock: clock, Node: node, Position: "m"}
+}
+
+// TestAppendRefusesADeletedTarget covers the only write this server refuses on
+// grounds of what is already in the log. The boundaries of it carry as much
+// weight as the refusal itself: each subtest below is a case where refusing
+// would lose an op that a replica is right to be sending.
+func TestAppendRefusesADeletedTarget(t *testing.T) {
+	s := open(t)
+	id := aWorkspace(t, s).Workspace.ID
+
+	if _, err := s.Append(t.Context(), id, []ops.Op{deleteOf("d1", 5, "gone")}); err != nil {
+		t.Fatalf("deleting a node: %v", err)
+	}
+
+	var deleted DeletedError
+	if _, err := s.Append(t.Context(), id, []ops.Op{editOf("e1", 6, "gone")}); !errors.As(err, &deleted) {
+		t.Fatalf("Append = %v, want a DeletedError", err)
+	}
+	// The error names the op, the node and where the delete sits, because that
+	// is what turns a refusal into something an operator can read and a client
+	// can go and look up.
+	if deleted.OpID != "e1" || deleted.Node != "gone" || deleted.Seq != 1 {
+		t.Errorf("DeletedError = %+v, want op e1, node gone, seq 1", deleted)
+	}
+
+	t.Run("a higher clock does not help", func(t *testing.T) {
+		// Being newer is what wins a contested field. It is not a way past a
+		// tombstone: no clock value undoes a delete.
+		if _, err := s.Append(t.Context(), id, []ops.Op{editOf("e2", 9_000, "gone")}); !errors.As(err, &deleted) {
+			t.Errorf("Append = %v, want a DeletedError however high the clock", err)
+		}
+	})
+
+	t.Run("the refused batch lands nothing and keeps no number", func(t *testing.T) {
+		mixed := []ops.Op{editOf("e3", 7, "alive"), editOf("e4", 8, "gone")}
+		if _, err := s.Append(t.Context(), id, mixed); err == nil {
+			t.Fatal("a batch with one refused op was accepted")
+		}
+
+		// The good op in front of the refused one must not have landed, and
+		// must not have taken a sequence number with it.
+		next, err := s.Append(t.Context(), id, []ops.Op{editOf("e5", 9, "alive")})
+		if err != nil {
+			t.Fatalf("appending after a refusal: %v", err)
+		}
+		if next.Accepted[0].Seq != 2 {
+			t.Errorf("the next op landed at %d, want 2: the refused batch left a hole",
+				next.Accepted[0].Seq)
+		}
+	})
+
+	t.Run("deleting what is already deleted is accepted", func(t *testing.T) {
+		// The outcome asked for is the outcome already. Refusing would leave a
+		// client retrying an op it has no other way to be rid of.
+		result, err := s.Append(t.Context(), id, []ops.Op{deleteOf("d2", 10, "gone")})
+		if err != nil {
+			t.Fatalf("deleting a deleted node: %v", err)
+		}
+		if len(result.Accepted) != 1 {
+			t.Errorf("accepted = %v, want the second delete written", result.Accepted)
+		}
+	})
+
+	t.Run("a move under a deleted parent is accepted", func(t *testing.T) {
+		// The node lands in the document's detached list, which is a state the
+		// viewer renders rather than an error. Only the node being moved has to
+		// be alive.
+		move := ops.Op{ID: "m1", Kind: ops.KindMoveNode, Actor: "test", Clock: 11,
+			Node: "alive", Parent: "gone", Position: "m"}
+		if _, err := s.Append(t.Context(), id, []ops.Op{move}); err != nil {
+			t.Errorf("moving under a deleted parent: %v", err)
+		}
+	})
+
+	t.Run("a retry of an op that landed before the delete is still a duplicate", func(t *testing.T) {
+		// The server has this op. Answering with a refusal would make a client
+		// drop a write that is in the log, which is the one answer no amount of
+		// reconciling recovers from.
+		other := aWorkspace(t, s).Workspace.ID
+		edit := editOf("first", 1, "n")
+		if _, err := s.Append(t.Context(), other, []ops.Op{edit}); err != nil {
+			t.Fatalf("appending: %v", err)
+		}
+		if _, err := s.Append(t.Context(), other, []ops.Op{deleteOf("then", 2, "n")}); err != nil {
+			t.Fatalf("deleting: %v", err)
+		}
+
+		replay, err := s.Append(t.Context(), other, []ops.Op{edit})
+		if err != nil {
+			t.Fatalf("replaying an op the log already holds: %v", err)
+		}
+		if len(replay.Duplicates) != 1 || replay.Duplicates[0].Seq != 1 {
+			t.Errorf("duplicates = %v, want the op reported at the seq it has", replay.Duplicates)
+		}
+	})
+
+	t.Run("a node deleted inside the same request does not refuse the rest of it", func(t *testing.T) {
+		// An offline replica's outbox holds a whole session: a node created,
+		// edited, then deleted. All of it has to be pushable, and the order the
+		// client happened to serialise it in must not decide the answer — the
+		// log promises not to care about that order.
+		outbox := []ops.Op{createOf("c", 1, "n"), editOf("e", 2, "n"), deleteOf("d", 3, "n")}
+		for _, order := range []struct {
+			name  string
+			batch []ops.Op
+		}{
+			{"the delete last", outbox},
+			{"the delete first", []ops.Op{outbox[2], outbox[1], outbox[0]}},
+		} {
+			t.Run(order.name, func(t *testing.T) {
+				fresh := aWorkspace(t, s).Workspace.ID
+				result, err := s.Append(t.Context(), fresh, order.batch)
+				if err != nil {
+					t.Fatalf("pushing an outbox: %v", err)
+				}
+				if len(result.Accepted) != len(order.batch) {
+					t.Errorf("accepted %d of %d ops", len(result.Accepted), len(order.batch))
+				}
+			})
+		}
+	})
+
+	t.Run("a create the delete overtook is refused", func(t *testing.T) {
+		// The merge tombstones a node no op has mentioned yet, so the node is
+		// deleted whether the create arrives or not. Storing the late create
+		// would add an op that changes nothing anyone can see; refusing it
+		// tells the replica the node is gone.
+		fresh := aWorkspace(t, s).Workspace.ID
+		if _, err := s.Append(t.Context(), fresh, []ops.Op{deleteOf("d", 9, "n")}); err != nil {
+			t.Fatalf("deleting: %v", err)
+		}
+		if _, err := s.Append(t.Context(), fresh, []ops.Op{createOf("c", 1, "n")}); !errors.As(err, &deleted) {
+			t.Errorf("Append = %v, want a DeletedError", err)
+		}
+	})
+
+	t.Run("extraction cares about the task, not the source", func(t *testing.T) {
+		fresh := aWorkspace(t, s).Workspace.ID
+		if _, err := s.Append(t.Context(), fresh, []ops.Op{deleteOf("d", 5, "source")}); err != nil {
+			t.Fatalf("deleting: %v", err)
+		}
+
+		// Extracting from a node deleted meanwhile still produces the task and
+		// still links back, so the tombstone records where its content went.
+		extract := ops.Op{ID: "x1", Kind: ops.KindExtractToTask, Actor: "test", Clock: 6,
+			Node: "source", Task: "task", Position: "m"}
+		if _, err := s.Append(t.Context(), fresh, []ops.Op{extract}); err != nil {
+			t.Errorf("extracting from a deleted node was refused: %v", err)
+		}
+
+		if _, err := s.Append(t.Context(), fresh, []ops.Op{deleteOf("d2", 7, "dead-task")}); err != nil {
+			t.Fatalf("deleting: %v", err)
+		}
+		onDeadTask := extract
+		onDeadTask.ID, onDeadTask.Clock, onDeadTask.Task = "x2", 8, "dead-task"
+		if _, err := s.Append(t.Context(), fresh, []ops.Op{onDeadTask}); !errors.As(err, &deleted) {
+			t.Errorf("Append = %v, want a DeletedError for the task node", err)
+		}
+	})
+}
+
+// TestAppendNeverRefusesAStaleWrite is the offline story stated as a test. The
+// server is the merge point and the ordering authority, not a version the
+// desktop has to be level with: there is nothing to be behind, so being behind
+// cannot be a reason to lose a write.
+func TestAppendNeverRefusesAStaleWrite(t *testing.T) {
+	s := open(t)
+	id := aWorkspace(t, s).Workspace.ID
+
+	const ahead = 50
+	current := make([]ops.Op, ahead)
+	for i := range current {
+		current[i] = editOf(fmt.Sprintf("ahead-%02d", i), uint64(i)+100, "n")
+	}
+	if _, err := s.Append(t.Context(), id, current); err != nil {
+		t.Fatalf("appending: %v", err)
+	}
+
+	// A replica that has not seen any of that, carrying the lowest clock there
+	// is. Whether the op wins a field is the merge's business; whether it is
+	// stored is this server's, and the answer is yes.
+	result, err := s.Append(t.Context(), id, []ops.Op{editOf("behind", 1, "n")})
+	if err != nil {
+		t.Fatalf("a write from a replica that is behind was refused: %v", err)
+	}
+	if len(result.Accepted) != 1 || result.Accepted[0].Seq != ahead+1 {
+		t.Errorf("accepted = %v, want the op written at seq %d", result.Accepted, ahead+1)
 	}
 }

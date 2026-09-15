@@ -41,8 +41,21 @@ The key identifies the workspace as well as the caller, so no workspace ID
 appears in any path. A read key is what you paste into the web viewer: it can
 see the board and cannot change it.
 
+A key goes in the header and **nowhere else**. There is no `?key=` parameter on
+any endpoint and there will not be one: a key in a URL is a key in this server's
+access log, in every proxy's log between here and you, and in the `Referer` of
+anything the page links to. A viewer link carries the read key in the URL
+*fragment* — `https://work.jevido.app/#rk_…` — which the browser keeps to itself
+and never sends. The page reads it and puts it in the header.
+
 Keys are stored as SHA-256 hashes. The server cannot show you a key again after
 it is created — losing one means rotating it.
+
+There are no accounts. A key is the whole identity model: no sign-up, no
+sessions, no email address, and no attribution anywhere in the schema — no
+author, assignee or last-edited-by column exists to be filled in. An op's
+`actor` is a replica label used to break a clock tie, and nothing reads it as a
+person.
 
 ### Errors
 
@@ -59,6 +72,7 @@ Every non-2xx response has the same body:
 | 403 | `forbidden` | valid key without the rights for this endpoint (a read key posting ops) |
 | 404 | `not_found` | no such route |
 | 405 | `method_not_allowed` | right path, wrong method |
+| 409 | `node_deleted` | an op targets a node already deleted; see `POST /v1/ops` |
 | 413 | `too_large` | request body over the limit |
 | 429 | `rate_limited` | too many requests; retry after `Retry-After` seconds |
 | 500 | `internal` | the server's fault; safe to retry |
@@ -212,6 +226,55 @@ appends nothing and reports every op as a duplicate.
 An op whose `id` matches an existing op with **different content** is rejected
 with 400 `bad_request` rather than silently ignored — that is a client bug, not
 a retry.
+
+#### What a write is never refused for
+
+**Being behind.** There is no version to be level with and no `If-Match` to
+send. A replica can be a thousand ops behind, or a week offline, and everything
+in its outbox is accepted and ordered by the `clock` each op carries. The server
+is the merge point and the ordering authority, not the source of truth: the
+desktop is routinely *ahead* of it, holding edits it has not pushed, and a
+server that refused stale writes would make being offline lossy — which is the
+one thing the log exists to prevent.
+
+So `head` is not a precondition. It is where your ops landed.
+
+#### The one thing a write is refused for
+
+An op aimed at a node the log has already tombstoned is refused with 409
+`node_deleted`. That is not lateness; there is nothing left to write to, and no
+later op brings the node back. Retrying the identical request will never
+succeed.
+
+Which node has to be alive depends on the kind:
+
+| `kind` | Refused when this node is a tombstone |
+| --- | --- |
+| `create-node` | `node` — a delete that overtook the create still wins, so the create adds nothing |
+| `set-fields` | `node` |
+| `move-node` | `node`, and **not** `parent` — moving under a deleted parent is how a node reaches `detached`, which is a state the viewer renders |
+| `extract-to-task` | `task`, and **not** `node` — extracting from a node deleted meanwhile still produces the task and still links back, so the tombstone records where its content went |
+| `delete-node` | never — deleting what is already deleted is the outcome asked for, and refusing it would leave a client retrying an op it cannot otherwise be rid of |
+
+**Only deletes already in the log count. Deletes inside the same request do
+not.** A batch is a set of ops that arrived together, not a sequence played in
+array order: an outbox routinely holds a node created, edited and then deleted,
+and all of it has to be pushable. Judging a batch against its own interior would
+make acceptance depend on the order a client happened to serialise it in, which
+is the one thing the log promises not to care about.
+
+A consequence, stated plainly rather than discovered: the same edit can be
+accepted in a batch alongside the delete and refused when sent after it. The
+document converges either way — a tombstone is in neither `tree` nor
+`detached` — but which fields a tombstone carries can differ between a replica
+whose edit landed and one whose edit was refused. That content is not rendered
+anywhere, and the alternative is an offline replica pushing edits forever at a
+node that no longer exists.
+
+The `message` names the op and the node, for a human reading a log. A client
+does not parse it: on a 409 it catches up with `GET /v1/ops`, merges, and drops
+the ops targeting nodes that are now tombstones — which tells it about every
+one of them at once rather than one per refused request.
 
 ### `GET /v1/ops`
 
@@ -423,6 +486,13 @@ put on the wire.
    no `position` moves the node *to* the empty position; it does not keep the
    position the node had. Send the position you want, every time.
 
+   **The losing op stays in the log.** Losing a field is not being rejected —
+   the op is stored, ordered and handed back like any other, and only the value
+   it wrote is not the one showing. That is what a client needs to tell someone
+   their edit was overwritten: it can see its own op in the log next to the one
+   that beat it, and undoing means sending the value again with a higher clock.
+   Nothing here is undone on a client's behalf.
+
 2. **Delete beats a concurrent edit, in either order.** Deleting is one-way. A
    node deleted anywhere is deleted everywhere, whether the delete arrived
    before the edit or after it, and no clock value undoes it. Nothing in this
@@ -434,6 +504,12 @@ put on the wire.
    whichever fields happened to arrive before the delete, and that differs per
    replica. Merging them keeps a tombstone's contents the same everywhere, so a
    viewer can say *what* was deleted rather than only that something was.
+
+   This is a merge rule, not an endpoint rule, and the two are not in
+   disagreement. The merge applies whatever op it is handed. `POST /v1/ops`
+   declines to *store* a new op aimed at a node it already knows is a tombstone
+   — see *The one thing a write is refused for* — because there is no node left
+   for it to be about.
 
 3. **Ops are idempotent by `id`.** Applying an op twice changes nothing the
    second time. This holds in the merge as well as at the endpoint, so a client
@@ -450,6 +526,13 @@ can read like any other:
 
 - `taskId` on the source node — the node ID of the task extracted from it.
 - `extractedFrom` on the task node — the node ID it came from.
+
+This is what links a task back to the region of the map it was pulled out of,
+and it is the link a client follows to show one beside the other. One
+extraction records **one** source node: `extractedFrom` is a node ID, not a
+list. A task gathered from several nodes at once has no shape here yet — it
+would be a new field carrying the rest, added the way anything else is added,
+and nothing needs it today.
 
 ## Running it
 
@@ -487,3 +570,23 @@ themselves when `TEST_DATABASE_URL` is unset:
 ```sh
 TEST_DATABASE_URL=postgres://localhost/work_test?sslmode=disable go test ./...
 ```
+
+That skip is right on a laptop with no Postgres and wrong everywhere else: a run
+that skips the database tests passes while testing none of the code this server
+is. So there is a second variable, and CI sets it:
+
+```sh
+WORK_REQUIRE_POSTGRES=1 \
+  TEST_DATABASE_URL=postgres://localhost/work_test?sslmode=disable \
+  go test -race ./...
+```
+
+With `WORK_REQUIRE_POSTGRES` set, a missing `TEST_DATABASE_URL` fails instead of
+skipping. It is a promise that a database was supplied, and the tests hold the
+caller to it; see `server/internal/pgtest`.
+
+`.github/workflows/ci.yml` runs this module against a `postgres:17-alpine`
+service on every push, with `-race`, and then asserts from `go test -json` that
+`server` and `server/store` reported passing tests and skipped none. The guard
+above lives in Go and the assertion lives in the workflow, on purpose: removing
+either one still leaves a red run.
