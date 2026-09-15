@@ -58,6 +58,8 @@ import {
 } from "./model";
 import { afterIndex, atEnd, atStart, keyFor, stepped, type Bounds } from "./bounds";
 import type { ProposedOp } from "./proposal";
+import { editOf, opsOf } from "./outbound";
+import type { Document, Edit } from "../../../bindings/dev.jevido/work/internal/workbench/models.js";
 import { State, type Node, type Op, type TreeNode } from "./ops";
 import { Replica, actorId } from "./replica";
 
@@ -179,6 +181,22 @@ export class Workspace {
    *   joined, and the fixed local one when none is -- see LOCAL_TAB.
    * @param snapshot What storage had for that id, or null for a fresh tab.
    */
+  /**
+   * Where an edit goes to become an op, or null on a machine that has joined
+   * no workspace.
+   *
+   * Injected rather than imported so that "unjoined" is the absence of a
+   * collaborator instead of an error code checked in eighteen places. Work is a
+   * complete local tool with nothing joined and stays one: with no send, every
+   * method below behaves exactly as it did before any of this existed.
+   */
+  send: ((edits: Edit[]) => Promise<Document | null>) | null = null;
+
+  /** Edits waiting to cross, oldest first. */
+  #outbound: Edit[] = [];
+  /** True while a batch is in flight, which is what serialises them. */
+  #sending = false;
+
   constructor(id: string, snapshot: OutlineSnapshot | null) {
     this.id = id;
     this.mode = snapshot && MODES.includes(snapshot.mode) ? snapshot.mode : "idea";
@@ -615,7 +633,72 @@ export class Workspace {
     }
     if (!applied) return false;
     this.#refresh();
+    // Optimistic first, then sent. ApplyWorkspaceEdits is a round trip and
+    // typing cannot wait on one -- the character is on screen in this frame,
+    // and the op it becomes is Go's business.
+    this.#queue(editOf(op));
     return true;
+  }
+
+  /**
+   * Puts an edit on the wire, in order, one batch at a time.
+   *
+   * Serialised because Go stamps an edit with the clock it holds when the edit
+   * arrives. Two edits to one line racing each other could therefore land with
+   * the later keystroke carrying the earlier clock, and the outcome of that is
+   * not an error -- it is the wrong text, permanently. The debounce in
+   * #settleLater makes the race rare; rare is not never.
+   */
+  #queue(edit: Edit): void {
+    if (!this.send) return;
+    this.#outbound.push(edit);
+    void this.#drain();
+  }
+
+  async #drain(): Promise<void> {
+    if (this.#sending || !this.send) return;
+    this.#sending = true;
+    try {
+      while (this.#outbound.length > 0) {
+        const batch = this.#outbound;
+        this.#outbound = [];
+        const merged = await this.send(batch);
+        if (merged) this.adopt(merged);
+      }
+    } catch {
+      // A refusal is not a lost edit: the op reached Go's disk before the call
+      // returned, or it never became an op at all. Either way what is on screen
+      // is what this machine believes, and reverting somebody's typing because
+      // a round trip failed would be the worse answer. The sync badge is where
+      // a workspace that cannot be written to is reported.
+    } finally {
+      this.#sending = false;
+    }
+  }
+
+  /**
+   * Takes the merged document as the truth, keeping what is being typed.
+   *
+   * The State is replaced rather than merged into, and that is the only way a
+   * delete can reach the optimistic layer: a tombstone cannot be replayed as a
+   * create, so a node the document omits is a node that is simply not in the
+   * rebuilt State. See opsOf.
+   */
+  adopt(doc: Document | null): void {
+    if (!doc) return;
+    const rebuilt = new State();
+    for (const op of opsOf(doc)) {
+      try {
+        rebuilt.apply(op);
+      } catch {
+        // A seed op the local model will not take is a node it cannot show.
+        // Skipping it loses one line on this screen; throwing would lose the
+        // whole document.
+      }
+    }
+    this.#state = rebuilt;
+    this.#replica = new Replica(actorId(), () => this.#state.clock);
+    this.#refresh();
   }
 
   #refresh(): void {

@@ -226,6 +226,14 @@ export class Workspaces {
       const workspace = found ?? Storage.open(want.id);
       workspace.name = want.name;
       workspace.bound = want.bound;
+      // Where this tab's edits go to become ops, or null when there is no
+      // workspace to send them to. LOCAL_TAB is the app with nothing joined:
+      // its outline is this machine's and has nowhere else to be, which is the
+      // ordinary case and not a degraded one.
+      workspace.send =
+        view !== null && want.id !== LOCAL_TAB
+          ? (edits) => Workbench.ApplyWorkspaceEdits(want.id, edits)
+          : null;
       next.push(workspace);
       existing.delete(want.id);
     }

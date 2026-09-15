@@ -723,14 +723,9 @@ async function run() {
   // Undo goes through setText, which is the debounced typing path, so the op is
   // written once the caret has settled rather than on the click.
   //
-  // KNOWN FAILING, and left failing on purpose. Nothing in the frontend calls
-  // ApplyWorkspaceEdits: workspace.svelte.ts says so at the top of the file --
-  // the Idea and Planning outline is still a per-tab local document in
-  // localStorage, and the op machinery in it mints ops, applies them and
-  // forgets them. So no outline edit reaches Go's queue, no outline edit is
-  // ever pushed, and the conflict this note describes cannot be produced by a
-  // person typing. This check is the evidence for that, and weakening it to
-  // "the text changed" would hide the gap the phase is blocked on.
+  // This check is why the outline moved onto Go's queue at all: it failed, and
+  // chasing it found that nothing in the frontend called ApplyWorkspaceEdits.
+  // Undo is an ordinary edit, so if edits reach Go, this one does.
   await new Promise((r) => setTimeout(r, 900));
   await settle(20);
   check(
@@ -761,6 +756,80 @@ async function run() {
   check("with no Undo, because there is nothing to undo", !noteButton("Undo"));
   noteButton("Dismiss")?.click();
   await settle(6);
+
+  /* ---------------------------------------------------------------------- */
+  /* 4e. Every outline edit becomes an op                                   */
+  /* ---------------------------------------------------------------------- */
+
+  const EDITS = 1305658848;
+  const editCalls = () => V().calls.filter((c: any) => c.id === EDITS);
+  const editsSince = (n: number) =>
+    editCalls()
+      .slice(n)
+      .flatMap((c: any) => (c.args?.[1] ?? []) as { kind: string; node?: string }[]);
+  const kindsSince = (n: number) => editsSince(n).map((e) => e.kind).join(",") || "none";
+
+  pickMode("idea");
+  await settle(10);
+
+  // Typing. The character is on screen before the call resolves, which is the
+  // property that makes the outline feel like a text editor rather than a form.
+  const beforeType = editCalls().length;
+  const firstRow = lines()[0];
+  check("there is a line to type into", !!firstRow);
+  if (firstRow) {
+    firstRow.value = "typed into a synced outline";
+    firstRow.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle(2);
+    check("the character is on screen immediately", lines()[0].value.includes("synced"));
+    await new Promise((r) => setTimeout(r, 900));
+    await settle(10);
+  }
+  check(
+    "typing becomes a set-fields edit",
+    editsSince(beforeType).some((e) => e.kind === "set-fields"),
+    kindsSince(beforeType),
+  );
+
+  const beforeCreate = editCalls().length;
+  if (firstRow) key(firstRow, "Enter");
+  await settle(15);
+  check(
+    "a new line becomes a create-node edit",
+    editsSince(beforeCreate).some((e) => e.kind === "create-node"),
+    kindsSince(beforeCreate),
+  );
+  // The id travels with it, so what Go mints and what is on screen are one node
+  // rather than two.
+  check(
+    "and it carries the id the frontend chose",
+    editsSince(beforeCreate).some((e) => e.kind === "create-node" && !!e.node),
+  );
+
+  const beforeMove = editCalls().length;
+  const secondRow = lines()[1];
+  if (secondRow) {
+    secondRow.value = "a child";
+    secondRow.dispatchEvent(new Event("input", { bubbles: true }));
+    await settle(4);
+    key(secondRow, "Tab");
+    await settle(15);
+  }
+  check(
+    "an indent becomes a move-node edit",
+    editsSince(beforeMove).some((e) => e.kind === "move-node"),
+    kindsSince(beforeMove),
+  );
+
+  const beforeExtract = editCalls().length;
+  const toPromote = lines()[1] ?? lines()[0];
+  if (toPromote) key(toPromote, "Enter", { ctrlKey: true });
+  await settle(20);
+  check(
+    "sending a line to the plan becomes an extract-to-task edit",
+    editsSince(beforeExtract).some((e) => e.kind === "extract-to-task"),
+    kindsSince(beforeExtract),
+  );
 
 }
 

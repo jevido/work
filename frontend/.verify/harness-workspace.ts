@@ -123,6 +123,7 @@ const CLOSE_TAB = 451949873;
 const ACTIVATE_TAB = 969308478;
 const BIND_TAB_FOLDER = 2990789672;
 const RESTRUCTURE = 3325402576;
+const APPLY_EDITS = 1305658848;
 const WITHOUT_REVIEW = 3713443955;
 const SET_WITHOUT_REVIEW = 954902667;
 
@@ -139,6 +140,8 @@ const backend = {
   restructureFails: false,
   /** The approval gate. Off, the way a fresh install is. */
   withoutReview: false,
+  /** What ApplyWorkspaceEdits answers with. Null until a test sets one. */
+  document: null as unknown,
   serverUrl: "https://work.jevido.app",
   tabs: [
     { id: "tab-a", name: "work", dir: "/home/jevido/Projects/work", bound: true },
@@ -200,6 +203,13 @@ setTransport({
       case BOARD:
       case CHANGES:
         return null;
+
+      case APPLY_EDITS:
+        // Go's answer is the merged document. Null is what a real one returns
+        // for a machine that has joined nothing, and it is also the honest
+        // default here: a harness that invented a merge would be testing its
+        // own merge rather than the app's handling of one.
+        return backend.document;
 
       case WITHOUT_REVIEW:
         return backend.withoutReview;
@@ -343,6 +353,16 @@ setTransport({
       now: note.now ?? "",
       deleted: note.deleted === true,
     });
+  },
+
+  /**
+   * What Go's merge will answer with next.
+   *
+   * Set to a document and the next edit adopts it, which is how a remote change
+   * arriving between one keystroke and the next is simulated.
+   */
+  setDocument(doc: unknown) {
+    backend.document = doc;
   },
 
   /** Ends a restructuring run, which is what gives the control back. */
