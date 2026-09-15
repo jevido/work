@@ -40,9 +40,43 @@ const (
 	// view existed says, and an outline line is the common case.
 	TypeIdea = "idea"
 	TypeTask = "task"
+	// TypeEdge is a link between two nodes that are not parent and child.
+	//
+	// A node rather than a sixth op kind, and that is the whole design. An
+	// edge is created with create-node and removed with delete-node, both of
+	// which already merge correctly, survive being made offline, report a
+	// conflict when they lose, and are understood by every client and by the
+	// server. A new kind would have to earn all of that again, and an older
+	// client meeting one has no defensible answer -- drop it and diverge
+	// silently, or refuse it and wedge the queue. A node with a type nobody
+	// recognises is a node nobody draws, which every client already handles.
+	TypeEdge = "edge"
+	// TypeRegion is a named set of nodes.
+	//
+	// Membership is a field on each member rather than a list on the region;
+	// see FieldRegion for why.
+	TypeRegion = "region"
 
 	// FieldText is the line itself.
 	FieldText = "text"
+	// FieldFrom and FieldTo are the two ends of a [TypeEdge] node.
+	//
+	// An edge whose end has been deleted is dangling rather than broken: it
+	// still says what it linked, which is more than the node it pointed at can
+	// say for itself.
+	FieldFrom = "from"
+	FieldTo   = "to"
+
+	// FieldRegion names the [TypeRegion] a node belongs to.
+	//
+	// On the member, not a list on the region, and the difference matters. A
+	// list is one last-write-wins slot: two people adding different lines to
+	// one region at the same moment would keep one and lose the other, with
+	// nothing to show for it. A field per member is exactly the shape the
+	// field-level merge exists for -- two people writing two different nodes
+	// do not collide at all.
+	FieldRegion = "region"
+
 	// FieldCollapsed is whether an outline node's children are folded away.
 	// It is in the document rather than a per-viewer preference because a
 	// folded branch is how somebody says "this part is settled".

@@ -82,7 +82,10 @@ func outlineBlock(root ops.TreeNode) string {
 // outlineBody is the lines alone, so planning mode can introduce them in its
 // own words rather than repeating a sentence the reader has just read.
 func outlineBody(root ops.TreeNode) string {
-	keep, dropped := budget(root, func(n ops.TreeNode) bool { return !isTask(n.Node) })
+	// By what a node is, not by what it is not. "Everything except a task" was
+	// right when there were two types and became wrong the moment there were
+	// four -- an edge would have been rendered as a line with no text in it.
+	keep, dropped := budget(root, func(n ops.TreeNode) bool { return isOutlineNode(n.Node) })
 
 	var b strings.Builder
 	render(&b, root.Children, 0, keep, func(b *strings.Builder, n ops.TreeNode, depth int) {

@@ -26,6 +26,23 @@
 import { FIELD_EXTRACTED_FROM, FIELD_TASK_ID, type Node, type TreeNode } from "./ops";
 
 export const FIELD_TYPE = "type";
+
+/**
+ * The four kinds of node one document holds.
+ *
+ * An edge and a region are nodes, not new op kinds: create-node and delete-node
+ * already merge, queue offline and report a conflict, and a node with a type a
+ * client does not recognise is a node it does not draw. See TypeEdge in Go.
+ */
+export const TYPE_IDEA = "idea";
+export const TYPE_TASK = "task";
+export const TYPE_EDGE = "edge";
+export const TYPE_REGION = "region";
+
+/** The two ends of an edge, and the region a node is in. */
+export const FIELD_FROM = "from";
+export const FIELD_TO = "to";
+export const FIELD_REGION = "region";
 export const FIELD_TEXT = "text";
 export const FIELD_COLLAPSED = "collapsed";
 export const FIELD_STATUS = "status";
@@ -71,7 +88,7 @@ export function textOf(node: Node | null | undefined): string {
 }
 
 export function isTask(node: Node): boolean {
-  return node.fields[FIELD_TYPE] === "task";
+  return node.fields[FIELD_TYPE] === TYPE_TASK;
 }
 
 export function isCollapsed(node: Node): boolean {
@@ -139,7 +156,7 @@ export interface Row {
  */
 export function outlineRows(tree: readonly TreeNode[]): Row[] {
   const rows: Row[] = [];
-  walk(tree.filter((n) => !isTask(n)), "", 0);
+  walk(tree.filter(isOutlineNode), "", 0);
   return rows;
 
   function walk(nodes: readonly TreeNode[], parentId: string, depth: number) {
@@ -207,4 +224,26 @@ export function newId(): string {
   let out = "";
   for (const b of bytes) out += b.toString(16).padStart(2, "0");
   return out;
+}
+
+/**
+ * Whether a node is a line the outline draws.
+ *
+ * By what it is, not by what it is not. "Everything except a task" was right
+ * when there were two types and became wrong the moment there were four,
+ * silently: an edge would have been drawn as a line with no text in it.
+ */
+export function isOutlineNode(node: Node): boolean {
+  const type = node.fields[FIELD_TYPE];
+  return type === undefined || type === TYPE_IDEA;
+}
+
+/** Whether a node is a link between two others. */
+export function isEdge(node: Node): boolean {
+  return node.fields[FIELD_TYPE] === TYPE_EDGE;
+}
+
+/** Whether a node is a named set of nodes. */
+export function isRegion(node: Node): boolean {
+  return node.fields[FIELD_TYPE] === TYPE_REGION;
 }
