@@ -19,7 +19,9 @@
 package main
 
 import (
+	"context"
 	"embed"
+	"fmt"
 	"log"
 	"os"
 
@@ -28,6 +30,7 @@ import (
 	"dev.jevido/work/internal/agents"
 	"dev.jevido/work/internal/claude"
 	"dev.jevido/work/internal/config"
+	"dev.jevido/work/internal/propose"
 	"dev.jevido/work/internal/update"
 	"dev.jevido/work/internal/workbench"
 	"dev.jevido/work/services"
@@ -78,6 +81,27 @@ func init() {
 }
 
 func main() {
+	// Before anything else, and before Wails: `work mcp` is this same binary
+	// speaking MCP on stdin and stdout, which is what the claude CLI is
+	// pointed at when somebody asks for a restructuring. See internal/propose.
+	//
+	// The same binary rather than a second one, because it is the one thing
+	// guaranteed to be on disk and executable wherever Work is installed. Two
+	// binaries would have to be built together, shipped together and found
+	// together, and a version skew between them is a class of bug worth not
+	// having at all.
+	//
+	// It must not open a window, read the config or write anything: stdout is
+	// the protocol here, and a stray line on it is a parse error on the other
+	// side.
+	if len(os.Args) > 1 && os.Args[1] == "mcp" {
+		if err := propose.Serve(context.Background(), os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	cwd, err := os.Getwd()
 	if err != nil {
 		log.Fatal(err)
