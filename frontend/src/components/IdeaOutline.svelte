@@ -2,9 +2,27 @@
   import { labelOf } from "../lib/workspace/model";
   import { OutlineKeys, setOutline } from "../lib/workspace/outline.svelte";
   import type { Workspace } from "../lib/workspace/workspace.svelte";
+  import type { Restructuring } from "../lib/workspace/restructure.svelte";
   import OutlineRow from "./OutlineRow.svelte";
+  import AskClaude from "./AskClaude.svelte";
 
-  let { workspace }: { workspace: Workspace } = $props();
+  let { workspace, restructuring }: { workspace: Workspace; restructuring: Restructuring } =
+    $props();
+
+  /**
+   * The line the caret is on, for the composer to mention.
+   *
+   * Named rather than used to narrow what Claude is shown: reorganising a
+   * branch usually means moving something out of it or into it, and a state
+   * block cut down to the branch would hide the only places the answer could
+   * go.
+   */
+  const focus = $derived.by(() => {
+    const id = keys.active;
+    if (!id) return null;
+    const row = workspace.rows.find((r) => r.node.id === id);
+    return row ? { id, text: labelOf(row.node, 80) } : null;
+  });
 
   /**
    * The keyboard, and where the caret is.
@@ -82,6 +100,15 @@
       </button>
     {/if}
   </header>
+
+  <AskClaude
+    {workspace}
+    {restructuring}
+    mode="idea"
+    {focus}
+    label="Ask Claude to reorganise"
+    placeholder="group these by which part of the app they touch"
+  />
 
   <!--
     Announced, never drawn. Indent, move and fold change a shape rather than

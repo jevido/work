@@ -100,6 +100,7 @@ import { setTransport } from "@wailsio/runtime";
 import { mount } from "svelte";
 import App from "../src/App.svelte";
 import fixture from "./agents.json";
+import { PROPOSE_TOOL } from "../src/lib/bridge/events";
 
 const AGENTS = 1687195856;
 const GET_CONFIG_PATH = 4273611995;
@@ -121,6 +122,7 @@ const NEW_TAB = 2023998847;
 const CLOSE_TAB = 451949873;
 const ACTIVATE_TAB = 969308478;
 const BIND_TAB_FOLDER = 2990789672;
+const RESTRUCTURE = 3325402576;
 
 export const calls: { id: number; args: any[] }[] = [];
 
@@ -131,6 +133,8 @@ function push(name: string, data: any) {
 /** The backend's own state, so the fake answers the way the real one would. */
 const backend = {
   joined: true,
+  /** Makes Restructure refuse, for the path where asking is not possible. */
+  restructureFails: false,
   serverUrl: "https://work.jevido.app",
   tabs: [
     { id: "tab-a", name: "work", dir: "/home/jevido/Projects/work", bound: true },
@@ -192,6 +196,13 @@ setTransport({
       case BOARD:
       case CHANGES:
         return null;
+
+      case RESTRUCTURE:
+        // Started, not answered. The real one returns as soon as the run is
+        // in flight; the proposal comes back later as a tool call, which is
+        // what `propose` below stands in for.
+        if (backend.restructureFails) throw new Error("local claude CLI not found on PATH");
+        return { id: "p1", prompt: String(a[2] ?? ""), agentId: "anton" };
       case VERSION:
         return "dev";
 
@@ -294,10 +305,24 @@ setTransport({
    */
   propose(input: unknown) {
     push("claude:tool", {
-      toolName: "propose_restructure",
+      // Imported rather than written out. The real name is
+      // mcp__work__propose_restructure, because the tool is offered by an MCP
+      // server the backend names `work` -- and a harness hardcoding the bare
+      // name would keep passing while the app dropped every real proposal.
+      toolName: PROPOSE_TOOL,
       toolId: `tool-${Math.random().toString(16).slice(2)}`,
       toolInput: typeof input === "string" ? input : JSON.stringify(input),
     });
+  },
+
+  /** Ends a restructuring run, which is what gives the control back. */
+  finishRestructure() {
+    push("chat:finished", { runId: "p1", agentId: "anton" });
+  },
+
+  /** Makes the next ask refuse, the way a missing CLI would. */
+  setRestructureFails(fails: boolean) {
+    backend.restructureFails = fails;
   },
 
   /** A run in flight, which is when ActivateTab is refused. */

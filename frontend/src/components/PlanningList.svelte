@@ -9,8 +9,11 @@
     type TaskState,
   } from "../lib/workspace/model";
   import type { Workspace } from "../lib/workspace/workspace.svelte";
+  import type { Restructuring } from "../lib/workspace/restructure.svelte";
+  import AskClaude from "./AskClaude.svelte";
 
-  let { workspace }: { workspace: Workspace } = $props();
+  let { workspace, restructuring }: { workspace: Workspace; restructuring: Restructuring } =
+    $props();
 
   /** What was just done, for the live region. */
   let said = $state("");
@@ -127,6 +130,14 @@
     </p>
     <button class="ghost" onclick={add}>Add task</button>
   </header>
+
+  <AskClaude
+    {workspace}
+    {restructuring}
+    mode="planning"
+    label="Ask Claude to break this into tasks"
+    placeholder="turn the sync branch into tasks, smallest first"
+  />
 
   <p class="announce" role="status" aria-live="polite">{said}</p>
 

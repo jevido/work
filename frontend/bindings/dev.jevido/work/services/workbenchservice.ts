@@ -190,6 +190,23 @@ export function ReloadAgents(): $CancellablePromise<workbench$0.AgentStatus[] | 
 }
 
 /**
+ * Restructure asks Claude to propose changes to a tab's outline or plan.
+ * 
+ * Returns when the run has started, not when it has answered. The proposal
+ * itself never comes back through this call: Claude answers by calling a tool,
+ * the tool call goes past on the stream the console is already reading, and the
+ * review panel picks it up there. Nothing is applied until somebody presses
+ * Apply.
+ * 
+ * mode is "idea" or "planning". They ask different questions of the same
+ * document -- reorganise, or break into tasks -- and are given different state
+ * to answer from.
+ */
+export function Restructure(tabID: string, mode: string, request: string): $CancellablePromise<workbench$0.Task> {
+    return $Call.ByID(3325402576, tabID, mode, request);
+}
+
+/**
  * Revert undoes one of those file changes, restoring the content the run
  * started with rather than the last commit.
  */

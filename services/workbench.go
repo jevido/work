@@ -308,6 +308,25 @@ func (s *WorkbenchService) WorkspaceCards(tabID string) []board.Card {
 	return s.wb.WorkspaceCards(tabID)
 }
 
+// Restructure asks Claude to propose changes to a tab's outline or plan.
+//
+// Returns when the run has started, not when it has answered. The proposal
+// itself never comes back through this call: Claude answers by calling a tool,
+// the tool call goes past on the stream the console is already reading, and the
+// review panel picks it up there. Nothing is applied until somebody presses
+// Apply.
+//
+// mode is "idea" or "planning". They ask different questions of the same
+// document -- reorganise, or break into tasks -- and are given different state
+// to answer from.
+func (s *WorkbenchService) Restructure(tabID, mode, request string) (workbench.Task, error) {
+	tabID = strings.TrimSpace(tabID)
+	if tabID == "" {
+		return workbench.Task{}, errors.New("tabId is empty")
+	}
+	return s.wb.Restructure(tabID, mode, request)
+}
+
 // ApplyWorkspaceEdits writes idea and planning edits into a tab's document and
 // hands back the merged result.
 //

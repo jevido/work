@@ -234,6 +234,61 @@ async function run() {
     ) ?? null;
   const outlineText = () => lines().map((l) => l.value).join(" | ");
 
+  // ---- Asking for one ----------------------------------------------------
+  //
+  // The half before a proposal exists. Everything below this point tests what
+  // happens once one has arrived; without this, the control that causes one
+  // could be removed and the suite would not notice.
+
+  const askButton = () =>
+    $$<HTMLButtonElement>(".ask button").find((b) =>
+      (b.textContent ?? "").startsWith("Ask Claude"),
+    ) ?? null;
+
+  check("idea mode offers a way to ask", !!askButton(), askButton()?.textContent?.trim() ?? "no button");
+
+  askButton()?.click();
+  await settle(6);
+  const askField = () => $<HTMLInputElement>(".ask input");
+  check("asking opens a composer rather than firing", !!askField());
+
+  // An empty request may not be sent: "reorganise this" with nothing else said
+  // is a coin toss, and the field is the whole reason the control is not a
+  // one-click button.
+  const submit = () =>
+    $$<HTMLButtonElement>(".ask button").find((b) => b.textContent?.trim() === "Ask") ?? null;
+  check("an empty request cannot be sent", submit()?.disabled === true);
+
+  const askInput = askField();
+  if (askInput) {
+    askInput.value = "group these by area";
+    askInput.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  await settle(4);
+  check("a typed request can be sent", submit()?.disabled === false);
+
+  submit()?.click();
+  await settle(10);
+
+  const asked = V().calls.filter((c: any) => c.id === 3325402576);
+  check("asking reaches the backend once", asked.length === 1, `${asked.length} calls`);
+  check(
+    "it is told which mode it was asked in",
+    asked[0]?.args?.[1] === "idea",
+    String(asked[0]?.args?.[1]),
+  );
+  check(
+    "and what was actually typed",
+    String(asked[0]?.args?.[2] ?? "").includes("group these by area"),
+    String(asked[0]?.args?.[2] ?? "").slice(0, 60),
+  );
+
+  check("while it runs, the control says so", !askButton() && !!$(".ask .thinking"));
+
+  V().finishRestructure();
+  await settle(8);
+  check("when the run ends, it can be asked again", !!askButton());
+
   // A proposal that tries to place a node itself. Refused whole: something
   // that believes it owns sort keys cannot be trusted with the rest either.
   V().propose({ summary: "no", ops: [{ kind: "insert", parent: "", after: null, text: "x", position: "m" }] });

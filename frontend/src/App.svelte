@@ -9,6 +9,7 @@
   import PermissionMenu from "./components/PermissionMenu.svelte";
   import PlanningList from "./components/PlanningList.svelte";
   import ProposalReview from "./components/ProposalReview.svelte";
+  import { Restructuring } from "./lib/workspace/restructure.svelte";
   import SettingsMenu from "./components/SettingsMenu.svelte";
   import SyncBadge from "./components/SyncBadge.svelte";
   import UpdateDialog from "./components/UpdateDialog.svelte";
@@ -88,6 +89,14 @@
    * Review, which says why that is not a setting.
    */
   const proposals = new Review();
+  /**
+   * The gap between asking Claude for a restructuring and it answering.
+   *
+   * One for the window rather than one per workspace: only one run can be
+   * in flight at a time anyway -- the backend refuses a second -- and a
+   * per-tab instance would let two tabs both look askable.
+   */
+  const restructuring = new Restructuring();
 
   let showPerf = $state(false);
 
@@ -229,6 +238,7 @@
    * in front at the moment it arrives.
    */
   $effect(() => proposals.listen(() => untrack(() => workspaces.active)));
+  $effect(() => restructuring.listen());
 
   // The console labels turns and plan steps by agent, so it follows the roster
   // rather than being handed a copy of it at startup.
@@ -298,6 +308,13 @@
       nobody hears.
     -->
     <p class="announce" role="status" aria-live="polite">{proposals.said}</p>
+    <!--
+      A second region rather than one shared with the proposal's. They say
+      different halves of the same act -- "asked" and "answered" -- and folding
+      them into one would mean the arrival of a proposal could overwrite the
+      note that one had been asked for before anybody heard it.
+    -->
+    <p class="announce" role="status" aria-live="polite">{restructuring.said}</p>
 
     <WorkspaceTabs
       {workspaces}
@@ -405,9 +422,9 @@
                 <div class={["pane", "split", { reviewing }]}>
                   <div class="doc">
                     {#if active.mode === "idea"}
-                      <IdeaOutline workspace={active} />
+                      <IdeaOutline workspace={active} {restructuring} />
                     {:else}
-                      <PlanningList workspace={active} />
+                      <PlanningList workspace={active} {restructuring} />
                     {/if}
                   </div>
                   {#if reviewing}

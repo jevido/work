@@ -15,6 +15,7 @@ import (
 	"dev.jevido/work/internal/changes"
 	"dev.jevido/work/internal/claude"
 	"dev.jevido/work/internal/config"
+	"dev.jevido/work/internal/propose"
 )
 
 // Emitter delivers a named event with a payload to the frontend. main wires
@@ -156,6 +157,10 @@ type run struct {
 	// coordinator answering a question while also leading a run would
 	// otherwise fight himself over one desk and one entry in current.
 	chat bool
+
+	// proposal marks a run that is asking Claude to restructure the outline
+	// rather than to do work. Nil for every other run. See restructure.go.
+	proposal *proposalRun
 }
 
 // taskID mints a stable, readable ID for one Claude call inside the run.
@@ -875,7 +880,7 @@ func (w *Workbench) streamStep(
 		key = chatSession(agent.ID)
 	}
 
-	err = w.runner.Run(ctx, claude.Request{
+	request := claude.Request{
 		Prompt:             prompt,
 		Model:              agent.Model,
 		AppendSystemPrompt: w.systemPrompt(agent),
@@ -883,7 +888,16 @@ func (w *Workbench) streamStep(
 		AllowedTools:       agent.AllowedTools,
 		PermissionMode:     w.permissionFor(agent),
 		Resume:             resume,
-	}, func(e claude.Event) {
+	}
+	if p := r.proposal; p != nil {
+		// One tool, and it is the one that cannot touch anything: a run asked
+		// to reorganise a branch has no business opening the repository, and
+		// the agent's own tool list is the wrong list for this question.
+		request.AllowedTools = []string{propose.FullToolName}
+		request.MCPConfigPath = p.mcpConfig
+	}
+
+	err = w.runner.Run(ctx, request, func(e claude.Event) {
 		// The first sign of real output promotes the agent from assigned to
 		// working. The frontend uses this to seat them at their desk. A
 		// side-channel turn skips it: the office is showing what the run is
