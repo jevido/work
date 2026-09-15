@@ -223,3 +223,94 @@ func containsSub(haystack, needle string) bool {
 	}
 	return false
 }
+
+// Both directions of a delete beating an edit. They are different code paths --
+// one is the merge, one is the server's refusal on the next push -- and they
+// have to read as the same sentence to the person.
+func TestADeleteIsReported(t *testing.T) {
+	t.Run("the delete arrived first, so our edit lands on a tombstone", func(t *testing.T) {
+		var state ops.State
+		var log writeLog
+
+		if _, err := state.MergeAll([]ops.Op{
+			{ID: "d1", Kind: ops.KindDeleteNode, Actor: "them", Clock: 9, Node: "n1"},
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		batch := []ops.Op{setText(t, "o1", "us", 10, "n1", "typed into a doomed line")}
+		mine, err := state.MergeAll(batch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := log.track(mine, func(node, field string) json.RawMessage {
+			return wanted(batch, node, field)
+		})
+
+		var deleted *ConflictEvent
+		for i := range found {
+			if found[i].Deleted {
+				deleted = &found[i]
+			}
+		}
+		if deleted == nil {
+			t.Fatalf("no delete reported; got %+v", found)
+		}
+		if deleted.Node != "n1" {
+			t.Errorf("node = %q", deleted.Node)
+		}
+		// The text, because the line is not coming back and the work in it
+		// should be recoverable by hand.
+		if deleted.Yours != "typed into a doomed line" {
+			t.Errorf("yours = %q, want the text that was typed", deleted.Yours)
+		}
+		// No undo is offered for a delete, so there is nothing to put back and
+		// nothing claiming there is.
+		if deleted.Now != "" {
+			t.Errorf("now = %q, want empty for a deleted line", deleted.Now)
+		}
+	})
+
+	t.Run("a live node is not reported", func(t *testing.T) {
+		var state ops.State
+		var log writeLog
+		batch := []ops.Op{setText(t, "o1", "us", 5, "n1", "ours")}
+		mine, _ := state.MergeAll(batch)
+		found := log.track(mine, func(node, field string) json.RawMessage {
+			return wanted(batch, node, field)
+		})
+		for _, c := range found {
+			if c.Deleted {
+				t.Errorf("an edit to a live node was reported as deleted: %+v", c)
+			}
+		}
+	})
+}
+
+// A 409 is refused now and refused forever, so the loop must stop asking --
+// otherwise the rest of the outbox waits behind an op that can never land, and
+// the workspace silently stops syncing.
+func TestADeleteConflictIsFatal(t *testing.T) {
+	conflict := &APIError{Status: 409, Code: "node_deleted", Message: "op o1 targets node n1, which was deleted at seq 12"}
+	if !conflict.Fatal() {
+		t.Error("a node_deleted refusal is retried forever")
+	}
+	if !conflict.Deleted() {
+		t.Error("a node_deleted refusal is not recognised as one")
+	}
+
+	// A 409 that is not this is still fatal -- a conflict the server names is
+	// not a thing a retry fixes -- but it is not a delete to report.
+	other := &APIError{Status: 409, Code: "something_else"}
+	if other.Deleted() {
+		t.Error("an unrelated conflict was taken for a delete")
+	}
+
+	// And an ordinary failure still retries, because most of them are a
+	// network that came back.
+	for _, status := range []int{500, 502, 503, 429} {
+		if (&APIError{Status: status}).Fatal() {
+			t.Errorf("status %d is treated as permanent", status)
+		}
+	}
+}

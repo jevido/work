@@ -109,6 +109,23 @@ func (w *writeLog) track(outcomes []ops.Outcome, values func(node, field string)
 				Now:   asText(change.Was),
 			})
 		}
+
+		// An op of ours that landed on a tombstone. The write happened -- a
+		// deleted node keeps its fields -- but it will never appear in the
+		// tree, and to whoever wrote it that is indistinguishable from the
+		// edit vanishing.
+		//
+		// The other direction, where the delete arrives after the edit, is the
+		// server's refusal on the next push. Both read as one sentence to the
+		// person: the line you were editing has been deleted.
+		for _, gone := range outcome.Tombstones {
+			w.forget(gone, FieldText)
+			found = append(found, ConflictEvent{
+				Node:    gone,
+				Yours:   asText(values(gone, FieldText)),
+				Deleted: true,
+			})
+		}
 	}
 	return found
 }

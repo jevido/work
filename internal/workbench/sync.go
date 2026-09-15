@@ -475,6 +475,17 @@ func (s *Sync) push(ctx context.Context) error {
 		res, err := s.client.Push(callCtx, s.server, s.writeKey, batch)
 		cancel()
 		if err != nil {
+			// An op aimed at a node somebody else deleted. The server will
+			// refuse it forever, so it comes out of the outbox rather than
+			// holding everything behind it -- and the person who wrote it is
+			// told, which is the half that was missing: until now this was
+			// returned, handled and silent.
+			var api *APIError
+			if errors.As(err, &api) && api.Deleted() {
+				if dropped := s.dropDeleted(batch, api.Message); dropped > 0 {
+					continue
+				}
+			}
 			return fmt.Errorf("workbench: push %d ops: %w", len(batch), err)
 		}
 		s.bumpHead(res.Head)
@@ -763,4 +774,58 @@ func writeCursor(path string, seq int64) error {
 		return fmt.Errorf("workbench: replace %s: %w", path, err)
 	}
 	return nil
+}
+
+// dropDeleted takes the refused op out of the outbox and says what it was.
+//
+// The server refuses the whole request when one op in it targets a tombstone,
+// and names the op in the message. Matching on the op id rather than on the
+// sentence is deliberate: the id is one this replica generated and is unique,
+// so the match does not depend on the wording of an error staying the same.
+//
+// Returns how many ops were dropped. Zero means the message named nothing this
+// batch recognises, in which case the caller reports the error as it would have
+// anyway rather than guessing which op to throw away.
+func (s *Sync) dropDeleted(batch []ops.Op, message string) int {
+	var dropped []string
+	var told []ConflictEvent
+
+	for _, op := range batch {
+		if op.ID == "" || !strings.Contains(message, op.ID) {
+			continue
+		}
+		dropped = append(dropped, op.ID)
+
+		// What was typed, so it is recoverable by hand even though the line is
+		// not. A delete is permanent by design -- there is nothing to undo, and
+		// offering one would be offering something the op model has not got.
+		node := op.Node
+		if op.Kind == ops.KindExtractToTask {
+			node = op.Task
+		}
+		told = append(told, ConflictEvent{
+			Node:    node,
+			Yours:   asText(op.Fields[FieldText]),
+			Deleted: true,
+		})
+	}
+	if len(dropped) == 0 {
+		return 0
+	}
+
+	if err := s.q.ack(dropped); err != nil {
+		s.setErr(err)
+		return 0
+	}
+	// Forgotten, so a later remote write to the same field is not reported as
+	// having displaced something this machine still believes it wrote.
+	s.mu.Lock()
+	for _, conflict := range told {
+		s.writes.forget(conflict.Node, FieldText)
+	}
+	s.mu.Unlock()
+
+	s.report(told)
+	s.publish()
+	return len(dropped)
 }

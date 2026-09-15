@@ -138,8 +138,21 @@ func (e *APIError) Fatal() bool {
 	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden,
 		http.StatusNotFound, http.StatusMethodNotAllowed, http.StatusRequestEntityTooLarge:
 		return true
+	case http.StatusConflict:
+		// An op aimed at a node somebody deleted. A delete is permanent, so
+		// this is refused now and refused forever -- and without this the loop
+		// would retry it every few seconds with the rest of the outbox stuck
+		// behind it, which is a workspace that silently stops syncing.
+		return true
 	}
 	return false
+}
+
+// Deleted reports whether this is the server refusing an op for targeting a
+// node that has been deleted, which is the one refusal a person needs to be
+// told about rather than only logged.
+func (e *APIError) Deleted() bool {
+	return e.Status == http.StatusConflict && e.Code == "node_deleted"
 }
 
 // HTTPClient talks to a Work sync server.
