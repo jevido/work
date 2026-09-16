@@ -127,8 +127,8 @@ const APPLY_EDITS = 1305658848;
 const WORKSPACE_DOCUMENT = 2545762642;
 const NEXT_TASK = 2789727866;
 const START_NEXT = 3195657146;
-const WITHOUT_REVIEW = 3713443955;
-const SET_WITHOUT_REVIEW = 954902667;
+const REVIEW_FIRST = 3755246969;
+const SET_REVIEW_FIRST = 2332480481;
 
 export const calls: { id: number; args: any[] }[] = [];
 
@@ -142,7 +142,7 @@ const backend = {
   /** Makes Restructure refuse, for the path where asking is not possible. */
   restructureFails: false,
   /** The approval gate. Off, the way a fresh install is. */
-  withoutReview: false,
+  reviewFirst: false,
   /** What ApplyWorkspaceEdits answers with. Null until a test sets one. */
   document: null as unknown,
   /** What the plan says to do next, or null for a finished plan. */
@@ -234,13 +234,13 @@ setTransport({
         // arrive through remote() instead, which is how they arrive for real.
         return null;
 
-      case WITHOUT_REVIEW:
-        return backend.withoutReview;
-      case SET_WITHOUT_REVIEW:
+      case REVIEW_FIRST:
+        return backend.reviewFirst;
+      case SET_REVIEW_FIRST:
         // Answers with what it now holds, which is what the real one does so
         // the control draws from the setting rather than its own click.
-        backend.withoutReview = Boolean(a[0]);
-        return backend.withoutReview;
+        backend.reviewFirst = Boolean(a[0]);
+        return backend.reviewFirst;
 
       case RESTRUCTURE:
         // Started, not answered. The real one returns as soon as the run is

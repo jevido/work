@@ -907,10 +907,16 @@ export class Workspace {
    *   named themselves with. Written to as well as read: an insert with a ref
    *   registers the id it got, so a later op in the same proposal can put
    *   something under a line that did not exist when the proposal was written.
-   * @returns false when the edit was refused, which the review reports as a
-   *   failed row rather than throwing out of a click handler.
+   * @returns the id of the node the op touched or created, and null when the
+   *   edit was refused -- which the review reports as a failed row rather than
+   *   throwing out of a click handler.
+   *
+   *   The id rather than a yes: four of these kinds mint a node, and Undo
+   *   cannot take back something it was never told the name of. An `insert`
+   *   only revealed its id when the proposal happened to give it a ref, which
+   *   is a thing Claude does when a later op needs it and not otherwise.
    */
-  applyProposed(op: ProposedOp, refs: Map<string, string>): boolean {
+  applyProposed(op: ProposedOp, refs: Map<string, string>): string | null {
     // Anything half-typed goes in first, so the proposal's ops carry higher
     // clocks than the edits they were written against -- see #settle.
     this.#settleAll();
@@ -921,72 +927,77 @@ export class Workspace {
     switch (op.kind) {
       case "set-text": {
         const node = real(op.node);
-        if (!findInTree(this.tree, node)) return false;
-        return this.#emit(this.#replica.setFields(node, { [FIELD_TEXT]: op.text }));
+        if (!findInTree(this.tree, node)) return null;
+        return this.#emit(this.#replica.setFields(node, { [FIELD_TEXT]: op.text })) ? node : null;
       }
 
       case "insert": {
         const parent = op.parent === "" ? "" : real(op.parent);
         const bounds = this.#slotIn(parent, op.after === null ? null : real(op.after));
-        if (!bounds) return false;
+        if (!bounds) return null;
         const id = newId();
         if (!this.#emit(this.#replica.create(id, parent, keyFor(bounds), { [FIELD_TEXT]: op.text }))) {
-          return false;
+          return null;
         }
         if (op.ref) refs.set(op.ref, id);
-        return true;
+        return id;
       }
 
       case "move": {
         const node = real(op.node);
         const parent = op.parent === "" ? "" : real(op.parent);
         const moving = findInTree(this.tree, node);
-        if (!moving) return false;
+        if (!moving) return null;
         // Refused rather than merged. A move into a node's own subtree is a
         // cycle, and the merge resolves a cycle by detaching the branch --
         // which on screen is lines vanishing. Review catches this before the
         // row can be ticked; this is the same answer at the last door, for a
         // document that changed between the check and the press.
-        if (parent === node) return false;
-        if (parent !== "" && findInTree(moving.children, parent)) return false;
+        if (parent === node) return null;
+        if (parent !== "" && findInTree(moving.children, parent)) return null;
         const bounds = this.#slotIn(parent, op.after === null ? null : real(op.after));
-        if (!bounds) return false;
-        return this.#emit(this.#replica.move(node, parent, keyFor(bounds)));
+        if (!bounds) return null;
+        return this.#emit(this.#replica.move(node, parent, keyFor(bounds))) ? node : null;
       }
 
-      case "delete":
-        return this.remove(real(op.node));
+      case "delete": {
+        const node = real(op.node);
+        return this.remove(node) ? node : null;
+      }
 
       case "promote":
-        return this.promote(real(op.node)) !== null;
+        return this.promote(real(op.node));
 
-      case "set-status":
-        return this.setTaskState(real(op.node), op.status);
+      case "set-status": {
+        const node = real(op.node);
+        return this.setTaskState(node, op.status) ? node : null;
+      }
       // The parts of a mindmap that are not the tree. Each goes through the
       // same methods a person's keystroke does, so a proposed link is applied
       // by exactly the code that applies a made one.
       case "link": {
-        return this.link(real(op.node), real(op.other)) !== null;
+        return this.link(real(op.node), real(op.other));
       }
 
       case "unlink": {
         const node = real(op.node);
         const other = real(op.other);
         const edge = this.linksOf(node).find((l) => l.other === other);
-        return edge ? this.unlink(edge.edge) : false;
+        if (!edge) return null;
+        return this.unlink(edge.edge) ? edge.edge : null;
       }
 
       case "group": {
         const node = real(op.node);
-        if (!findInTree(this.tree, node)) return false;
+        if (!findInTree(this.tree, node)) return null;
         if (op.region) {
           // A region that exists. One that does not is a proposal naming
           // something it was not shown, which is refused rather than invented.
           const region = real(op.region);
-          if (!this.graph.regions.has(region)) return false;
-          return this.#emit(this.#replica.setFields(node, { [FIELD_REGION]: region }));
+          if (!this.graph.regions.has(region)) return null;
+          return this.#emit(this.#replica.setFields(node, { [FIELD_REGION]: region })) ? region : null;
         }
-        return this.group(node, op.name ?? "") !== null;
+        return this.group(node, op.name ?? "");
       }
 
     }

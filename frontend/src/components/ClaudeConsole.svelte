@@ -12,6 +12,7 @@
     controls,
     clear,
     lead = null,
+    applied,
   }: {
     session: ClaudeSession;
     /**
@@ -40,6 +41,14 @@
      * saying nothing about who, which is better than being wrong about it.
      */
     lead?: { name: string } | null;
+    /**
+     * What Claude just changed on the map, and the way to take it back.
+     *
+     * A snippet rather than the component, because the console has no business
+     * knowing what a proposal is: it owns the strip between the transcript and
+     * the composer, and the app decides what goes in it.
+     */
+    applied?: Snippet;
   } = $props();
 
   /**
@@ -319,6 +328,11 @@
       {/if}
     {/each}
   </div>
+
+  <!-- Between the transcript and the composer: the last thing read before
+       whatever is typed next, which is where a thing that says "that just
+       happened, and here is the way back" belongs. -->
+  {#if applied}{@render applied()}{/if}
 
   <div class="composer">
     <textarea

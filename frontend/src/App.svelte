@@ -11,6 +11,7 @@
   import PermissionMenu from "./components/PermissionMenu.svelte";
   import PlanningList from "./components/PlanningList.svelte";
   import * as Workbench from "../bindings/dev.jevido/work/services/workbenchservice.js";
+  import ProposalApplied from "./components/ProposalApplied.svelte";
   import ProposalReview from "./components/ProposalReview.svelte";
   import ConflictNotes from "./components/ConflictNotes.svelte";
   import { Conflicts } from "./lib/workspace/conflicts.svelte";
@@ -306,15 +307,14 @@
   $effect(() => conflicts.listen());
 
   /*
-    The approval setting, read once when the window opens.
+    The review setting, read once when the window opens.
 
     Read rather than assumed, and read here rather than in Review, so that the
-    default in the class stays the safe one -- a Review built before this
-    resolves waits for approval, which is the right way round to be wrong.
+    default in the class stays the one somebody who has changed nothing gets.
   */
   $effect(() => {
-    Workbench.ApplyProposalsWithoutReview()
-      .then((without) => (proposals.withoutReview = without))
+    Workbench.ReviewProposalsFirst()
+      .then((first) => (proposals.reviewFirst = first))
       .catch(() => {});
   });
 
@@ -645,6 +645,9 @@
           {#snippet controls()}
             <PermissionMenu {permissions} />
             <SettingsMenu {config} review={proposals} {workspaces} />
+          {/snippet}
+          {#snippet applied()}
+            <ProposalApplied review={proposals} workspace={active} />
           {/snippet}
         </ClaudeConsole>
       </aside>

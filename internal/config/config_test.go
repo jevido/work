@@ -183,10 +183,10 @@ func TestUpdateKeepsWorkDir(t *testing.T) {
 	}
 }
 
-// The approval gate. Off unless somebody turned it off, and off is the answer
-// for a config written before the field existed -- which is why it is the zero
-// value rather than something a migration has to arrange.
-func TestApplyProposalsWithoutReviewDefaultsOff(t *testing.T) {
+// The review panel. Off unless somebody asks for it, and off for a config
+// written before the field existed -- which is why it is the zero value rather
+// than something a migration has to arrange.
+func TestReviewProposalsFirstDefaultsOff(t *testing.T) {
 	isolate(t)
 
 	t.Run("a first run", func(t *testing.T) {
@@ -194,8 +194,8 @@ func TestApplyProposalsWithoutReviewDefaultsOff(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Load: %v", err)
 		}
-		if c.ApplyProposalsWithoutReview {
-			t.Error("a fresh config skips the review panel")
+		if c.ReviewProposalsFirst {
+			t.Error("a fresh config waits in the review panel")
 		}
 	})
 
@@ -207,8 +207,8 @@ func TestApplyProposalsWithoutReviewDefaultsOff(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Load: %v", err)
 		}
-		if c.ApplyProposalsWithoutReview {
-			t.Error("an older config reads back as skipping the panel")
+		if c.ReviewProposalsFirst {
+			t.Error("an older config reads back as waiting")
 		}
 	})
 
@@ -216,26 +216,70 @@ func TestApplyProposalsWithoutReviewDefaultsOff(t *testing.T) {
 		// Both ways on purpose: a setting that only works in one direction is
 		// the usual bug here, and omitempty means the `false` write is the one
 		// that looks like nothing.
-		if err := Update(func(c *Config) { c.ApplyProposalsWithoutReview = true }); err != nil {
+		if err := Update(func(c *Config) { c.ReviewProposalsFirst = true }); err != nil {
 			t.Fatalf("Update: %v", err)
 		}
 		c, err := Load()
 		if err != nil {
 			t.Fatalf("Load: %v", err)
 		}
-		if !c.ApplyProposalsWithoutReview {
+		if !c.ReviewProposalsFirst {
 			t.Fatal("turning it on did not stick")
 		}
 
-		if err := Update(func(c *Config) { c.ApplyProposalsWithoutReview = false }); err != nil {
+		if err := Update(func(c *Config) { c.ReviewProposalsFirst = false }); err != nil {
 			t.Fatalf("Update: %v", err)
 		}
 		c, err = Load()
 		if err != nil {
 			t.Fatalf("Load: %v", err)
 		}
-		if c.ApplyProposalsWithoutReview {
+		if c.ReviewProposalsFirst {
 			t.Error("turning it off again did not stick")
 		}
 	})
+}
+
+// The question used to be asked the other way round. Somebody who answered it
+// keeps their answer; somebody who never saw it takes the new default.
+//
+// Absent and false have to be told apart for that, and `omitempty` writes them
+// as the same bytes -- which is why the old field is read back as a pointer.
+func TestTheOldWithoutReviewKeyIsHonoured(t *testing.T) {
+	yes, no := true, false
+
+	cases := []struct {
+		name string
+		old  *bool
+		want bool
+	}{
+		// Never saw the question: takes the new default, which is to apply.
+		{"absent", nil, false},
+		// Asked for changes to apply themselves, and still gets that.
+		{"explicitly true", &yes, false},
+		// Deliberately asked for the panel. Their panel must not disappear
+		// under them on an update, which is the whole reason for the pointer.
+		{"explicitly false", &no, true},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			isolate(t)
+			if err := Save(Config{Root: "/tmp/agents", ApplyProposalsWithoutReview: c.old}); err != nil {
+				t.Fatalf("Save: %v", err)
+			}
+			got, err := Load()
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if got.ReviewProposalsFirst != c.want {
+				t.Errorf("ReviewProposalsFirst = %v, want %v", got.ReviewProposalsFirst, c.want)
+			}
+			// And the old key is cleared, so the next Save writes only the new
+			// one and the file stops carrying both answers.
+			if got.ApplyProposalsWithoutReview != nil {
+				t.Error("the old key survived the load")
+			}
+		})
+	}
 }

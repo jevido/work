@@ -41,16 +41,28 @@ type Config struct {
 	// it has joined none. Nil is the ordinary case and the one Work has always
 	// had: no workspace means no server, no queue and no ops.
 	Workspace *Workspace `json:"workspace,omitempty"`
-	// ApplyProposalsWithoutReview skips the review panel when Claude proposes
-	// a restructuring, applying every row as it arrives.
+	// ReviewProposalsFirst holds Claude's restructurings in the review panel
+	// instead of applying them.
 	//
-	// Off by default, and the zero value is the default rather than a
-	// migration -- a config written before this field existed reads back as
-	// false, which is the safe answer and needs no code to arrange.
+	// Off by default: a proposal lands, the map moves, and one Undo takes it
+	// back. The panel is still there for anyone who wants to read every row
+	// before it happens.
 	//
 	// Local, not in the workspace: this is how one person wants to work, and
 	// syncing it would apply somebody else's patience to your machine.
-	ApplyProposalsWithoutReview bool `json:"applyProposalsWithoutReview,omitempty"`
+	ReviewProposalsFirst bool `json:"reviewProposalsFirst,omitempty"`
+
+	// ApplyProposalsWithoutReview is the old name for the opposite question,
+	// kept only so that an answer to it is not thrown away.
+	//
+	// A pointer, because absent and false are different answers here and
+	// `omitempty` writes them as the same bytes. Absent is a config written
+	// before any of this existed, and should take the new default. An explicit
+	// false is somebody who deliberately asked for the review panel, and their
+	// panel must not disappear under them on an update.
+	//
+	// Read by Load, folded into the field above, and cleared. Never written.
+	ApplyProposalsWithoutReview *bool `json:"applyProposalsWithoutReview,omitempty"`
 }
 
 // Workspace is a shared workbench: a server, an identity on it, and the local
@@ -247,6 +259,15 @@ func Load() (Config, error) {
 	var c Config
 	if err := json.Unmarshal(data, &c); err != nil {
 		return Config{}, fmt.Errorf("config: parse %s: %w", path, err)
+	}
+
+	// The question used to be asked the other way round. Somebody who answered
+	// it keeps their answer; somebody who never saw it takes the new default.
+	// Cleared here so the next Save writes only the new key and the old one
+	// leaves the file for good.
+	if c.ApplyProposalsWithoutReview != nil {
+		c.ReviewProposalsFirst = !*c.ApplyProposalsWithoutReview
+		c.ApplyProposalsWithoutReview = nil
 	}
 	return c, nil
 }

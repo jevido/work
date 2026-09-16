@@ -28,6 +28,13 @@
 import { Events } from "@wailsio/runtime";
 import { CLAUDE_TOOL, PROPOSE_TOOL } from "../bridge/events";
 import { findInTree, labelOf, TASK_STATE_LABELS, type Mode } from "./model";
+import {
+  blockedBecause,
+  inverseOf,
+  landed,
+  revert,
+  type Inverse,
+} from "./undo";
 import { readProposal, type Proposal, type ProposedOp } from "./proposal";
 import type { Workspace } from "./workspace.svelte";
 
@@ -46,12 +53,44 @@ export interface Row {
   blocked: Blocker;
 }
 
+/**
+ * What went in without being asked for, and how to take it back.
+ *
+ * The rows are in the order they were applied, because Undo runs them in
+ * reverse and reverse only means something if the order is the real one.
+ */
+export interface Applied {
+  summary: string;
+  /** What went in, in the words the row was described in. */
+  rows: { says: string; inverse: Inverse }[];
+  /** Rows of the proposal that did not go in at all. */
+  skipped: number;
+}
+
+/** What happened when Undo was pressed. */
+export interface UndoOutcome {
+  reversed: number;
+  /** What could not be taken back, and why, in the row's own words. */
+  kept: { says: string; why: string }[];
+  /** Of those, the deletions: the only ones nothing can ever fix. */
+  deleted: number;
+}
+
 /** What happened when Apply was pressed. Shown once, then cleared. */
 export interface Outcome {
   applied: number;
   skipped: number;
   /** Rows that were ticked and still would not go in. */
   failed: string[];
+  /**
+   * Of the applied rows, how many Undo will not be able to take back.
+   *
+   * Deletions, in practice: a tombstone is final in the merge whichever order
+   * it arrives in. Counted here so the sentence that announces the change can
+   * say so up front, rather than leaving somebody to find out by pressing Undo
+   * and reading an apology.
+   */
+  irreversible: number;
 }
 
 export class Review {
@@ -108,15 +147,24 @@ export class Review {
   /**
    * Whether a proposal applies itself instead of waiting.
    *
-   * Off by default, and set from the backend by App. The default is the point:
-   * this panel is the only approval gate the app has. When Claude edits files
-   * it writes to disk and the app only gets to look afterwards; here the app
-   * owns the write, so it can ask first.
+   * Off by default, and set from the backend by App.
    *
-   * The opt-out is for somebody who has watched it be right forty times and
-   * would rather the forty-first just happened.
+   * The default is the other way round from how it started, and the reason is
+   * Undo. This panel was the only approval gate the app had, because a
+   * proposal that had landed could not be taken back — a gate in front of
+   * something irreversible is worth a click on every single answer. A change
+   * that lands and can be put back in one press is not, and the panel is
+   * better as the thing somebody turns on when they want to read every row.
    */
-  withoutReview = $state(false);
+  reviewFirst = $state(false);
+
+  /**
+   * What went in, and how to take it back out.
+   *
+   * Null until something has been applied without being asked for. The bar in
+   * the console reads this; `undo` walks it backwards.
+   */
+  applied: Applied | null = $state.raw<Applied | null>(null);
 
   /**
    * Takes a proposal for a workspace.
@@ -126,6 +174,12 @@ export class Review {
    * Workspace the rest of the app has already replaced.
    */
   take(proposal: Proposal, workspace: Workspace): void {
+    // Whatever the last one did, this is not it. Deliberately not cleared by
+    // the document changing: Workspace.revision moves on a colleague's
+    // keystroke too, so expiring on that would let somebody else's edit three
+    // seconds later eat your Undo. The per-inverse staleness check is what
+    // handles a document that has moved, and it handles it precisely.
+    this.applied = null;
     this.proposal = proposal;
     this.workspaceId = workspace.id;
     this.mode = workspace.mode === "planning" ? "planning" : "idea";
@@ -136,21 +190,22 @@ export class Review {
     this.outcome = null;
     this.refused = null;
 
-    if (this.withoutReview) {
+    if (!this.reviewFirst) {
       // Through the same path Apply uses, deliberately. Going around it would
       // mean two ways of applying a proposal, and the second one would be the
       // one that drifts.
       const outcome = this.apply(workspace);
       // apply() sets `said` in the words of somebody who pressed a button.
       // Nobody pressed anything, so it is said again in words that explain why
-      // the outline just moved on its own.
+      // the map just moved on its own -- and name the way back.
       this.said =
-        `Claude changed ${outcome.applied} ${outcome.applied === 1 ? "line" : "lines"} in the outline, ` +
-        `applied without asking because that setting is on` +
-        (outcome.skipped > 0 ? `. ${outcome.skipped} could not be applied` : "") +
-        ".";
-      // Cleared, because there is nothing to review. The outcome stays on
-      // screen: it is the only record that anything happened.
+        `Claude changed ${outcome.applied} ${outcome.applied === 1 ? "line" : "lines"} on the map. ` +
+        (outcome.irreversible > 0
+          ? `${outcome.irreversible} of them cannot be undone. `
+          : "Undo is in the panel on the right. ") +
+        (outcome.skipped > 0 ? `${outcome.skipped} could not be applied.` : "");
+      // Cleared, because there is nothing to review. The applied bar stays on
+      // screen: it is the record that anything happened, and the way back.
       this.proposal = null;
       return;
     }
@@ -210,6 +265,9 @@ export class Review {
     this.#approved = {};
     this.outcome = null;
     this.refused = null;
+    // Not `applied`. Discarding is about the proposal on screen; something
+    // that already went in is not discardable, it is undoable, and taking the
+    // Undo away here would be the one button that loses the other one.
     this.said = "Suggestion discarded. Nothing was changed.";
   }
 
@@ -271,6 +329,7 @@ export class Review {
     /** Proposal-local ref to the id the document actually gave the node. */
     const refs = new Map<string, string>();
     const failed: string[] = [];
+    const undoable: { says: string; inverse: Inverse }[] = [];
     let applied = 0;
     let skipped = 0;
 
@@ -279,17 +338,35 @@ export class Review {
         skipped++;
         continue;
       }
+      // Planned before the op runs, because most inverses need the value the
+      // op is about to replace -- the text a line said, the region it was in,
+      // where among its siblings it sat. None of that survives the write.
+      const plan = inverseOf(row.op, workspace, (id) => refs.get(id) ?? id);
       const made = workspace.applyProposed(row.op, refs);
-      if (made) applied++;
-      else failed.push(row.says);
+      if (made !== null) {
+        applied++;
+        undoable.push({ says: row.says, inverse: landed(plan, made, workspace) });
+      } else {
+        failed.push(row.says);
+      }
     }
+
+    this.applied =
+      applied > 0
+        ? { summary: this.proposal?.summary ?? "", rows: undoable, skipped: skipped + failed.length }
+        : null;
 
     // Every row is unticked afterwards, so a second press cannot put the same
     // insert in twice. Applying is not idempotent -- an insert makes a new
     // node each time -- and the button is the kind people press again when
     // they are not sure it worked.
     this.setAll(false);
-    const outcome: Outcome = { applied, skipped, failed };
+    const outcome: Outcome = {
+      applied,
+      skipped,
+      failed,
+      irreversible: undoable.filter((row) => row.inverse.kind === "none").length,
+    };
     this.outcome = outcome;
     this.said =
       `Applied ${applied} ${applied === 1 ? "change" : "changes"}` +
@@ -297,6 +374,50 @@ export class Review {
       (failed.length > 0 ? `. ${failed.length} were refused by the document` : "") +
       ".";
     return outcome;
+  }
+
+  /**
+   * Puts back what was applied without being asked for.
+   *
+   * Backwards through the rows, and that is load-bearing rather than tidy: a
+   * proposal that inserts a heading and then moves three lines under it has to
+   * un-move the three before the heading is tombstoned, or they are left with
+   * a dead parent and land in `detached`.
+   *
+   * Each inverse is checked against the document as it now is before it runs.
+   * Somebody who has typed in a line since keeps their words -- putting the old
+   * ones back would be undoing their edit as well as Claude's, which is not
+   * what the button says.
+   */
+  undo(workspace: Workspace): UndoOutcome {
+    const record = this.applied;
+    if (!record) return { reversed: 0, kept: [], deleted: 0 };
+
+    const kept: { says: string; why: string }[] = [];
+    let reversed = 0;
+    let deleted = 0;
+
+    for (let at = record.rows.length - 1; at >= 0; at--) {
+      const row = record.rows[at];
+      const why = blockedBecause(row.inverse, workspace);
+      if (why !== null) {
+        kept.push({ says: row.says, why });
+        if (row.inverse.kind === "none") deleted++;
+        continue;
+      }
+      if (revert(row.inverse, workspace)) reversed++;
+      else kept.push({ says: row.says, why: "the document refused it" });
+    }
+
+    this.applied = null;
+    this.said =
+      `Put back ${reversed} ${reversed === 1 ? "change" : "changes"}` +
+      (deleted > 0
+        ? `. ${deleted} deleted ${deleted === 1 ? "line is" : "lines are"} gone for good`
+        : "") +
+      (kept.length > deleted ? `. ${kept.length - deleted} could not be put back` : "") +
+      ".";
+    return { reversed, kept, deleted };
   }
 
   /* ---------------------------------------------------------------------- */

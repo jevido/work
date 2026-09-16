@@ -23,23 +23,24 @@
   }
 
   /**
-   * Turning the approval gate off.
+   * Putting the review panel back in front of Claude's changes.
    *
-   * The wording is deliberate. Not "auto-apply", which sounds like a
-   * convenience: whoever reads "Apply Claude's changes without asking" should
-   * know what they are agreeing to, because this is the only gate the app has
-   * over a write it owns.
+   * Asked the other way round from how it used to be. The panel was the only
+   * gate this app had over a write it owns, and was worth a click on every
+   * answer for that; a change that lands and can be put back in one press is
+   * not, so the question is now "do you want to read every row first" rather
+   * than "may this happen without asking".
    */
   async function toggleReview(event: Event) {
     const wanted = (event.currentTarget as HTMLInputElement).checked;
     try {
       // Answered with what the backend now holds rather than assuming the
       // click won, the same way the permission toggle works.
-      review.withoutReview = await Workbench.SetApplyProposalsWithoutReview(wanted);
+      review.reviewFirst = await Workbench.SetReviewProposalsFirst(wanted);
     } catch {
       // Left where it was. A setting that looks changed and is not is worse
       // than one that refused to change.
-      review.withoutReview = await Workbench.ApplyProposalsWithoutReview();
+      review.reviewFirst = await Workbench.ReviewProposalsFirst();
     }
   }
 
@@ -144,16 +145,12 @@
       </button>
 
       <label class="toggle">
-        <input
-          type="checkbox"
-          checked={review.withoutReview}
-          onchange={toggleReview}
-        />
-        <span>Apply Claude's changes without asking</span>
+        <input type="checkbox" checked={review.reviewFirst} onchange={toggleReview} />
+        <span>Review Claude's changes before applying</span>
       </label>
       <p class="hint">
-        Off, a restructuring waits in a panel with a tick per row. On, it lands as soon as
-        it arrives.
+        Off, a change lands as it arrives and one Undo takes it back — except a deletion,
+        which nothing can. On, it waits in a panel with a tick per row.
       </p>
 
       {#if workspaces.cloud}

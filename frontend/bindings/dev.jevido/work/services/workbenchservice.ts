@@ -53,18 +53,6 @@ export function Agents(): $CancellablePromise<workbench$0.AgentStatus[] | null> 
 }
 
 /**
- * ApplyProposalsWithoutReview reports whether Claude's proposed restructurings
- * apply themselves.
- * 
- * Off by default. The panel is the only approval gate this app has -- when
- * Claude edits files it writes to disk and the app only gets to look
- * afterwards, but here the app owns the write, so it can ask first.
- */
-export function ApplyProposalsWithoutReview(): $CancellablePromise<boolean> {
-    return $Call.ByID(3713443955);
-}
-
-/**
  * ApplyWorkspaceEdits writes idea and planning edits into a tab's document and
  * hands back the merged result.
  * 
@@ -278,6 +266,18 @@ export function Revert(path: string): $CancellablePromise<void> {
 }
 
 /**
+ * ReviewProposalsFirst reports whether Claude's proposed restructurings wait in
+ * the review panel instead of applying themselves.
+ * 
+ * Off by default. The panel used to be the only approval gate this app had, and
+ * it was worth a click on every proposal for that reason; a change that lands
+ * and can be undone in one press does not need one in front of it.
+ */
+export function ReviewProposalsFirst(): $CancellablePromise<boolean> {
+    return $Call.ByID(3755246969);
+}
+
+/**
  * SaveNow sends what a held workspace has been keeping back, and answers with
  * where sync stands afterwards.
  * 
@@ -301,15 +301,6 @@ export function SelectConfigFolder(): $CancellablePromise<string> {
 }
 
 /**
- * SetApplyProposalsWithoutReview changes it, and answers with what the backend
- * now holds rather than nothing -- so the control draws from the setting
- * instead of assuming its own click won.
- */
-export function SetApplyProposalsWithoutReview(without: boolean): $CancellablePromise<boolean> {
-    return $Call.ByID(954902667, without);
-}
-
-/**
  * SetHoldPush decides whether this workspace pushes as it goes or waits for
  * Save. Per workspace, written down, and off by default.
  */
@@ -326,6 +317,15 @@ export function SetHoldPush(hold: boolean): $CancellablePromise<workbench$0.Stat
  */
 export function SetPermissionMode(mode: string): $CancellablePromise<$models.Permissions> {
     return $Call.ByID(3586272062, mode);
+}
+
+/**
+ * SetReviewProposalsFirst changes it, and answers with what the backend now
+ * holds rather than nothing -- so the control draws from the setting instead of
+ * assuming its own click won.
+ */
+export function SetReviewProposalsFirst(first: boolean): $CancellablePromise<boolean> {
+    return $Call.ByID(2332480481, first);
 }
 
 /**

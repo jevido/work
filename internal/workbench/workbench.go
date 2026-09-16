@@ -1082,26 +1082,31 @@ func (w *Workbench) SetPermissionMode(mode string) (claude.PermissionMode, error
 	return parsed, nil
 }
 
-// ApplyProposalsWithoutReview reports whether a proposal from Claude applies
-// itself instead of waiting in the review panel.
+// ReviewProposalsFirst reports whether a proposal from Claude waits in the
+// review panel instead of applying itself.
+//
+// Off by default, which is the opposite of how this question used to be asked.
+// The panel was the only gate there was, because a proposal that had landed
+// could not be taken back; Undo is what changed that, and a gate in front of
+// something reversible mostly costs a click per answer.
 //
 // Read from the config every time rather than cached: it is read once per
 // proposal, which is rare, and a cached copy is a copy that can disagree with
 // the file after a settings change that failed to write.
-func (w *Workbench) ApplyProposalsWithoutReview() bool {
+func (w *Workbench) ReviewProposalsFirst() bool {
 	cfg, err := config.Load()
 	if err != nil {
-		// Unreadable config means the safe answer, which is the default one:
-		// the panel is the only gate there is.
+		// Unreadable config takes the default, which is also the behaviour
+		// somebody who has never touched this gets.
 		return false
 	}
-	return cfg.ApplyProposalsWithoutReview
+	return cfg.ReviewProposalsFirst
 }
 
-// SetApplyProposalsWithoutReview turns the review panel off, or back on.
-func (w *Workbench) SetApplyProposalsWithoutReview(without bool) error {
+// SetReviewProposalsFirst turns the review panel on, or back off.
+func (w *Workbench) SetReviewProposalsFirst(first bool) error {
 	return config.Update(func(c *config.Config) {
-		c.ApplyProposalsWithoutReview = without
+		c.ReviewProposalsFirst = first
 	})
 }
 
