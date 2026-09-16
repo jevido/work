@@ -16,7 +16,17 @@
  * Polling is cheap because the document carries a strong ETag: an unchanged
  * document answers 304 with no body, and nothing here re-renders.
  */
-import { outlineNodes, planTasks, readDocument, type DocNode } from "./doc";
+import {
+  endsOf,
+  isEdge,
+  isRegion,
+  outlineNodes,
+  planTasks,
+  readDocument,
+  regionIdOf,
+  textOf,
+  type DocNode,
+} from "./doc";
 
 /** What the viewer is doing, in the words the status line uses. */
 export type Status = "starting" | "loading" | "live" | "offline" | "rejected" | "no-key";
@@ -65,6 +75,67 @@ export class Viewer {
 
   /** The outline: the tree without the tasks, which are the plan. */
   outline = $derived<DocNode[]>(outlineNodes(this.tree));
+
+  /**
+   * Links and regions, indexed once for the whole page.
+   *
+   * A mindmap is not a tree, and these are the parts of it that are not. The
+   * viewer shows them because somebody sent this link to somebody else to read,
+   * and a relationship nobody outside the desktop can see may as well not be in
+   * the document.
+   */
+  graph = $derived.by(() => {
+    const text = new Map<string, string>();
+    const alive = new Set<string>();
+    const regions = new Map<string, string>();
+    const regionOf = new Map<string, string>();
+    const links = new Map<string, { other: string; text: string; dangling: boolean }[]>();
+    const edges: { from: string; to: string }[] = [];
+
+    const walk = (nodes: readonly DocNode[]) => {
+      for (const node of nodes) {
+        alive.add(node.id);
+        text.set(node.id, textOf(node));
+        if (isEdge(node)) {
+          edges.push(endsOf(node));
+        } else if (isRegion(node)) {
+          regions.set(node.id, textOf(node));
+        } else {
+          const region = regionIdOf(node);
+          if (region) regionOf.set(node.id, region);
+        }
+        walk(node.children ?? []);
+      }
+    };
+    walk(this.tree);
+
+    // Both ends, because one relationship should not look like two different
+    // things depending on which row is being read.
+    const add = (from: string, to: string) => {
+      if (!from || !to || from === to) return;
+      const list = links.get(from) ?? [];
+      list.push({ other: to, text: text.get(to) ?? "a line that is gone", dangling: !alive.has(to) });
+      links.set(from, list);
+    };
+    for (const edge of edges) {
+      add(edge.from, edge.to);
+      add(edge.to, edge.from);
+    }
+
+    return { links, regions, regionOf };
+  });
+
+  /** The links touching a node. */
+  linksOf(id: string): { other: string; text: string; dangling: boolean }[] {
+    return this.graph.links.get(id) ?? [];
+  }
+
+  /** The region a node is in, or null. A deleted region is no region at all. */
+  regionOf(id: string): string | null {
+    const region = this.graph.regionOf.get(id);
+    if (!region) return null;
+    return this.graph.regions.get(region) ?? null;
+  }
 
   /** The plan, already in position order -- the merge sorted it. */
   tasks = $derived<DocNode[]>(planTasks(this.tree));

@@ -63,10 +63,13 @@ func StateBlock(doc Document, tab, mode string) string {
 		return "The workspace has no tab " + tab + ", so there is nothing to restructure."
 	}
 
+	g := readGraph(doc, tab)
 	if mode == ModePlanning {
-		return planBlock(doc, *root, tab)
+		return planBlock(doc, *root, tab, g)
 	}
-	return outlineBlock(*root)
+	return "The outline as it stands. The id is on the left; it is what an operation names.\n" +
+		"A `<->` is a link to another line; a `[in ...]` is the region it is in.\n\n" +
+		outlineBodyWith(*root, g)
 }
 
 // outlineBlock is the tree, indented, ids first.
@@ -82,6 +85,16 @@ func outlineBlock(root ops.TreeNode) string {
 // outlineBody is the lines alone, so planning mode can introduce them in its
 // own words rather than repeating a sentence the reader has just read.
 func outlineBody(root ops.TreeNode) string {
+	return outlineBodyWith(root, nil)
+}
+
+// outlineBodyWith renders the tree, and the relations on each line when there
+// is a graph to read them from.
+//
+// A model that cannot see a link cannot be asked to remove one, and cannot
+// avoid proposing one that is already there. The block is everything it is
+// allowed to name, so this belongs in it.
+func outlineBodyWith(root ops.TreeNode, g *graph) string {
 	// By what a node is, not by what it is not. "Everything except a task" was
 	// right when there were two types and became wrong the moment there were
 	// four -- an edge would have been rendered as a line with no text in it.
@@ -95,6 +108,21 @@ func outlineBody(root ops.TreeNode) string {
 		if task := fieldString(n.Node, ops.FieldTaskID); task != "" {
 			fmt.Fprintf(b, "  -> already a task, %s", task)
 		}
+		if g != nil {
+			if region := g.regionOf[n.ID]; region != "" && g.alive[region] {
+				fmt.Fprintf(b, "  [in %s, %s]", region, oneLine(g.text[region]))
+			}
+			for _, link := range g.linksFor(n.ID) {
+				if link.Dangling {
+					// Named even though the far end is gone: removing it is the
+					// only useful thing left to do with one, and a model that
+					// cannot see it cannot be asked to.
+					fmt.Fprintf(b, "  <-> %s (gone)", link.Other)
+					continue
+				}
+				fmt.Fprintf(b, "  <-> %s", link.Other)
+			}
+		}
 		b.WriteString("\n")
 	})
 
@@ -106,7 +134,7 @@ func outlineBody(root ops.TreeNode) string {
 }
 
 // planBlock is the tasks, in order, each with the idea it came from.
-func planBlock(doc Document, root ops.TreeNode, tab string) string {
+func planBlock(doc Document, root ops.TreeNode, tab string, g *graph) string {
 	tasks := tabTasks(doc, tab)
 
 	// The ideas, by id, so a task can name the one it came from in words
@@ -156,8 +184,9 @@ func planBlock(doc Document, root ops.TreeNode, tab string) string {
 	// The outline underneath the plan, because "break this region into tasks"
 	// is a question about the outline that answers in tasks. Without it the
 	// model has ids for tasks and none for the ideas it is meant to read.
-	b.WriteString("\nThe outline those tasks came out of. The id is on the left; it is what an\noperation names.\n\n")
-	b.WriteString(outlineBody(root))
+	b.WriteString("\nThe outline those tasks came out of. The id is on the left; it is what an\n" +
+		"operation names. A `<->` is a link to another line; a `[in ...]` is the region\nit is in.\n\n")
+	b.WriteString(outlineBodyWith(root, g))
 	return b.String()
 }
 

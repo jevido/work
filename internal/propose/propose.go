@@ -259,7 +259,10 @@ Operations:
 - move: re-parent a node and place it below "after".
 - delete: remove a node. Its descendants go with it.
 - promote: add an existing idea to the plan as a task, keeping the link back to the idea.
-- set-status: mark a task todo, doing or done.`
+- set-status: mark a task todo, doing or done.
+- link: draw a link between two lines that are not parent and child. This is how the map says two ideas relate when the tree cannot, because neither is under the other.
+- unlink: remove a link between two lines.
+- group: gather a line into a region, which is a named set. Give "region" the id of a region that exists, or "name" to make a new one. A line is in one region at a time.`
 
 // inputSchema mirrors ProposedOp in frontend/src/lib/workspace/proposal.ts. The
 // two are checked against each other by a test in that file's own suite and by
@@ -341,6 +344,37 @@ const inputSchema = `{
               "kind": {"const": "set-status"},
               "node": {"type": "string", "maxLength": 128},
               "status": {"enum": ["todo", "doing", "done"]}
+            }
+          },
+          {
+            "type": "object",
+            "required": ["kind", "node", "other"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {"const": "link"},
+              "node": {"type": "string", "maxLength": 128},
+              "other": {"type": "string", "maxLength": 128, "description": "The line at the other end. Not a parent or a child of node -- the tree already says that."}
+            }
+          },
+          {
+            "type": "object",
+            "required": ["kind", "node", "other"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {"const": "unlink"},
+              "node": {"type": "string", "maxLength": 128},
+              "other": {"type": "string", "maxLength": 128}
+            }
+          },
+          {
+            "type": "object",
+            "required": ["kind", "node"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {"const": "group"},
+              "node": {"type": "string", "maxLength": 128},
+              "region": {"type": "string", "maxLength": 128, "description": "A region that already exists, to add this line to."},
+              "name": {"type": "string", "maxLength": 2000, "description": "A name for a new region, when there is no region to name."}
             }
           }
         ]

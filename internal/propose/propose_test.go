@@ -176,9 +176,13 @@ func TestSchemaMatchesTheParser(t *testing.T) {
 	}
 
 	// Every kind proposal.ts can read, and no kind it cannot.
+	// Every kind proposal.ts can read. When one is added on either side this
+	// test is what says the other has not caught up -- which is the whole
+	// reason it compares a list rather than counting branches.
 	want := map[string]bool{
 		"set-text": false, "insert": false, "move": false,
 		"delete": false, "promote": false, "set-status": false,
+		"link": false, "unlink": false, "group": false,
 	}
 	for _, branch := range schema.Properties.Ops.Items.OneOf {
 		raw, has := branch.Properties["kind"]

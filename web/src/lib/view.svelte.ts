@@ -15,7 +15,28 @@
 import { createContext } from "svelte";
 import { isCollapsed, type DocNode } from "./doc";
 
+/**
+ * What a row needs to know about the parts of the map that are not the tree.
+ *
+ * Supplied by App from the Viewer, because OutlineBranch recurses into itself
+ * and threading it as a prop would mean passing it through every level for the
+ * benefit of the rows that happen to have a relation.
+ */
+export interface Relations {
+  tree: readonly DocNode[];
+  linksOf(id: string): { other: string; text: string; dangling: boolean }[];
+  regionOf(id: string): string | null;
+}
+
 export class ViewState {
+  /** Set once by App. Empty until then, which is what a first paint sees. */
+  relations: Relations = { tree: [], linksOf: () => [], regionOf: () => null };
+
+  /** Scrolls to a line and marks it, the way the plan's link to an idea does. */
+  reveal(id: string): void {
+    this.jumpTo(this.relations.tree, id);
+  }
+
   /** Branches this reader has opened, over the document's own folds. */
   #opened = $state<Record<string, true>>({});
   /** Branches this reader has closed that the document has open. */

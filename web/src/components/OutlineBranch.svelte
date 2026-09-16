@@ -72,6 +72,33 @@
         {/if}
       </div>
 
+      <!--
+        What this line points at, and what it is grouped with. Shown because
+        somebody sent this link to somebody else to read -- a relationship
+        nobody outside the desktop can see may as well not be in the document.
+
+        Read-only like everything here: following a link scrolls to the line,
+        it does not navigate. This page has no routes and does not want any.
+      -->
+      {#if view.relations.linksOf(node.id).length > 0 || view.relations.regionOf(node.id)}
+        <p class="relations">
+          {#if view.relations.regionOf(node.id)}
+            <span class="region">in {view.relations.regionOf(node.id)}</span>
+          {/if}
+          {#each view.relations.linksOf(node.id) as relation (relation.other)}
+            {#if relation.dangling}
+              <!-- Still worth showing: it says what it linked, which is more
+                   than the line it pointed at can say for itself. -->
+              <span class="link dangling">was linked to &ldquo;{relation.text}&rdquo;</span>
+            {:else}
+              <button class="link" onclick={() => view.reveal(relation.other)}>
+                links to &ldquo;{relation.text}&rdquo;
+              </button>
+            {/if}
+          {/each}
+        </p>
+      {/if}
+
       {#if open && node.children.length > 0}
         <Self nodes={node.children} depth={depth + 1} />
       {/if}
@@ -190,5 +217,35 @@
   button:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 1px;
+  }
+
+  .relations {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 0 0 2px 1.6rem;
+    font-size: 0.78rem;
+    color: var(--muted);
+  }
+
+  .region {
+    padding: 0 6px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+  }
+
+  button.link {
+    padding: 0;
+    border: none;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  .link.dangling {
+    opacity: 0.65;
   }
 </style>

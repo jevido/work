@@ -14,6 +14,11 @@
 
   const viewer = new Viewer();
   const view = new ViewState();
+  // Where a row goes for the parts of the map that are not the tree. Assigned
+  // rather than passed, because OutlineBranch recurses into itself and a prop
+  // would have to be threaded through every level for the sake of the rows that
+  // happen to have a link on them.
+  view.relations = viewer;
   setView(view);
 
   /** What somebody typed into the "paste a link" field. */

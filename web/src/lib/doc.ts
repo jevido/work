@@ -110,6 +110,22 @@ const FIELD_COLLAPSED = "collapsed";
 const FIELD_STATUS = "status";
 /** Reserved by the protocol: the two ends of an extraction. */
 const FIELD_EXTRACTED_FROM = "extractedFrom";
+/** The two ends of a link, and the region a node is in. */
+const FIELD_FROM = "from";
+const FIELD_TO = "to";
+const FIELD_REGION = "region";
+
+/**
+ * The four kinds of node one document holds.
+ *
+ * An edge and a region are nodes rather than new op kinds, which is what makes
+ * them safe for a viewer to meet: a build of this page made before they existed
+ * shows an unrecognised node as nothing at all. Keep that for anything it still
+ * does not know -- the next type will arrive the same way.
+ */
+const TYPE_TASK = "task";
+const TYPE_EDGE = "edge";
+const TYPE_REGION = "region";
 
 export type TaskState = "todo" | "doing" | "done";
 
@@ -125,7 +141,43 @@ export function textOf(node: DocNode | null | undefined): string {
 }
 
 export function isTask(node: DocNode): boolean {
-  return node.fields[FIELD_TYPE] === "task";
+  return node.fields[FIELD_TYPE] === TYPE_TASK;
+}
+
+export function isEdge(node: DocNode): boolean {
+  return node.fields[FIELD_TYPE] === TYPE_EDGE;
+}
+
+export function isRegion(node: DocNode): boolean {
+  return node.fields[FIELD_TYPE] === TYPE_REGION;
+}
+
+/**
+ * Whether a node is a line the outline draws.
+ *
+ * By what it is, not by what it is not. "Everything except a task" was right
+ * when there were two types and became wrong the moment there were four --
+ * silently, with an edge rendered as a line with no text in it.
+ */
+export function isOutlineNode(node: DocNode): boolean {
+  const type = node.fields[FIELD_TYPE];
+  return type === undefined || type === "idea";
+}
+
+/** The region a node says it is in, if any. */
+export function regionIdOf(node: DocNode): string | null {
+  const value = node.fields[FIELD_REGION];
+  return typeof value === "string" && value !== "" ? value : null;
+}
+
+/** The two ends of an edge. */
+export function endsOf(node: DocNode): { from: string; to: string } {
+  const from = node.fields[FIELD_FROM];
+  const to = node.fields[FIELD_TO];
+  return {
+    from: typeof from === "string" ? from : "",
+    to: typeof to === "string" ? to : "",
+  };
 }
 
 export function isCollapsed(node: DocNode): boolean {
@@ -163,7 +215,7 @@ export function labelOf(node: DocNode | null | undefined, limit = 60): string {
 
 /** The outline: everything that is not a task. */
 export function outlineNodes(tree: readonly DocNode[]): DocNode[] {
-  return tree.filter((n) => !isTask(n));
+  return tree.filter(isOutlineNode);
 }
 
 /**

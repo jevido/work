@@ -797,6 +797,33 @@ export class Workspace {
 
       case "set-status":
         return this.setTaskState(real(op.node), op.status);
+      // The parts of a mindmap that are not the tree. Each goes through the
+      // same methods a person's keystroke does, so a proposed link is applied
+      // by exactly the code that applies a made one.
+      case "link": {
+        return this.link(real(op.node), real(op.other)) !== null;
+      }
+
+      case "unlink": {
+        const node = real(op.node);
+        const other = real(op.other);
+        const edge = this.linksOf(node).find((l) => l.other === other);
+        return edge ? this.unlink(edge.edge) : false;
+      }
+
+      case "group": {
+        const node = real(op.node);
+        if (!findInTree(this.tree, node)) return false;
+        if (op.region) {
+          // A region that exists. One that does not is a proposal naming
+          // something it was not shown, which is refused rather than invented.
+          const region = real(op.region);
+          if (!this.graph.regions.has(region)) return false;
+          return this.#emit(this.#replica.setFields(node, { [FIELD_REGION]: region }));
+        }
+        return this.group(node, op.name ?? "") !== null;
+      }
+
     }
   }
 

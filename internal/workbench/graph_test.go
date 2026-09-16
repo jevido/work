@@ -106,9 +106,15 @@ func TestRegionsAreMembershipOnMembers(t *testing.T) {
 	}
 
 	t.Run("a region is not a line in the outline", func(t *testing.T) {
+		// Its name appears beside the lines that are in it, which is the point
+		// of showing it at all. What must not appear is the region as a line of
+		// its own -- "r1  Networking" in the id-first column.
 		block := StateBlock(w.WorkspaceDocument(), tab, ModeIdea)
-		if contains(block, "Networking") {
-			t.Errorf("the region is in the outline:\n%s", block)
+		if contains(block, "r1  Networking") {
+			t.Errorf("the region is a line in the outline:\n%s", block)
+		}
+		if !contains(block, "[in r1, Networking]") {
+			t.Errorf("a member does not say which region it is in:\n%s", block)
 		}
 	})
 
@@ -155,4 +161,42 @@ func TestTwoPeopleAddToOneRegion(t *testing.T) {
 
 func contains(haystack, needle string) bool {
 	return len(needle) > 0 && len(haystack) >= len(needle) && containsSub(haystack, needle)
+}
+
+// A link on the line it belongs to, in the block Claude reads. A model that
+// cannot see a link cannot be asked to remove one, and cannot avoid proposing
+// one that is already there.
+func TestStateBlockShowsRelations(t *testing.T) {
+	w, tab := joinedWorkbench(t, newFakeOps())
+	if _, err := w.ApplyEdits(tab, []Edit{
+		{Kind: "create-node", Node: "a", Fields: map[string]any{FieldType: TypeIdea, FieldText: "a static handler"}},
+		{Kind: "create-node", Node: "b", Fields: map[string]any{FieldType: TypeIdea, FieldText: "where the files come from"}},
+		link("a", "b"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	block := StateBlock(w.WorkspaceDocument(), tab, ModeIdea)
+	if !contains(block, "a  a static handler  <-> b") {
+		t.Errorf("the link is not on the line:\n%s", block)
+	}
+	if !contains(block, "b  where the files come from  <-> a") {
+		t.Errorf("the link is not on the other line:\n%s", block)
+	}
+	// And the notation is explained, because a model reading `<->` with no
+	// legend is a model guessing.
+	if !contains(block, "`<->` is a link") {
+		t.Errorf("the block does not say what the notation means:\n%s", block)
+	}
+
+	t.Run("a dangling link is still named", func(t *testing.T) {
+		// Removing it is the only useful thing left to do with one.
+		if _, err := w.ApplyEdits(tab, []Edit{{Kind: "delete-node", Node: "b"}}); err != nil {
+			t.Fatal(err)
+		}
+		block := StateBlock(w.WorkspaceDocument(), tab, ModeIdea)
+		if !contains(block, "<-> b (gone)") {
+			t.Errorf("a dangling link is not shown:\n%s", block)
+		}
+	})
 }

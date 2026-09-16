@@ -323,6 +323,27 @@ export class Review {
           ? null
           : "that task is not on the plan any more";
 
+      case "link":
+        if (!known(op.node) || !known(op.other)) return gone;
+        if (op.node === op.other) return "a line cannot link to itself";
+        return workspace.linksOf(op.node).some((l) => l.other === op.other)
+          ? "those two are already linked"
+          : null;
+
+      case "unlink":
+        return workspace.linksOf(op.node).some((l) => l.other === op.other)
+          ? null
+          : "those two are not linked";
+
+      case "group":
+        if (!known(op.node)) return gone;
+        // A region it was not shown is a region it invented, and an invented
+        // one is refused rather than made under a name nobody chose.
+        if (op.region && !workspace.graph.regions.has(op.region)) {
+          return "that region does not exist";
+        }
+        return null;
+
       case "insert": {
         if (op.parent !== "" && !known(op.parent)) return "the line it goes under is gone";
         if (op.after !== null && !known(op.after)) return "the line it goes after is gone";
@@ -414,6 +435,17 @@ export function describe(op: ProposedOp, workspace: Workspace, proposal: Proposa
 
     case "promote":
       return `Add ${name(op.node)} to the plan as a task`;
+
+    case "link":
+      return `Link ${name(op.node)} and ${name(op.other)}`;
+
+    case "unlink":
+      return `Unlink ${name(op.node)} from ${name(op.other)}`;
+
+    case "group":
+      return op.region
+        ? `Put ${name(op.node)} in the region “${clip(workspace.graph.regions.get(op.region) ?? "", 40)}”`
+        : `Group ${name(op.node)} and everything under it into a new region “${clip(op.name ?? "", 40)}”`;
 
     case "set-status":
       return `Mark ${name(op.node)} as ${TASK_STATE_LABELS[op.status].toLowerCase()}`;

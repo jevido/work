@@ -65,7 +65,10 @@ export type ProposedOp =
   | { kind: "move"; node: string; parent: string; after: string | null }
   | { kind: "delete"; node: string }
   | { kind: "promote"; node: string }
-  | { kind: "set-status"; node: string; status: TaskState };
+  | { kind: "set-status"; node: string; status: TaskState }
+  | { kind: "link"; node: string; other: string }
+  | { kind: "unlink"; node: string; other: string }
+  | { kind: "group"; node: string; region?: string; name?: string };
 
 export interface Proposal {
   /** One line saying what the whole set is for. Claude's words, shown as-is. */
@@ -197,6 +200,25 @@ function readOp(value: unknown, at: number, refs: Set<string>): ProposedOp {
         );
       }
       return { kind, node: id(r.node, at, "node"), status: status as TaskState };
+    }
+
+    case "link":
+    case "unlink":
+      return { kind, node: id(r.node, at, "node"), other: id(r.other, at, "other") };
+
+    case "group": {
+      // One or the other: a region that exists, or a name for a new one. Both
+      // at once is a proposal that has not decided what it means, and guessing
+      // which half to honour is how a line ends up in a region nobody asked
+      // for.
+      const region = r.region === undefined ? undefined : id(r.region, at, "region");
+      const name = r.name === undefined ? undefined : text(r.name, at);
+      if ((region === undefined) === (name === undefined)) {
+        throw new ProposalError(
+          `op ${at}: a group names either a region that exists or a name for a new one, not both and not neither`,
+        );
+      }
+      return { kind, node: id(r.node, at, "node"), region, name };
     }
 
     default:

@@ -1213,6 +1213,32 @@ async function run() {
     outlineLines().join(" | ").slice(0, 90),
   );
 
+  // A proposal can make them too, and reads as English when it does.
+  V().propose({
+    summary: "Relate the two handlers.",
+    ops: [
+      { kind: "link", node: nodeIds()[0], other: nodeIds()[1] },
+      { kind: "group", node: nodeIds()[2], name: "Storage" },
+    ],
+  });
+  await settle(20);
+
+  const proposedRows = () => $$("section.review ol li").map((el) => el.textContent ?? "").join(" | ");
+  check("a proposal can link and group", !!$("section.review"), proposedRows().slice(0, 100));
+  check("and says so in English", proposedRows().includes("Link"), proposedRows().slice(0, 100));
+  check("naming the region it would make", proposedRows().includes("Storage"));
+
+  const applyIt = () =>
+    $$<HTMLButtonElement>("section.review footer button").find((b) =>
+      (b.textContent ?? "").startsWith("Apply"),
+    ) ?? null;
+  applyIt()?.click();
+  await settle(20);
+  check(
+    "applying a proposed link puts it on the row",
+    $$("p.relations").map((el) => el.textContent ?? "").join(" ").includes("links to"),
+  );
+
 }
 
 run()
