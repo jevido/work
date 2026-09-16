@@ -1,6 +1,13 @@
 # Runs the tests, on every push, for both Go modules in this repository, and
 # typechecks the two frontends against the Go they call.
 #
+# It does not deploy, and should not be given the job back. Coolify deploys
+# work.jevido.app from a webhook on push, which is where that lives. A deploy
+# job was here and was removed: it needed COOLIFY_URL and COOLIFY_TOKEN, this
+# repository has no secrets, and so it failed on its first step every run --
+# turning the whole workflow red over a rollout that had already happened
+# somewhere else.
+#
 # There are two Go modules, and that is the whole reason this file exists.
 # `server/` is a nested module, so the root module's `./...` does not see it:
 # every server test — including the ones behind work.jevido.app — had never run
@@ -31,10 +38,7 @@
 name: ci
 
 on:
-  # A deploy with nothing to deploy: re-runs the checks and then pushes the
-  # current main to Coolify. This is the way back from a deploy that failed for
-  # a reason outside this repository — a full disk, a registry timeout — without
-  # having to invent a commit.
+  # Re-runs the checks on demand, without having to invent a commit.
   workflow_dispatch:
 
   push:
@@ -411,226 +415,3 @@ jobs:
           npm run check
           npm run build
         working-directory: web
-
-  deploy:
-    name: deploy the sync server
-    # All three, because the image contains all three's output now: the
-    # Dockerfile's site stage builds web/ into /srv/site, so a viewer that does
-    # not typecheck is a deploy that fails in the builder. Better to learn that
-    # from the job whose name says "frontend" than from a rollout log.
-    #
-    # This comment used to say the opposite, and was right when it was written:
-    # the image held the binary and nothing else.
-    needs: [desktop, server, frontend]
-    runs-on: ubuntu-24.04
-    # Never from a fork, and never from a branch: Coolify builds the branch its
-    # own resource is configured for, so a deploy triggered by any other branch
-    # would build something other than what was just tested. The guard below
-    # checks that claim against the API rather than assuming it.
-    if: >-
-      github.repository == 'jevido/work'
-      && (github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
-    concurrency:
-      # Not the ci-${{ github.ref }} group above: that one cancels in progress,
-      # and a cancelled deploy is a half-finished rollout. Deploys queue.
-      group: deploy-sync-server
-      cancel-in-progress: false
-    env:
-      # The Coolify resource for work.jevido.app: a "Docker Compose" app built
-      # from this repository's own docker-compose.yml, with the domain held in
-      # the resource rather than in the file. Not a secret -- it identifies a
-      # resource and authorises nothing -- and hardcoded rather than hidden so
-      # this workflow says what it deploys.
-      RESOURCE: ecybnfgoyf5aytbefsf9mkot
-      COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
-      COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # The whole history, because the path filter below diffs the *push*
-          # and a push can carry any number of commits. A shallow clone was
-          # the first version of this and it was wrong: HEAD^..HEAD sees only
-          # the last commit, so a server change in an earlier commit of the
-          # same push would be tested and then not deployed.
-          fetch-depth: 0
-
-      - name: Check the credentials are here
-        # Loudly, and before anything else. A missing secret on this
-        # repository's main is a broken deploy pipeline, and the failure mode
-        # worth avoiding is the one where it looks like a successful run that
-        # simply chose not to deploy.
-        run: |
-          set -euo pipefail
-          test -n "${COOLIFY_URL:-}" || { echo "::error::COOLIFY_URL is not set"; exit 1; }
-          test -n "${COOLIFY_TOKEN:-}" || { echo "::error::COOLIFY_TOKEN is not set"; exit 1; }
-
-      - name: Decide whether anything the server runs actually changed
-        id: scope
-        # The image build runs `go test ./...` inside it, so a deploy is not
-        # free: it is a rebuild plus a rollout. A commit that only touched the
-        # frontend produces a byte-identical server, and redeploying it
-        # restarts a healthy service for nothing.
-        #
-        # The paths are exactly what the Dockerfile copies, plus the two files
-        # that describe the deployment itself. A manual run skips the question.
-        run: |
-          set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "reason=manual run" >> "$GITHUB_OUTPUT"
-            echo "deploy=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # The whole push, not the last commit of it. A branch's first push
-          # reports an all-zero "before", which has nothing to diff against:
-          # that deploys, because it cannot be shown not to need to.
-          before=${{ github.event.before }}
-          if [ -z "$before" ] || [ "$before" = "0000000000000000000000000000000000000000" ]; then
-            echo "reason=no previous commit to compare against" >> "$GITHUB_OUTPUT"
-            echo "deploy=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          changed=$(git diff --name-only "$before" "${{ github.sha }}" -- \
-            server/ internal/ops/ go.mod go.sum Dockerfile .dockerignore \
-            docker-compose.yml web/)
-          if [ -z "$changed" ]; then
-            echo "deploy=false" >> "$GITHUB_OUTPUT"
-            echo "Nothing the server is built from changed; not redeploying." \
-              >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          echo "deploy=true" >> "$GITHUB_OUTPUT"
-          {
-            echo "### deploy"
-            echo
-            echo "Triggered by changes to:"
-            echo '```'
-            echo "$changed"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Check Coolify builds the branch that was just tested
-        if: steps.scope.outputs.deploy == 'true'
-        # The one failure this pipeline can have that looks like a success.
-        # Coolify's deploy endpoint takes a resource, not a commit: it builds
-        # whatever branch the resource is configured for. So if the resource
-        # still points at a feature branch, a green run on main would deploy
-        # that feature branch and report a successful deploy of main.
-        #
-        # At the time of writing the resource tracks `sync-layer`, which is
-        # correct while that branch is what is being deployed and has to be
-        # changed to `main` when it merges. This step is what makes forgetting
-        # that loud.
-        run: |
-          set -euo pipefail
-          app=$(curl --fail --silent --show-error \
-            -H "Authorization: Bearer $COOLIFY_TOKEN" \
-            "$COOLIFY_URL/api/v1/applications/$RESOURCE")
-          branch=$(echo "$app" | jq -r '.git_branch')
-          echo "Coolify builds $(echo "$app" | jq -r '.git_repository')@$branch"
-          if [ "$branch" != "${{ github.ref_name }}" ]; then
-            echo "::error::the Coolify resource builds '$branch' but this run tested '${{ github.ref_name }}'; point the resource at '${{ github.ref_name }}' or deploy from '$branch'"
-            exit 1
-          fi
-
-      - name: Deploy
-        id: deploy
-        if: steps.scope.outputs.deploy == 'true'
-        run: |
-          set -euo pipefail
-          started=$(curl --fail --silent --show-error \
-            -H "Authorization: Bearer $COOLIFY_TOKEN" \
-            "$COOLIFY_URL/api/v1/deploy?uuid=$RESOURCE")
-          echo "$started" | jq .
-          uuid=$(echo "$started" | jq -r '.deployments[0].deployment_uuid // empty')
-          test -n "$uuid" || {
-            echo "::error::Coolify accepted the request without queueing a deployment"
-            exit 1
-          }
-          echo "deployment=$uuid" >> "$GITHUB_OUTPUT"
-
-      - name: Wait for the rollout
-        if: steps.deploy.outputs.deployment != ''
-        # Triggering a deploy and calling that a success is how a broken image
-        # gets reported as shipped. Coolify's own rollout waits for the compose
-        # healthcheck -- which does a database round trip, see the Dockerfile --
-        # so "finished" here means the new container served a real request.
-        #
-        # The timeout is generous because the build runs the server's tests
-        # inside it, and tight enough that a wedged deploy does not hold a
-        # runner for an hour.
-        run: |
-          set -euo pipefail
-          uuid=${{ steps.deploy.outputs.deployment }}
-          deadline=$(( $(date +%s) + 900 ))
-          while :; do
-            body=$(curl --fail --silent --show-error \
-              -H "Authorization: Bearer $COOLIFY_TOKEN" \
-              "$COOLIFY_URL/api/v1/deployments/$uuid")
-            status=$(echo "$body" | jq -r '.status')
-            case "$status" in
-              finished)
-                echo "deployment $uuid finished."
-                exit 0
-                ;;
-              failed|cancelled-by-user)
-                echo "::error::deployment $uuid ended as $status"
-                # The log is the useful part of a failure and is the reason
-                # this prints the body rather than only the status.
-                echo "$body" | jq -r '.logs // empty' | tail -n 80
-                exit 1
-                ;;
-            esac
-            if [ "$(date +%s)" -ge "$deadline" ]; then
-              echo "::error::deployment $uuid was still '$status' after 15 minutes"
-              exit 1
-            fi
-            sleep 10
-          done
-
-      - name: Check work.jevido.app is serving
-        if: steps.deploy.outputs.deployment != ''
-        # From outside, through the proxy. Coolify's rollout has already
-        # checked the container from inside; this checks the thing a desktop
-        # app and a browser actually reach, which is the pair of them plus the
-        # certificate and the route.
-        #
-        # Three assertions, and the last two are the important ones. The root
-        # is a static handler mounted in front of a JSON API: mounting it
-        # wrongly does not break the page, it breaks the API, and it breaks it
-        # by answering 200 and HTML to a client that parses JSON. A check that
-        # only asks for the page would pass through exactly that failure.
-        run: |
-          set -euo pipefail
-          base=https://work.jevido.app
-
-          # Health first, and with retries: it is the one that says the new
-          # container is up at all, and everything below assumes it is.
-          for attempt in 1 2 3 4 5 6; do
-            if body=$(curl --fail --silent --show-error --max-time 10 "$base/v1/health"); then
-              echo "$body"
-              echo "- health: \`$body\`" >> "$GITHUB_STEP_SUMMARY"
-              break
-            fi
-            if [ "$attempt" = 6 ]; then
-              echo "::error::$base/v1/health did not answer after the rollout"
-              exit 1
-            fi
-            echo "attempt $attempt: not serving yet"
-            sleep 10
-          done
-
-          # The page. `<div id="app"` is what web/index.html mounts into --
-          # re-check that line if this ever fails on a page that looks fine in
-          # a browser.
-          code=$(curl --silent --show-error --max-time 10 --location \
-            -o /tmp/index.html -w '%{http_code}' "$base/")
-          test "$code" = "200" || { echo "::error::GET / answered $code"; exit 1; }
-          grep -q '<div id="app"' /tmp/index.html \
-            || { echo "::error::GET / did not return the viewer's page"; exit 1; }
-          echo "- viewer: served at \`/\`" >> "$GITHUB_STEP_SUMMARY"
-
-          # And an unknown API path, which must still be JSON and still be 404.
-          nope=$(curl --silent --max-time 10 -o /tmp/nope.json -w '%{http_code}' "$base/v1/nope")
-          test "$nope" = "404" || { echo "::error::GET /v1/nope answered $nope, want 404"; exit 1; }
-          grep -q '"not_found"' /tmp/nope.json \
-            || { echo "::error::an unknown API path is not answering the JSON error shape"; exit 1; }
