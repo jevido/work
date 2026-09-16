@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -40,6 +41,7 @@ type fakeOps struct {
 	seen map[string]bool
 
 	pushes int
+	minted int
 }
 
 func newFakeOps() *fakeOps { return &fakeOps{seen: map[string]bool{}} }
@@ -63,6 +65,20 @@ func (f *fakeOps) Meta(_ context.Context, _, key string) (Meta, error) {
 		return Meta{}, errOffline
 	}
 	return Meta{Workspace: Workspace{ID: "ws_test", Name: "test"}, Access: "write"}, nil
+}
+
+func (f *fakeOps) Mint(_ context.Context, _, _, access string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.down {
+		return "", errOffline
+	}
+	f.minted++
+	prefix := "rk_"
+	if access == "write" {
+		prefix = "wk_"
+	}
+	return fmt.Sprintf("%sminted%d", prefix, f.minted), nil
 }
 
 func (f *fakeOps) Push(_ context.Context, _, _ string, batch []ops.Op) (PushResult, error) {
@@ -761,5 +777,35 @@ func TestPushBatchesStayUnderTheBodyLimit(t *testing.T) {
 	// refused anything unsendable.
 	if got := len(fitBatch(batch[:1], 1)); got != 1 {
 		t.Fatalf("fitBatch dropped a lone op, returning %d", got)
+	}
+}
+
+// The journal may only be discarded when everything in it is also somewhere
+// else, and the outbox holds the ops that are not. Compacting with a non-empty
+// outbox leaves those ops in one file -- the one file here that is allowed to
+// drop things, once it hits maxOutbox -- so a compaction followed by an
+// overflow loses them from the document, not merely from the server.
+//
+// Unreachable today because the outbox drains every few seconds. It stops
+// being unreachable the moment pushing is held for a Save.
+func TestJournalIsNotCompactedWhileTheOutboxHasOps(t *testing.T) {
+	cases := []struct {
+		name    string
+		full    bool
+		pending int
+		want    bool
+	}{
+		{"a full journal and nothing unsent", true, 0, true},
+		{"a full journal with one op unsent", true, 1, false},
+		{"a full journal with a backlog", true, 12_000, false},
+		{"a journal under its bound", false, 0, false},
+		{"a journal under its bound with a backlog", false, 900, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := mayCompact(c.full, c.pending); got != c.want {
+				t.Errorf("mayCompact(%v, %d) = %v, want %v", c.full, c.pending, got, c.want)
+			}
+		})
 	}
 }

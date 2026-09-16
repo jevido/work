@@ -41,9 +41,12 @@ const maxOutbox = 50_000
 // Past it the journal is discarded and the cursor reset, so the next sync
 // rebuilds from the server's copy. That is a full re-download, which is why
 // the bound is high: a recovery path for a workspace with years of history,
-// not something a session should reach. It is safe in a way dropping from
-// the outbox is not -- everything in the journal is, by definition, already
-// somewhere else.
+// not something a session should reach.
+//
+// Safe in a way dropping from the outbox is not, but only under a condition
+// worth stating: everything in the journal is already on the server *except*
+// the ops the outbox has not sent yet. So the discard waits for the outbox to
+// be empty -- see mayCompact, which is where that condition is written down.
 const maxJournal = 200_000
 
 // pushBatch is how many ops go to the server in one request.

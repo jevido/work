@@ -668,8 +668,20 @@ func (s *Sync) pull(ctx context.Context) error {
 		// A journal that has outgrown its bound is discarded and the cursor
 		// rewound so the next pull rebuilds it. Expensive, and the
 		// alternative is a file that grows for the life of the workspace.
-		// The outbox is untouched: nothing else has those ops.
-		if s.journal.full() {
+		//
+		// Never while the outbox holds anything. Discarding the journal leaves
+		// the unsent ops in exactly one place, and the outbox is the one file
+		// here that is allowed to throw things away -- past maxOutbox it drops
+		// the oldest to stay under its cap. So a compaction followed by an
+		// overflow puts those ops in neither file, and they are gone from the
+		// document on the next start rather than merely unsent. The window
+		// between the two is short while the outbox drains every few seconds,
+		// and it is as long as you like once pushing is held for a Save.
+		//
+		// Waiting costs a journal that grows past its bound until the outbox
+		// empties, which is disk, recovered the moment anything is sent.
+		pending, _ := s.q.depth()
+		if mayCompact(s.journal.full(), pending) {
 			if err := s.compact(); err != nil {
 				return err
 			}
@@ -680,6 +692,17 @@ func (s *Sync) pull(ctx context.Context) error {
 			return nil
 		}
 	}
+}
+
+// mayCompact answers whether the journal can be thrown away right now.
+//
+// Its own function, and tested as one, because it is a rule rather than a
+// condition: the journal is discardable only when every op in it is also
+// somewhere else, and the ops in the outbox are the ones that are not. Written
+// inline it is two clauses that read as a cheap guard, and the second one is
+// the difference between losing a day's unsent work and not.
+func mayCompact(journalFull bool, pending int) bool {
+	return journalFull && pending == 0
 }
 
 // compact discards the journal and rewinds to the start of the server's log.
