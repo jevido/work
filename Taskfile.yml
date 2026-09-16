@@ -187,7 +187,12 @@ tasks:
       # password. Naming this one starts it and its depends_on and nothing
       # else. See the comment in docker-compose.yml.
       - docker compose -f docker-compose.dev.yml up -d --build server-dev
-      - echo "sync server on http://localhost:8080 (signup token: dev)"
+      # Quoted whole. Without the outer quotes YAML sees the ": " in
+      # "(signup token: dev)" and reads the line as a mapping rather than a
+      # string, and task then refuses the file with "invalid keys in command"
+      # -- which is a broken Taskfile, not a broken task, and takes the build
+      # with it.
+      - 'echo "sync server on http://localhost:8080 (signup token: dev)"'
 
   sync:down:
     summary: Stops the local sync server and discards its database
