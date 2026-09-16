@@ -4,7 +4,18 @@
   import type { Workspace } from "../lib/workspace/workspace.svelte";
   import type { Restructuring } from "../lib/workspace/restructure.svelte";
   import OutlineRow from "./OutlineRow.svelte";
+  import MindmapCanvas from "./MindmapCanvas.svelte";
   import AskClaude from "./AskClaude.svelte";
+
+  /**
+   * Which view of the same document is on screen.
+   *
+   * Two views, not two documents. The outline is the faster way to write and
+   * the only one a screen reader can use, so the map is switched to rather than
+   * switched for -- the idea has said from the start that the renderer follows
+   * the data, and this is that and not a replacement.
+   */
+  let view = $state<"outline" | "map">("outline");
 
   /** The name being typed for a new region, or null when none is. */
   let grouping = $state<string | null>(null);
@@ -131,6 +142,33 @@
       <kbd>Alt</kbd>+<kbd>↑↓</kbd> move · <kbd>Alt</kbd>+<kbd>←→</kbd> fold ·
       <kbd>Ctrl</kbd>+<kbd>Enter</kbd> to plan · <kbd>Esc</kbd> leave
     </p>
+    <!--
+      Real radios, drawn as a segmented control, for the same reason ModeToggle
+      uses them: one tab stop, arrow keys between the options, and announced as
+      one of two rather than as two unrelated buttons.
+    -->
+    <fieldset class="views">
+      <legend class="sr">View</legend>
+      <label class:on={view === "outline"}>
+        <input
+          type="radio"
+          name="idea-view-{workspace.id}"
+          checked={view === "outline"}
+          onchange={() => (view = "outline")}
+        />
+        <span>Outline</span>
+      </label>
+      <label class:on={view === "map"}>
+        <input
+          type="radio"
+          name="idea-view-{workspace.id}"
+          checked={view === "map"}
+          onchange={() => (view = "map")}
+        />
+        <span>Map</span>
+      </label>
+    </fieldset>
+
     {#if lastLine}
       <button class="ghost" onclick={() => (grouping = grouping === null ? "" : null)}>
         Group branch
@@ -183,7 +221,15 @@
   -->
   <p class="announce" role="status" aria-live="polite">{keys.said}</p>
 
-  <div class="scroller">
+  <!--
+    Both views are mounted, and the one that is not on screen is hidden rather
+    than removed. The canvas keeps where somebody had panned to, and the outline
+    keeps the caret and the scroll -- exactly why the office and the console sit
+    where they do in App.svelte.
+  -->
+  <MindmapCanvas {workspace} focused={lastLine} shown={view === "map"} />
+
+  <div class="scroller" class:hidden={view === "map"}>
     {#if workspace.rows.length === 0}
       <div class="empty">
         <p>Nothing here yet.</p>
@@ -412,5 +458,40 @@
     overflow: hidden;
     clip-path: inset(50%);
     white-space: nowrap;
+  }
+
+  .scroller.hidden {
+    display: none;
+  }
+
+  .views {
+    display: flex;
+    gap: 1px;
+    margin: 0;
+    padding: 1px;
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    background: var(--line);
+  }
+
+  .views label {
+    padding: 3px 10px;
+    background: var(--panel);
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.4;
+    cursor: pointer;
+  }
+
+  .views label.on {
+    color: inherit;
+  }
+
+  .views input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
   }
 </style>

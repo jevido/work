@@ -484,6 +484,32 @@ export class Workspace {
     return this.#emit(this.#replica.remove(id));
   }
 
+  /**
+   * Puts a line under another, at the end of its children.
+   *
+   * What a drop on the map means. There are no coordinates to write -- a
+   * position is a sort key, not a place -- so dragging changes the tree, which
+   * is the thing both views draw.
+   */
+  moveUnder(id: string, parent: string): boolean {
+    if (id === parent) return false;
+    const moving = findInTree(this.tree, id);
+    const target = findInTree(this.tree, parent);
+    if (!moving || !target) return false;
+    // Into its own branch is not a move, it is a way to lose a subtree.
+    if (findInTree(moving.children, parent)) return false;
+    this.#settleAll();
+    return this.#emit(this.#replica.move(id, parent, keyFor(atEnd(target.children))));
+  }
+
+  /** Puts a line at the top level of the outline, last. */
+  moveToTop(id: string): boolean {
+    const moving = findInTree(this.tree, id);
+    if (!moving) return false;
+    this.#settleAll();
+    return this.#emit(this.#replica.move(id, "", keyFor(atEnd(this.#siblingsOf("")))));
+  }
+
   /* ---------------------------------------------------------------------- */
   /* Links and regions: the parts of a mindmap that are not a tree          */
   /* ---------------------------------------------------------------------- */

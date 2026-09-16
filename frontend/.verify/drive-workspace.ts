@@ -35,7 +35,10 @@ const $$ = <T extends Element>(sel: string) => [...document.querySelectorAll<T>(
 
 const tabs = () => $$<HTMLButtonElement>('[role="tab"]');
 const tabNamed = (name: string) => tabs().find((t) => t.textContent?.trim() === name) ?? null;
-const canvas = () => $<HTMLCanvasElement>("canvas");
+// The office's own canvas. Scoped, because there are two canvases in this app
+// now -- the office and the map -- and a bare "canvas" selector silently
+// started matching whichever the DOM happened to hold first.
+const canvas = () => $<HTMLCanvasElement>(".office canvas");
 const composer = () => $<HTMLTextAreaElement>("aside textarea");
 const badge = () => $<HTMLElement>(".badge");
 const modeRadios = () => $$<HTMLInputElement>('.modebar input[type="radio"]');
@@ -1237,6 +1240,95 @@ async function run() {
   check(
     "applying a proposed link puts it on the row",
     $$("p.relations").map((el) => el.textContent ?? "").join(" ").includes("links to"),
+  );
+
+  /* ---------------------------------------------------------------------- */
+  /* 4k. The map: a second view of the same document                        */
+  /* ---------------------------------------------------------------------- */
+
+  pickMode("idea");
+  await settle(12);
+
+  const mapCanvas = () => $<HTMLCanvasElement>(".map canvas");
+  const outlineBody = () => $("section.idea .scroller:not(.hidden)");
+  const viewRadio = (label: string) =>
+    $$<HTMLInputElement>('input[type=radio]').find(
+      (i) => (i.closest("label")?.textContent ?? "").trim() === label,
+    ) ?? null;
+
+  check("idea mode offers both views", !!viewRadio("Outline") && !!viewRadio("Map"));
+  check("and starts on the outline", viewRadio("Outline")?.checked === true);
+  check("the outline is what is on screen", !!outlineBody());
+
+  // The canvas is mounted the whole time -- hidden, not removed -- so switching
+  // to it does not rebuild it and lose where somebody had panned to.
+  const mapNode = mapCanvas();
+  check("the canvas is mounted before it is shown", !!mapNode);
+  check("and draws nothing while it is not", V().paints(mapNode) === 0, `${V().paints(mapNode)} draw calls`);
+
+  viewRadio("Map")!.checked = true;
+  viewRadio("Map")!.dispatchEvent(new Event("change", { bubbles: true }));
+  await settle(30);
+
+  check("switching keeps the same <canvas>", mapCanvas() === mapNode, "identical node");
+  check("the map draws once it is shown", V().paints(mapNode) > 0, `${V().paints(mapNode)} draw calls`);
+  check("and the outline is out of the way", !outlineBody());
+
+  // Still most of the time, so it must not paint every frame. This is the bug
+  // the office already had and fixed.
+  const settled = V().paints(mapNode);
+  await settle(40);
+  check(
+    "a still map does not repaint every frame",
+    V().paints(mapNode) - settled < 10,
+    `${V().paints(mapNode) - settled} draw calls over 40 idle frames`,
+  );
+
+  // A drag is a move-node and nothing else. There are no coordinates to write,
+  // so dropping a line onto another puts it under it -- and both views draw the
+  // tree that results.
+  const editsBeforeDrag = V().calls.filter((c: any) => c.id === 1305658848).length;
+  if (mapCanvas()) {
+    const box = mapCanvas()!.getBoundingClientRect();
+    const send = (type: string, x: number, y: number) =>
+      mapCanvas()!.dispatchEvent(
+        new PointerEvent(type, {
+          bubbles: true,
+          pointerId: 1,
+          clientX: box.left + x,
+          clientY: box.top + y,
+        }),
+      );
+    // The second box onto the first: PADDING is 40 and ROW is 44, so their
+    // middles are at 55 and 99 down.
+    send("pointerdown", 100, 99);
+    send("pointermove", 100, 55);
+    send("pointerup", 100, 55);
+    await settle(20);
+  }
+  const dragEdits = V()
+    .calls.filter((c: any) => c.id === 1305658848)
+    .slice(editsBeforeDrag)
+    .flatMap((c: any) => (c.args?.[1] ?? []) as { kind: string }[]);
+  check(
+    "dragging on the map writes a move-node",
+    dragEdits.some((e) => e.kind === "move-node"),
+    dragEdits.map((e) => e.kind).join(",") || "none",
+  );
+
+  viewRadio("Outline")!.checked = true;
+  viewRadio("Outline")!.dispatchEvent(new Event("change", { bubbles: true }));
+  await settle(20);
+  check("going back to the outline still edits the same document", !!outlineBody());
+  check(
+    "and the drag shows in the outline too, because both draw one document",
+    lines().length > 0,
+    lines().map((l) => l.value).join(" | ").slice(0, 80),
+  );
+  check(
+    "and the outline still holds the lines the map drew",
+    lines().length > 0,
+    lines().map((l) => l.value).join(" | ").slice(0, 80),
   );
 
 }
