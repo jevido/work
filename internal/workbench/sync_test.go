@@ -16,6 +16,7 @@ import (
 	"dev.jevido/work/internal/agents"
 	"dev.jevido/work/internal/board"
 	"dev.jevido/work/internal/claude"
+	"dev.jevido/work/internal/config"
 	"dev.jevido/work/internal/ops"
 )
 
@@ -808,4 +809,181 @@ func TestJournalIsNotCompactedWhileTheOutboxHasOps(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A held workspace keeps its own work to itself and still takes everybody
+// else's. Holding is "nobody sees mine yet", not "I am offline".
+func TestHeldWorkspacePullsAndPushesNothing(t *testing.T) {
+	stateHome(t)
+
+	// A peer's op, already in the shared log before this machine holds
+	// anything, so the pull has something to find.
+	client := newFakeOps()
+	peer := newTestSync(t, client, "actor-peer")
+	if err := peer.apply(mustOps(t, peer, "peer-card")); err != nil {
+		t.Fatalf("peer apply: %v", err)
+	}
+	if err := peer.cycle(context.Background()); err != nil {
+		t.Fatalf("peer cycle: %v", err)
+	}
+
+	s := newTestSync(t, client, "actor-a")
+	s.setHold(true)
+	if err := s.apply(mustOps(t, s, "mine")); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	before := len(client.entries())
+	if err := s.cycle(context.Background()); err != nil {
+		t.Fatalf("cycle: %v", err)
+	}
+
+	if got := len(client.entries()); got != before {
+		t.Errorf("the server took %d ops from a held workspace", got-before)
+	}
+	if pending, _ := s.q.depth(); pending == 0 {
+		t.Error("the outbox drained while held")
+	}
+	// The peer's work arrived regardless, which is the half that must not be
+	// traded away for the other one.
+	if _, ok := s.node(cardNode("actor-peer", "peer-card")); !ok {
+		t.Error("a held workspace did not pull the peer's work")
+	}
+
+	status := s.status()
+	if !status.Held {
+		t.Error("status does not say it is held")
+	}
+	if status.Limit != maxOutbox {
+		t.Errorf("status limit = %d, want %d", status.Limit, maxOutbox)
+	}
+	if status.State == SyncSyncing {
+		t.Error("a held workspace reports Syncing, which is a transient it is not in")
+	}
+}
+
+// Save is what lets the backlog out.
+func TestSaveDrainsTheHeldOutbox(t *testing.T) {
+	stateHome(t)
+	client := newFakeOps()
+	s := newTestSync(t, client, "actor-a")
+	s.setHold(true)
+
+	if err := s.apply(mustOps(t, s, "held-card")); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if err := s.cycle(context.Background()); err != nil {
+		t.Fatalf("cycle while held: %v", err)
+	}
+	if len(client.entries()) != 0 {
+		t.Fatal("something went out before Save")
+	}
+
+	s.saveNow()
+	if err := s.cycle(context.Background()); err != nil {
+		t.Fatalf("cycle after save: %v", err)
+	}
+
+	if len(client.entries()) == 0 {
+		t.Error("Save sent nothing")
+	}
+	if pending, _ := s.q.depth(); pending != 0 {
+		t.Errorf("outbox still holds %d ops after saving", pending)
+	}
+	// And it goes back to holding afterwards, rather than the hold being a
+	// thing one press turns off for good.
+	if !s.holding() {
+		t.Error("the workspace stopped holding after one save")
+	}
+}
+
+// A Save on a bad connection must keep trying. Cleared by the first attempt it
+// would fail once, silently, and leave somebody looking at a workspace that
+// said it had saved and had not.
+func TestSaveKeepsTryingUntilItLands(t *testing.T) {
+	stateHome(t)
+	client := newFakeOps()
+	s := newTestSync(t, client, "actor-a")
+	s.setHold(true)
+
+	if err := s.apply(mustOps(t, s, "held-card")); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	client.setDown(true)
+	s.saveNow()
+	// Two failures, one press.
+	for i := range 2 {
+		if err := s.cycle(context.Background()); err == nil {
+			t.Fatalf("cycle %d succeeded with the network down", i)
+		}
+	}
+
+	client.setDown(false)
+	if err := s.cycle(context.Background()); err != nil {
+		t.Fatalf("cycle once back: %v", err)
+	}
+	if len(client.entries()) == 0 {
+		t.Error("the save gave up after failing")
+	}
+}
+
+// The hold is a property of the workspace, so it survives being put down and
+// picked up again.
+func TestHoldSurvivesRestart(t *testing.T) {
+	stateHome(t)
+	client := newFakeOps()
+
+	w := New(agents.Default(), claude.NewRunner(""), func(string, any) {}, t.TempDir())
+	w.UseOps(client)
+	if _, err := w.JoinWorkspace(context.Background(), "https://example.invalid", "wk_test"); err != nil {
+		t.Fatalf("join: %v", err)
+	}
+	if _, err := w.SetHoldPush(true); err != nil {
+		t.Fatalf("SetHoldPush: %v", err)
+	}
+
+	saved, err := config.Load()
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	if saved.Workspace == nil || !saved.Workspace.HoldPush {
+		t.Fatalf("the hold was not written down: %+v", saved.Workspace)
+	}
+
+	next := New(agents.Default(), claude.NewRunner(""), func(string, any) {}, t.TempDir())
+	next.UseOps(client)
+	if err := next.UseWorkspace(saved.Workspace); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if !next.SyncStatus().Held {
+		t.Error("the restored workspace pushes as it goes")
+	}
+}
+
+// Nothing to save, so nothing to hold: a local workspace has no server.
+func TestLocalWorkspaceRefusesAHold(t *testing.T) {
+	w, _ := localWorkbench(t, nil)
+
+	if _, err := w.SetHoldPush(true); err == nil {
+		t.Error("a local workspace accepted a hold")
+	}
+	if _, err := w.SaveNow(); err == nil {
+		t.Error("a local workspace accepted a save")
+	}
+	if w.SyncStatus().Held {
+		t.Error("a local workspace reports itself held")
+	}
+}
+
+// mustOps builds a one-card batch, which is the cheapest real thing to apply.
+func mustOps(t *testing.T, s *Sync, title string) []ops.Op {
+	t.Helper()
+	batch, err := boardOps(s, "tab1", []board.Card{
+		{ID: title, RunID: "r1", AgentID: "anton", Title: title, Status: board.StatusTodo},
+	})
+	if err != nil {
+		t.Fatalf("boardOps: %v", err)
+	}
+	return batch
 }

@@ -486,6 +486,25 @@ export interface Status {
     "local"?: boolean;
 
     /**
+     * Held is true when this machine is keeping its ops off the server until
+     * somebody presses Save. Pending is then the count of unsaved changes.
+     * 
+     * A flag rather than a sixth State, because the four states are statements
+     * about the network and this is a statement about policy. They compose: a
+     * held workspace can also be offline, and can also have had its key
+     * refused. A state would force a priority between facts that are both true.
+     */
+    "held"?: boolean;
+
+    /**
+     * Limit is how many unsaved ops can wait before the oldest are dropped.
+     * 
+     * It travels so the indicator's warning threshold is a function of this
+     * number rather than a copy of it that goes stale the day the cap moves.
+     */
+    "limit"?: number;
+
+    /**
      * State is one of SyncLocal, SyncOffline, SyncSyncing, SyncOnline,
      * SyncRejected.
      */

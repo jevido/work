@@ -2,8 +2,25 @@
   import type { Review } from "../lib/workspace/review.svelte";
   import * as Workbench from "../../bindings/dev.jevido/work/services/workbenchservice.js";
   import type { Config } from "../lib/config/config.svelte";
+  import type { Workspaces } from "../lib/workspace/workspaces.svelte";
 
-  let { config, review }: { config: Config; review: Review } = $props();
+  let {
+    config,
+    review,
+    workspaces,
+  }: { config: Config; review: Review; workspaces: Workspaces } = $props();
+
+  /**
+   * Whether this workspace waits to be told before sending.
+   *
+   * Here rather than on the sync badge, which is a status. One control that
+   * both reports where sync stands and changes the rule it stands under is the
+   * thing the badge's own comment argues against: you cannot tell by looking
+   * whether it is describing something or offering to do it.
+   */
+  async function toggleHold(event: Event) {
+    await workspaces.setHold((event.currentTarget as HTMLInputElement).checked);
+  }
 
   /**
    * Turning the approval gate off.
@@ -138,6 +155,18 @@
         Off, a restructuring waits in a panel with a tick per row. On, it lands as soon as
         it arrives.
       </p>
+
+      {#if workspaces.cloud}
+        <label class="toggle">
+          <input type="checkbox" checked={workspaces.held} onchange={toggleHold} />
+          <span>Hold changes until I save</span>
+        </label>
+        <p class="hint">
+          On, nothing reaches the server until you press Save — and until you do, nobody
+          else can see it. Their work still arrives here either way. Off, every change
+          goes as you make it.
+        </p>
+      {/if}
 
       {#if config.error}
         <p class="hint err" role="alert">{config.error}</p>

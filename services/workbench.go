@@ -343,6 +343,22 @@ func (s *WorkbenchService) SyncStatus() workbench.Status {
 	return s.wb.SyncStatus()
 }
 
+// SaveNow sends what a held workspace has been keeping back, and answers with
+// where sync stands afterwards.
+//
+// The status comes back rather than nothing, for the reason the proposal
+// toggle gives: the control draws from what the backend holds, rather than
+// from an assumption that its own click won.
+func (s *WorkbenchService) SaveNow() (workbench.Status, error) {
+	return s.wb.SaveNow()
+}
+
+// SetHoldPush decides whether this workspace pushes as it goes or waits for
+// Save. Per workspace, written down, and off by default.
+func (s *WorkbenchService) SetHoldPush(hold bool) (workbench.Status, error) {
+	return s.wb.SetHoldPush(hold)
+}
+
 // SyncNow pushes and pulls immediately instead of waiting for the next poll.
 // It is the retry behind an offline indicator, and the way back from a
 // rejected key once it has been replaced.

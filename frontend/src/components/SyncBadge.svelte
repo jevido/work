@@ -35,7 +35,11 @@
       case "local":
         return "On this machine";
       case "synced":
-        return "Synced";
+        // A held workspace with nothing waiting has been saved, which is a
+        // different sentence from one that has nothing to say.
+        return workspaces.held ? "Saved" : "Synced";
+      case "unsaved":
+        return `${pending} ${changes(pending)} not saved`;
       case "syncing":
         return pending === 0 ? "Syncing" : `Saving ${pending} ${changes(pending)}`;
       case "offline":
@@ -58,6 +62,20 @@
       case "synced":
         parts.push(`Up to date with ${workspaces.view?.serverUrl ?? "the server"}.`);
         break;
+      case "unsaved":
+        parts.push(
+          `Nothing goes to ${workspaces.view?.serverUrl ?? "the server"} until you press Save. It is all on disk here already.`,
+        );
+        // Warned well before the cap rather than at it. What an overflow costs
+        // is sharing and not the document -- the journal keeps every op
+        // regardless -- but it is the one loss here that no amount of waiting
+        // undoes, so it is said while there is still room to act on it.
+        if (workspaces.limit > 0 && pending >= workspaces.limit / 5) {
+          parts.push(
+            `${workspaces.limit} is as many as can wait; past that the oldest are dropped and cannot be sent.`,
+          );
+        }
+        break;
       case "syncing":
         parts.push("Sending your changes.");
         if (behind > 0) parts.push(`${behind} ${changes(behind)} still to read back.`);
@@ -66,6 +84,9 @@
         parts.push(
           `${sentence(workspaces.syncError, "The server could not be reached.")} Retrying by itself.`,
         );
+        if (workspaces.held && pending > 0) {
+          parts.push(`${pending} unsaved ${changes(pending)} are safe here in the meantime.`);
+        }
         break;
       case "rejected":
         parts.push(
@@ -98,6 +119,10 @@
    */
   const action = $derived.by(() => {
     if (state === "rejected") return { text: "Use another key", run: () => onfix("rekey") };
+    // Before offline on purpose: a held workspace that also cannot reach the
+    // server should offer Save, which nudges the loop and therefore retries as
+    // well. Two buttons where one does strictly more is one too many.
+    if (state === "unsaved") return { text: "Save", run: () => workspaces.sendNow() };
     if (state === "offline") return { text: "Retry now", run: () => workspaces.retry() };
     // Nothing is wrong, and this is not a fix -- it is the way to the keys,
     // which is the thing people want from a synced workspace most often and
@@ -185,6 +210,20 @@
     background: var(--accent);
     /* Hollow, so "waiting" and "fine" are different shapes as well as
        different words. */
+    box-shadow: inset 0 0 0 2px var(--panel-2);
+  }
+
+  /* Held, with something waiting. Its own shape rather than offline's, because
+     the two mean opposite things about whether anything is wrong: offline is a
+     thing that fixes itself and this is a thing waiting for you. A filled ring
+     rather than a hollow dot -- there is something there, it simply has not
+     gone anywhere. */
+  .badge[data-state="unsaved"] {
+    border-color: #3a4250;
+  }
+
+  .badge[data-state="unsaved"] .dot {
+    background: var(--text);
     box-shadow: inset 0 0 0 2px var(--panel-2);
   }
 

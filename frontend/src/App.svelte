@@ -644,7 +644,7 @@
         >
           {#snippet controls()}
             <PermissionMenu {permissions} />
-            <SettingsMenu {config} review={proposals} />
+            <SettingsMenu {config} review={proposals} {workspaces} />
           {/snippet}
         </ClaudeConsole>
       </aside>

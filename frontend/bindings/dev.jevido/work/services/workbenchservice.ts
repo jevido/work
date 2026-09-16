@@ -278,6 +278,18 @@ export function Revert(path: string): $CancellablePromise<void> {
 }
 
 /**
+ * SaveNow sends what a held workspace has been keeping back, and answers with
+ * where sync stands afterwards.
+ * 
+ * The status comes back rather than nothing, for the reason the proposal
+ * toggle gives: the control draws from what the backend holds, rather than
+ * from an assumption that its own click won.
+ */
+export function SaveNow(): $CancellablePromise<workbench$0.Status> {
+    return $Call.ByID(672298781);
+}
+
+/**
  * SelectConfigFolder asks the user for a config folder with the platform's own
  * folder picker, then loads the team from it and remembers the choice.
  * 
@@ -295,6 +307,14 @@ export function SelectConfigFolder(): $CancellablePromise<string> {
  */
 export function SetApplyProposalsWithoutReview(without: boolean): $CancellablePromise<boolean> {
     return $Call.ByID(954902667, without);
+}
+
+/**
+ * SetHoldPush decides whether this workspace pushes as it goes or waits for
+ * Save. Per workspace, written down, and off by default.
+ */
+export function SetHoldPush(hold: boolean): $CancellablePromise<workbench$0.Status> {
+    return $Call.ByID(3945851307, hold);
 }
 
 /**

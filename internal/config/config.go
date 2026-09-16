@@ -88,6 +88,18 @@ type Workspace struct {
 	Tabs []Tab `json:"tabs,omitempty"`
 	// ActiveTab is the tab whose folder agents currently run in.
 	ActiveTab string `json:"activeTab,omitempty"`
+	// HoldPush keeps this machine's ops off the server until somebody presses
+	// Save. Pulling is unaffected: a colleague's work still arrives on the
+	// poll, so this is "nobody sees mine yet" rather than "I am offline".
+	//
+	// On the workspace rather than on Config, and for a reason worth stating:
+	// LeaveWorkspace nils this whole struct, so a decision made about one
+	// board does not silently follow you to the next one you join. A local
+	// workspace has no server and never sets it.
+	//
+	// The zero value is the behaviour this app had for its whole life, so a
+	// config written by an older build needs no migration.
+	HoldPush bool `json:"holdPush,omitempty"`
 }
 
 // Tab is one tab of a workspace as this machine sees it.

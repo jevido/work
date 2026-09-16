@@ -214,6 +214,13 @@ func (w *Workbench) CreateWorkspace(ctx context.Context, serverURL, signupToken,
 		WriteKey:  created.WriteKey,
 		ReadKey:   created.ReadKey,
 		Actor:     actor,
+		// Held, and only for workspaces made from here on. Flipping the
+		// default for every existing one would mean an update landing and
+		// nothing reaching anybody's colleagues for a week, with one word in a
+		// badge as the only sign. A workspace somebody makes after this ships
+		// starts the way they asked for; one they already had keeps what they
+		// have been living with, and the setting is one switch away.
+		HoldPush: true,
 	}
 	if err := w.adopt(ws, true); err != nil {
 		return nil, err
@@ -266,6 +273,8 @@ func (w *Workbench) JoinWorkspace(ctx context.Context, serverURL, writeKey strin
 		Name:      meta.Workspace.Name,
 		WriteKey:  writeKey,
 		Actor:     actor,
+		// See CreateWorkspace: new to this machine, so it starts held.
+		HoldPush: true,
 	}
 	if err := w.adopt(ws, true); err != nil {
 		return nil, err
@@ -300,6 +309,10 @@ func (w *Workbench) adopt(ws *config.Workspace, save bool) error {
 	}
 
 	w.useWorkDir(dir)
+
+	// Before the loop starts, so a restored workspace never gets one cycle of
+	// pushing in before it learns it was told not to.
+	s.setHold(ws.HoldPush)
 
 	if ctx := w.syncCtx.Load(); ctx != nil {
 		s.start(*ctx)
@@ -444,6 +457,59 @@ func (w *Workbench) SyncStatus() Status {
 		return Status{}
 	}
 	return s.status()
+}
+
+// SaveNow sends what this machine has been holding back.
+//
+// The other half of HoldPush. It is not a one-shot: the flag it sets clears
+// when a push finds the outbox empty, so a Save pressed on a bad connection
+// keeps trying instead of failing once and quietly going back to holding. See
+// Sync.saveNow.
+func (w *Workbench) SaveNow() (Status, error) {
+	s := w.sync.Load()
+	if s == nil {
+		return Status{}, errors.New("workbench: no workspace joined")
+	}
+	if s.local() {
+		return s.status(), errors.New("workbench: this workspace is only on this machine, so there is nothing to save")
+	}
+	s.saveNow()
+	return s.status(), nil
+}
+
+// SetHoldPush decides whether this workspace pushes as it goes or waits to be
+// told.
+//
+// Per workspace and written down, because it is a decision about one board and
+// not a preference about the app: a workspace you share with four people and
+// one you are thinking in alone want opposite answers, and joining a new one
+// should start from the default rather than inherit either.
+func (w *Workbench) SetHoldPush(hold bool) (Status, error) {
+	s := w.sync.Load()
+	if s == nil {
+		return Status{}, errors.New("workbench: no workspace joined")
+	}
+	if s.local() {
+		return s.status(), errors.New("workbench: this workspace is only on this machine, so there is nothing to hold back")
+	}
+
+	w.wsMu.Lock()
+	if w.ws != nil {
+		w.ws.HoldPush = hold
+	}
+	w.wsMu.Unlock()
+
+	if err := w.persist(); err != nil {
+		return s.status(), err
+	}
+	s.setHold(hold)
+	if !hold {
+		// Turning it off is somebody saying "send it": waiting up to three
+		// seconds for the poll would make the switch look broken.
+		s.nudge()
+	}
+	w.publishWorkspace()
+	return s.status(), nil
 }
 
 // SyncNow asks for a push and a pull immediately rather than at the next

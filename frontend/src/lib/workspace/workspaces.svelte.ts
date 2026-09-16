@@ -44,8 +44,8 @@ const SAVE_AFTER_MS = 800;
  */
 export const LOCAL_TAB = "local";
 
-/** The badge's five states, derived from what Go reports. */
-export type SyncState = "local" | "synced" | "syncing" | "offline" | "rejected";
+/** The badge's six states, derived from what Go reports. */
+export type SyncState = "local" | "synced" | "syncing" | "unsaved" | "offline" | "rejected";
 
 export class Workspaces {
   /**
@@ -142,10 +142,22 @@ export class Workspaces {
         ? "rejected"
         : this.status.state === "offline"
           ? "offline"
-          : this.status.state === "syncing" || this.status.pending > 0
-            ? "syncing"
-            : "synced",
+          : // After the two failures and before the transients. A refused key
+            // and an unreachable server are things to act on; being held is
+            // the workspace doing what it was told, and it says how much is
+            // waiting on the other two states' detail lines instead.
+            this.status.held && this.status.pending > 0
+            ? "unsaved"
+            : this.status.state === "syncing" || this.status.pending > 0
+              ? "syncing"
+              : "synced",
   );
+
+  /** True when this workspace keeps its work back until Save. */
+  held = $derived(this.status?.held === true);
+
+  /** How many unsaved ops may wait before the oldest start being dropped. */
+  limit = $derived(this.status?.limit ?? 0);
 
   /** Ops that have not reached the server. Workspace-wide, because Go's is. */
   pending = $derived(this.status?.pending ?? 0);
@@ -546,6 +558,27 @@ export class Workspaces {
   /** Pushes and pulls now instead of waiting for the poll. The offline retry. */
   retry(): void {
     void this.#run(() => Workbench.SyncNow());
+  }
+
+  /**
+   * Sends what a held workspace has been keeping back.
+   *
+   * Not called `save`. That name is taken by the one below, which writes the
+   * local outlines to this browser's storage and has nothing to do with a
+   * server -- two methods called save, one of which reaches the network, is a
+   * mistake waiting for somebody in a hurry.
+   */
+  sendNow(): void {
+    void this.#run(async () => {
+      this.status = await Workbench.SaveNow();
+    });
+  }
+
+  /** Turns holding on or off for this workspace. Written down by Go. */
+  async setHold(hold: boolean): Promise<void> {
+    await this.#run(async () => {
+      this.status = await Workbench.SetHoldPush(hold);
+    });
   }
 
   /** Writes the local outlines down now. */

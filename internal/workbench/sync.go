@@ -141,6 +141,14 @@ type Sync struct {
 	syncState atomic.Pointer[string]
 	lastErr   atomic.Pointer[string]
 
+	// hold keeps the outbox off the server until somebody asks for it to go.
+	// Only push consults it; pull runs regardless, so holding your own work
+	// back never means missing anybody else's.
+	hold atomic.Bool
+	// saving is the ask. See saveNow for why it is a flag rather than a
+	// one-shot.
+	saving atomic.Bool
+
 	wake chan struct{}
 
 	stopOnce sync.Once
@@ -324,6 +332,34 @@ func (s *Sync) loop(ctx context.Context) {
 	}
 }
 
+// setHold turns manual pushing on or off.
+//
+// A setter called after newSync rather than a parameter to it. newSync is
+// reached by every test in sync_test.go through one helper, and a parameter
+// there would be a line changed in each of them to say "no" to a question none
+// of them is about.
+func (s *Sync) setHold(hold bool) { s.hold.Store(hold) }
+
+// holding reports whether ops are being kept back right now. A save in flight
+// is not holding: that is the moment they are allowed out.
+func (s *Sync) holding() bool { return s.hold.Load() && !s.saving.Load() }
+
+// saveNow lets the held outbox drain, and keeps letting it until it has.
+//
+// The flag is not a one-shot, and that is the whole design. Cleared by the
+// first push attempt, a Save pressed on a flaky connection would fail once,
+// silently, and go back to holding -- leaving somebody looking at a workspace
+// that said it had saved and had not. It clears itself when a push finds the
+// outbox empty, which is the only moment "saved" is true.
+//
+// Ops typed while a save is in flight ride along in the same drain. That is
+// the right reading of "save what I have": the alternative is a second press
+// for the sentence somebody finished while the first was going.
+func (s *Sync) saveNow() {
+	s.saving.Store(true)
+	s.nudge()
+}
+
 // nudge asks the loop for a cycle now. It never blocks: a full channel already
 // means a cycle is pending, which is the same request.
 func (s *Sync) nudge() {
@@ -486,7 +522,11 @@ func (s *Sync) pendingNode(node string) bool { return s.q.touches(node) }
 // what everyone else did. A peer polling next then sees a consistent picture
 // rather than a reply to something it has not been told about.
 func (s *Sync) cycle(ctx context.Context) error {
-	if pending, _ := s.q.depth(); pending > 0 {
+	// "Syncing" is a transient, so it is only announced when the pending count
+	// is one. Under a hold a non-empty outbox is the resting state, and a badge
+	// that read Syncing forever would be describing a thing that is not
+	// happening.
+	if pending, _ := s.q.depth(); pending > 0 && !s.holding() {
 		s.setState(SyncSyncing)
 		s.publish()
 	}
@@ -509,9 +549,19 @@ func (s *Sync) cycle(ctx context.Context) error {
 // push drains the outbox in batches, acknowledging each before the next so an
 // interrupted drain does not start over.
 func (s *Sync) push(ctx context.Context) error {
+	// Held, and nobody has asked for it to go. Not an error and not a failure
+	// to report: it is the workspace doing what it was told, and the badge says
+	// how much is waiting.
+	if s.holding() {
+		return nil
+	}
+
 	for {
 		batch := fitBatch(s.q.head(pushBatch), maxPushBytes)
 		if len(batch) == 0 {
+			// The one point in this file that knows the outbox is empty, and
+			// therefore the only honest place to call a save finished.
+			s.saving.Store(false)
 			return nil
 		}
 
@@ -756,6 +806,19 @@ type Status struct {
 	// reported separately from Joined because the two say different things --
 	// a local workspace *is* open, it simply has no peers.
 	Local bool `json:"local,omitempty"`
+	// Held is true when this machine is keeping its ops off the server until
+	// somebody presses Save. Pending is then the count of unsaved changes.
+	//
+	// A flag rather than a sixth State, because the four states are statements
+	// about the network and this is a statement about policy. They compose: a
+	// held workspace can also be offline, and can also have had its key
+	// refused. A state would force a priority between facts that are both true.
+	Held bool `json:"held,omitempty"`
+	// Limit is how many unsaved ops can wait before the oldest are dropped.
+	//
+	// It travels so the indicator's warning threshold is a function of this
+	// number rather than a copy of it that goes stale the day the cap moves.
+	Limit int `json:"limit,omitempty"`
 	// State is one of SyncLocal, SyncOffline, SyncSyncing, SyncOnline,
 	// SyncRejected.
 	State string `json:"state,omitempty"`
@@ -786,8 +849,13 @@ func (s *Sync) status() Status {
 		msg = *v
 	}
 	return Status{
-		Joined:  true,
-		Local:   s.local(),
+		Joined: true,
+		Local:  s.local(),
+		// Never for a local workspace: there is no server to hold anything
+		// from, and a Save button over a workspace with nowhere to save to
+		// would be a button that cannot mean anything.
+		Held:    !s.local() && s.hold.Load(),
+		Limit:   maxOutbox,
 		State:   state,
 		Pending: pending,
 		Dropped: dropped,
