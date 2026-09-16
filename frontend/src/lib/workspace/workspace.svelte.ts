@@ -173,6 +173,18 @@ export class Workspace {
   revision = $state(0);
 
   /**
+   * The line the caret was last on, for whoever needs to say "start here".
+   *
+   * Written by the view that owns the caret and read by the console, which is
+   * several components away and has no business knowing how a map is edited.
+   * It is a fact about this tab -- which line you were looking at -- so it
+   * lives with the tab rather than being threaded through as a prop.
+   *
+   * Not written down. Where the caret was is about this minute.
+   */
+  focusedLine = $state<string | null>(null);
+
+  /**
    * A line the outline should open on, set by whoever sent you there.
    *
    * The plan links back to the idea a task came from, and following that link

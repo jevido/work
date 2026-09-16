@@ -13,7 +13,6 @@
   import * as Workbench from "../bindings/dev.jevido/work/services/workbenchservice.js";
   import ProposalReview from "./components/ProposalReview.svelte";
   import ConflictNotes from "./components/ConflictNotes.svelte";
-  import { Restructuring } from "./lib/workspace/restructure.svelte";
   import { Conflicts } from "./lib/workspace/conflicts.svelte";
   import SettingsMenu from "./components/SettingsMenu.svelte";
   import SyncBadge from "./components/SyncBadge.svelte";
@@ -27,7 +26,7 @@
   import { Config } from "./lib/config/config.svelte";
   import { Permissions } from "./lib/permissions/permissions.svelte";
   import { AppUpdate } from "./lib/update/update.svelte";
-  import { MODES, MODE_HINTS } from "./lib/workspace/model";
+  import { MODES, MODE_HINTS, labelOf } from "./lib/workspace/model";
   import { Review } from "./lib/workspace/review.svelte";
   import { Workspaces } from "./lib/workspace/workspaces.svelte";
 
@@ -103,14 +102,6 @@
    * Review, which says why that is not a setting.
    */
   const proposals = new Review();
-  /**
-   * The gap between asking Claude for a restructuring and it answering.
-   *
-   * One for the window rather than one per workspace: only one run can be
-   * in flight at a time anyway -- the backend refuses a second -- and a
-   * per-tab instance would let two tabs both look askable.
-   */
-  const restructuring = new Restructuring();
   /**
    * Writes of this machine's that a newer edit or a delete took away.
    *
@@ -194,6 +185,24 @@
     what asked -- a different mode, and now a different tab as well.
   */
   conversations.current = () => session;
+
+  /*
+    Where the caret is, for the composer to say "start there".
+
+    Wired here rather than passed down, because the console is mounted outside
+    the mode stack and the caret lives inside it. The session asks at the
+    moment Send is pressed, so this is a question rather than a value that
+    would have to be kept in step.
+  */
+  $effect(() => {
+    session.focus = () => {
+      const tab = active;
+      const id = tab?.focusedLine;
+      if (!tab || !id) return null;
+      const row = tab.rows.find((r) => r.node.id === id);
+      return row ? { id, text: labelOf(row.node, 80) } : null;
+    };
+  });
 
   // A tab that goes takes its transcripts with it -- unless something in them
   // is still running, which Conversations.forget refuses on.
@@ -294,7 +303,6 @@
    * in front at the moment it arrives.
    */
   $effect(() => proposals.listen(() => untrack(() => workspaces.active)));
-  $effect(() => restructuring.listen());
   $effect(() => conflicts.listen());
 
   /*
@@ -386,12 +394,11 @@
     -->
     <p class="announce" role="status" aria-live="polite">{proposals.said}</p>
     <!--
-      A second region rather than one shared with the proposal's. They say
-      different halves of the same act -- "asked" and "answered" -- and folding
-      them into one would mean the arrival of a proposal could overwrite the
-      note that one had been asked for before anybody heard it.
+      There used to be a second region here, for "asked Claude to suggest
+      changes". The asking is a line in the transcript now -- the composer that
+      sends it is the console's, and what you typed appears there -- so the
+      only half left to announce is the answer, which is the region above.
     -->
-    <p class="announce" role="status" aria-live="polite">{restructuring.said}</p>
     <p class="announce" role="status" aria-live="polite">{conflicts.said}</p>
 
     <WorkspaceTabs
@@ -517,9 +524,9 @@
                 <div class={["pane", "split", { reviewing }]}>
                   <div class="doc">
                     {#if active.mode === "idea"}
-                      <IdeaOutline workspace={active} {restructuring} />
+                      <IdeaOutline workspace={active} />
                     {:else}
-                      <PlanningList workspace={active} {restructuring} />
+                      <PlanningList workspace={active} />
                     {/if}
                   </div>
                   {#if reviewing}

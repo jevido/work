@@ -2,9 +2,7 @@
   import { labelOf } from "../lib/workspace/model";
   import { OutlineKeys, setOutline } from "../lib/workspace/outline.svelte";
   import type { Workspace } from "../lib/workspace/workspace.svelte";
-  import type { Restructuring } from "../lib/workspace/restructure.svelte";
   import MindmapCanvas from "./MindmapCanvas.svelte";
-  import AskClaude from "./AskClaude.svelte";
 
   /** The name being typed for a new region, or null when none is. */
   let grouping = $state<string | null>(null);
@@ -22,8 +20,13 @@
     if (keys.active) lastLine = keys.active;
   });
 
-  let { workspace, restructuring }: { workspace: Workspace; restructuring: Restructuring } =
-    $props();
+  // Published to the tab, so the console can say "start here" without knowing
+  // anything about how a map is edited.
+  $effect(() => {
+    workspace.focusedLine = lastLine;
+  });
+
+  let { workspace }: { workspace: Workspace } = $props();
 
   /**
    * The line the caret is on, for the composer to mention.
@@ -33,13 +36,6 @@
    * block cut down to the branch would hide the only places the answer could
    * go.
    */
-  const focus = $derived.by(() => {
-    const id = keys.active;
-    if (!id) return null;
-    const row = workspace.rows.find((r) => r.node.id === id);
-    return row ? { id, text: labelOf(row.node, 80) } : null;
-  });
-
   /**
    * The keyboard, and where the caret is.
    *
@@ -202,15 +198,6 @@
       <button type="button" onclick={() => (grouping = null)}>Cancel</button>
     </form>
   {/if}
-
-  <AskClaude
-    {workspace}
-    {restructuring}
-    mode="idea"
-    {focus}
-    label="Ask Claude to reorganise"
-    placeholder="group these by which part of the app they touch"
-  />
 
   <!--
     Announced, never drawn. Indent, move and fold change a shape rather than

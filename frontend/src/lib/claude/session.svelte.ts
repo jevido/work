@@ -197,6 +197,15 @@ export class ClaudeSession {
     return { tabId: this.tab, mode: this.mode };
   }
 
+  /**
+   * The line the caret was last on, if anything knows.
+   *
+   * A function the app supplies rather than a value pushed in, so this stays
+   * ignorant of how a map is edited: it asks at the moment somebody presses
+   * Send, which is the only moment the answer is worth having.
+   */
+  focus: (() => { id: string; text: string } | null) | null = null;
+
   /** True when there is nothing on screen to clear. */
   isEmpty = $derived(this.entries.length === 0);
 
@@ -493,6 +502,18 @@ export class ClaudeSession {
     const text = prompt.trim();
     if (!text) return;
 
+    // Idea and planning do not start runs. A run is Claude let loose on a
+    // working tree; what those two modes want is Claude let loose on the
+    // document, which is a different call with a different tool and no file
+    // access at all. This is the whole of what was wrong with the panel on the
+    // right: it was a composer for work, shown in three modes, and in two of
+    // them it reached an agent who could not see the map and could not change
+    // it. See reshape.
+    if (this.mode !== "work") {
+      await this.reshape(text, this.focus?.() ?? null);
+      return;
+    }
+
     // Work is already in flight, so this is a question about it rather than a
     // second run. Asking beats being told to wait, which is what the disabled
     // composer used to say.
@@ -512,6 +533,49 @@ export class ClaudeSession {
       this.notice(messageOf(err), "error");
       this.status = "error";
       this.runId = null;
+    }
+  }
+
+  /**
+   * Asks the mode's agent to change the document, and says so on the
+   * transcript.
+   *
+   * The answer does not come back through here. The backend hands Claude one
+   * tool and nothing else -- no files, no shell -- and the tool call goes past
+   * on the same stream this session is already reading, where `Review` picks it
+   * up and turns it into operations on the map. So what this owns is the
+   * question and the gap after it.
+   *
+   * It runs in the side channel, like `ask`, because it is not a run: nobody
+   * walks to a desk, the board does not move, and the composer stays usable.
+   */
+  async reshape(prompt: string, focus?: { id: string; text: string } | null): Promise<void> {
+    const text = prompt.trim();
+    if (!text || this.chatBusy) return;
+    if (!this.tab) {
+      this.notice("There is no workspace open to change.", "error");
+      return;
+    }
+
+    // The line the caret was on, appended rather than used to narrow what
+    // Claude is shown. Reorganising a branch usually means moving something
+    // out of it or into it, so a document cut down to the branch would hide
+    // the only places the answer could go.
+    let full = text;
+    if (focus) {
+      full += `\n\nThe line I have selected is ${focus.id} — “${focus.text}”. Start there.`;
+    }
+
+    this.entries.push({ kind: "user", id: this.mintId("you"), text, agentId: "" });
+    this.chatStatus = "planning";
+
+    try {
+      const task = await Workbench.Restructure(this.tab, this.mode, full);
+      this.chatId = task.id;
+    } catch (err) {
+      this.notice(messageOf(err), "error");
+      this.chatStatus = "error";
+      this.chatId = null;
     }
   }
 
