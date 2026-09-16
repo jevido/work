@@ -67,7 +67,7 @@ func run(ctx context.Context) error {
 		return err
 	}
 	if cfg.signupToken == "" {
-		logger.Info("workspace creation is closed; set WORK_SIGNUP_TOKEN to open it")
+		logger.Info("workspace creation is open to anyone who can reach this server; set WORK_SIGNUP_TOKEN to gate it")
 	}
 
 	site, err := openSite(cfg.siteDir)

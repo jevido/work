@@ -145,11 +145,24 @@ export function CloseTab(tabID: string): $CancellablePromise<void> {
 }
 
 /**
+ * CreateLocalWorkspace makes a workspace that lives only on this machine and
+ * opens it. Nothing is sent anywhere and no server is involved, which is why
+ * it takes neither an address nor a token.
+ * 
+ * This is what setup calls. Work has always run perfectly well without a
+ * server, and the version of that where you also get tabs, a shared outline
+ * and a board is this.
+ */
+export function CreateLocalWorkspace(name: string): $CancellablePromise<workbench$0.WorkspaceView | null> {
+    return $Call.ByID(2600828026, name);
+}
+
+/**
  * CreateWorkspace makes a workspace on a server and joins it.
  * 
- * signupToken is the server's own signup token, not a workspace key: creating
- * a workspace is gated by the server operator, and there is no workspace to
- * authenticate against yet.
+ * signupToken is the server's own signup token, not a workspace key: there is
+ * no workspace to authenticate against yet. It is empty against a server that
+ * does not gate creation, which is the default.
  */
 export function CreateWorkspace(serverURL: string, signupToken: string, name: string): $CancellablePromise<workbench$0.WorkspaceView | null> {
     return $Call.ByID(137920851, serverURL, signupToken, name);

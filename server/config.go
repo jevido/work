@@ -16,8 +16,9 @@ import (
 type config struct {
 	databaseURL string
 	addr        string
-	// signupToken gates workspace creation. Empty leaves the endpoint closed,
-	// which is what a server that already has its workspace wants.
+	// signupToken gates workspace creation. Empty leaves the endpoint open,
+	// which is what a server people are meant to sign up to wants. Set it to
+	// close creation to whoever holds the token.
 	signupToken string
 	// siteDir holds the viewer's built files. Empty is the normal case for a
 	// local run and means this process serves the API and nothing else.
@@ -42,9 +43,10 @@ func load() (config, error) {
 	}
 
 	// A short signup token is worse than none: it leaves creation open to
-	// guessing while looking like it is closed.
+	// guessing while looking like it is closed. Unset is a deliberate choice
+	// -- open signup -- and a two-character one is an accident.
 	if cfg.signupToken != "" && len(strings.TrimSpace(cfg.signupToken)) < 24 {
-		return config{}, errors.New("WORK_SIGNUP_TOKEN is under 24 characters; leave it unset to close signup instead")
+		return config{}, errors.New("WORK_SIGNUP_TOKEN is under 24 characters; leave it unset to leave signup open instead")
 	}
 	return cfg, nil
 }

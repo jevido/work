@@ -64,7 +64,11 @@
     if (workspaces.busy) return false;
     switch (purpose) {
       case "create":
-        return name.trim() !== "" && server.trim() !== "" && signupToken.trim() !== "";
+        // No signup token in the condition. Servers do not gate creation by
+        // default, so requiring one here would disable the button for
+        // everybody whose server is perfectly happy to make them a workspace.
+        // A server that does gate it refuses the call and says so.
+        return name.trim() !== "" && server.trim() !== "";
       case "join":
       case "rekey":
         return invite.trim() !== "";
@@ -208,14 +212,34 @@
       {/if}
 
       {#if purpose === "create"}
-        <label>
-          <span>Signup token</span>
-          <input bind:value={signupToken} type="password" autocomplete="off" spellcheck="false" />
-          <em class="help">
-            The token the server was configured with. A server that is not handing out new
-            workspaces will refuse this whatever you type.
-          </em>
-        </label>
+        <!-- Folded away, because almost nobody needs it. Most servers create
+             workspaces for anyone who asks; the ones that do not say so when
+             they refuse, and this is where somebody sent back here goes. A
+             required-looking field in front of a step that usually needs
+             nothing was the whole reason creating a workspace felt broken. -->
+        <details>
+          <summary>Advanced</summary>
+          <label>
+            <span>Signup token</span>
+            <input bind:value={signupToken} type="password" autocomplete="off" spellcheck="false" />
+            <em class="help">
+              Only for a server that has closed signup. Leave it empty otherwise.
+            </em>
+          </label>
+        </details>
+      {/if}
+
+      {#if purpose === "create" && workspaces.localOnly}
+        <!-- Creating replaces the workspace that is open, and the one that is
+             open is this machine's. Nothing on this side can seed a server
+             with an existing document, so the tabs and the plan in it stay
+             where they are and the new workspace starts empty. Somebody who
+             has been working locally for a week has to be told that before
+             they press Create, not after. -->
+        <p class="warn" role="status">
+          You have a workspace on this machine. Creating one on a server opens that one
+          instead — what you have here stays on this machine and does not come with it.
+        </p>
       {/if}
 
       {#if workspaces.error}
@@ -335,6 +359,20 @@
     margin: -6px 0 0;
     color: var(--accent);
     font-size: 11px;
+  }
+
+  details {
+    margin: -4px 0 0;
+  }
+
+  summary {
+    color: var(--muted);
+    font-size: 11px;
+    cursor: pointer;
+  }
+
+  details[open] summary {
+    margin-bottom: 10px;
   }
 
   .error {

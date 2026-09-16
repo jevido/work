@@ -1,21 +1,71 @@
 <script lang="ts">
   import type { Config } from "../lib/config/config.svelte";
+  import type { Workspaces } from "../lib/workspace/workspaces.svelte";
+  import WorkspaceDialog, { type Purpose } from "./WorkspaceDialog.svelte";
 
-  let { config }: { config: Config } = $props();
+  let { config, workspaces }: { config: Config; workspaces: Workspaces } = $props();
+
+  /**
+   * Setup is two questions, and this is which one is on screen.
+   *
+   * "folder" is where the team lives, which the app cannot run without.
+   * "workspace" is where the work lives, which it used to run without and
+   * which is the reason a fresh install could open, show one tab, and refuse
+   * every single thing a tab can do -- a new tab, a folder for it, a plan the
+   * outline could write to. A workspace is not an advanced feature you
+   * graduate to; it is the thing the app is, so setup makes one.
+   */
+  let step = $state<"folder" | "workspace">("folder");
+
+  /** The cloud dialog, when one is open over this screen. */
+  let dialog = $state<Purpose | null>(null);
 
   /** True once a folder has been picked but not yet accepted. */
   const picked = $derived(config.path !== null);
+
+  /**
+   * What the local workspace gets called.
+   *
+   * The folder's own name, because it is already the name of the thing being
+   * worked on and asking a second question to arrive at the same answer is a
+   * question not worth asking. It is renameable later like any other.
+   */
+  const suggested = $derived(config.path?.split(/[\\/]/).filter(Boolean).pop() || "Workspace");
 
   async function choose() {
     await config.choose();
   }
 
+  /** Accepts the folder and asks the second question. */
+  function accept() {
+    if (config.path) step = "workspace";
+  }
+
+  /** Makes the workspace that stays here, and opens the app. */
+  async function alone() {
+    if (await workspaces.createLocal(suggested)) config.confirm();
+  }
+
+  /**
+   * Lets the app through once the dialog has actually produced a workspace.
+   *
+   * Cancelling it must not: someone who backed out of joining is still in
+   * setup and still has no workspace, and dropping them into the app would
+   * leave them exactly where this screen exists to stop them being.
+   */
+  function closeDialog() {
+    dialog = null;
+    if (workspaces.joined) config.confirm();
+  }
+
   function onKeydown(event: KeyboardEvent) {
     // The whole screen has one obvious next action, so Enter should do it
-    // wherever the caret happens to be.
-    if (event.key === "Enter" && !config.busy) {
+    // wherever the caret happens to be. Not while a dialog is over it: that
+    // has its own submit, and the platform gives it the keyboard.
+    if (event.key === "Enter" && !config.busy && dialog === null) {
       event.preventDefault();
-      if (picked) config.confirm();
+      if (step === "workspace") void alone();
+      else if (picked) accept();
       else void choose();
     }
   }
@@ -36,62 +86,140 @@
   onkeydown={onKeydown}
 >
   <div class="card">
-    <h1 id="setup-title">Where does your team live?</h1>
+    {#if step === "folder"}
+      <h1 id="setup-title">Where does your team live?</h1>
 
-    {#if picked}
-      <p>
-        Read from this folder. Each agent is a folder inside it, holding a
-        <code>PERSONALITY.md</code>, a <code>skills/</code> folder and
-        optionally an avatar.
-      </p>
-      <!-- The path is the whole decision, so it is the biggest thing here and
-           selectable: a mistyped or wrong-level folder is the one failure this
-           screen exists to catch, and it is caught by reading it. -->
-      <p class="path" aria-label="Chosen folder">{config.path}</p>
-      <!-- Setup leaves one agent behind, so say where the rest come from:
-           the next step is a mkdir, not another screen. -->
-      <p class="aside">
-        You start with Anton alone. Add a colleague by making a folder next to
-        his, then Reload config from the wrench.
-      </p>
-    {:else}
-      <p>
-        Your team is a folder on disk: one folder per agent, each with a
-        <code>PERSONALITY.md</code>, a <code>skills/</code> folder and
-        optionally an avatar. You edit them in your editor -- work reads them.
-      </p>
-    {/if}
-
-    {#if config.error}
-      <p class="error" role="alert">{config.error}</p>
-    {/if}
-
-    <div class="actions">
       {#if picked}
-        <button class="ghost" onclick={choose} disabled={config.busy}>
-          Choose another…
-        </button>
-        <button
-          class="primary"
-          onclick={() => config.confirm()}
-          disabled={config.busy}
-          {@attach (node) => node.focus()}
-        >
-          Use this folder
-        </button>
+        <p>
+          Read from this folder. Each agent is a folder inside it, holding a
+          <code>PERSONALITY.md</code>, a <code>skills/</code> folder and
+          optionally an avatar.
+        </p>
+        <!-- The path is the whole decision, so it is the biggest thing here and
+             selectable: a mistyped or wrong-level folder is the one failure this
+             screen exists to catch, and it is caught by reading it. -->
+        <p class="path" aria-label="Chosen folder">{config.path}</p>
+        <!-- Setup leaves one agent behind, so say where the rest come from:
+             the next step is a mkdir, not another screen. -->
+        <p class="aside">
+          You start with Anton alone. Add a colleague by making a folder next to
+          his, then Reload config from the wrench.
+        </p>
       {:else}
-        <button
-          class="primary"
-          onclick={choose}
-          disabled={config.busy}
-          {@attach (node) => node.focus()}
-        >
-          {config.busy ? "Choosing…" : "Choose folder…"}
-        </button>
+        <p>
+          Your team is a folder on disk: one folder per agent, each with a
+          <code>PERSONALITY.md</code>, a <code>skills/</code> folder and
+          optionally an avatar.
+        </p>
       {/if}
-    </div>
+
+      {#if config.error}
+        <p class="error" role="alert">{config.error}</p>
+      {/if}
+
+      <div class="actions">
+        {#if picked}
+          <button class="ghost" onclick={choose} disabled={config.busy}>
+            Choose another…
+          </button>
+          <button
+            class="primary"
+            onclick={accept}
+            disabled={config.busy}
+            {@attach (node) => node.focus()}
+          >
+            Use this folder
+          </button>
+        {:else}
+          <button
+            class="primary"
+            onclick={choose}
+            disabled={config.busy}
+            {@attach (node) => node.focus()}
+          >
+            {config.busy ? "Choosing…" : "Choose folder…"}
+          </button>
+        {/if}
+      </div>
+    {:else}
+      <h1 id="setup-title">And where does the work go?</h1>
+      <p>
+        A workspace holds the tabs, the outline and the plan. One is made for you
+        either way — this only decides whether anybody else can see it.
+      </p>
+
+      <!--
+        Three buttons rather than a form.
+
+        Each of these asks for something different underneath — a name, a
+        server, a key — so a single form would have two thirds of it wrong at
+        any moment. The answer that needs nothing is first and is focused, so
+        the common case is one keystroke and the other two are one click.
+      -->
+      <ul class="choices">
+        <li>
+          <button
+            class="choice"
+            onclick={alone}
+            disabled={workspaces.busy}
+            {@attach (node) => node.focus()}
+          >
+            <span class="lead">Just on this machine</span>
+            <span class="detail">
+              Nothing leaves this computer. Tabs, the outline and the plan all work.
+            </span>
+          </button>
+        </li>
+        <li>
+          <button
+            class="choice"
+            onclick={() => (dialog = "create")}
+            disabled={workspaces.busy || !workspaces.available}
+          >
+            <span class="lead">On a server, so a team can share it</span>
+            <span class="detail">
+              Makes the workspace and gives you a link to invite people with.
+            </span>
+          </button>
+        </li>
+        <li>
+          <button
+            class="choice"
+            onclick={() => (dialog = "join")}
+            disabled={workspaces.busy || !workspaces.available}
+          >
+            <span class="lead">Join one somebody sent me</span>
+            <span class="detail">Paste the key or the link you were given.</span>
+          </button>
+        </li>
+      </ul>
+
+      {#if !workspaces.available}
+        <p class="aside">
+          This build has no server transport, so only the first of these is available.
+        </p>
+      {/if}
+
+      {#if workspaces.error}
+        <p class="error" role="alert">{workspaces.error}</p>
+      {/if}
+
+      <div class="actions">
+        <button class="ghost" onclick={() => (step = "folder")} disabled={workspaces.busy}>
+          Back
+        </button>
+      </div>
+    {/if}
   </div>
 </div>
+
+{#if dialog}
+  <!-- The same dialog the running app uses. Setup asking for a server and a key
+       in its own words would be a second copy of the error handling, the
+       read-key warning and the "this is the only time you will see this link"
+       screen, kept in step with the first by hand. -->
+  <WorkspaceDialog purpose={dialog} {workspaces} onclose={closeDialog} />
+{/if}
 
 <style>
   .setup {
@@ -166,6 +294,53 @@
     justify-content: flex-end;
     gap: 8px;
     margin-top: 16px;
+  }
+
+  .choices {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  /* A button per answer, sized like a row rather than like a button: each one
+     carries a second line explaining what it does, and a control that is two
+     lines tall reads as a choice in a list rather than as a submit. */
+  .choice {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    width: 100%;
+    padding: 11px 13px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--panel-2);
+    color: var(--text);
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .choice:hover:not(:disabled) {
+    border-color: var(--accent);
+  }
+
+  .choice:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+
+  .lead {
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  .detail {
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.5;
   }
 
   button.primary {

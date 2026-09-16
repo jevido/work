@@ -49,7 +49,11 @@
     const parts: string[] = [];
     switch (state) {
       case "local":
-        parts.push("No workspace is joined. Nothing leaves this machine.");
+        parts.push(
+          workspaces.joined
+            ? "This workspace is only on this machine. Nothing is sent anywhere, and nothing is waiting to be."
+            : "No workspace is open. Nothing leaves this machine.",
+        );
         break;
       case "synced":
         parts.push(`Up to date with ${workspaces.view?.serverUrl ?? "the server"}.`);
@@ -88,9 +92,9 @@
    * So the two states with something to do are buttons and the rest are not,
    * and the button ones say what they do.
    *
-   * "local" has nothing here on purpose. There is no workspace to connect, and
-   * the two things somebody could do -- make one, join one -- are both already
-   * in the tab strip, named.
+   * "local" has nothing here on purpose. Nothing has gone wrong, and the two
+   * things somebody could do about it -- put this on a server, join one --
+   * are both in the tab strip, named, whenever a workspace is local.
    */
   const action = $derived.by(() => {
     if (state === "rejected") return { text: "Use another key", run: () => onfix("rekey") };

@@ -52,9 +52,9 @@ type Store interface {
 type API struct {
 	store  Store
 	logger *slog.Logger
-	// signupToken gates workspace creation. Empty means nobody may create one,
-	// which is the right default for a server that already has the workspace
-	// it exists for.
+	// signupToken gates workspace creation. Empty means open signup, which is
+	// the default: a server nobody can create a workspace on is a server the
+	// app cannot be set up against.
 	signupToken string
 	limiter     *limiter
 	// documents is the merged state behind GET /v1/document, one per workspace
@@ -65,8 +65,8 @@ type API struct {
 	site fs.FS
 }
 
-// New builds the API. An empty signupToken disables workspace creation, and a
-// nil site makes the root answer as an API endpoint that does not exist.
+// New builds the API. An empty signupToken leaves workspace creation open, and
+// a nil site makes the root answer as an API endpoint that does not exist.
 //
 // The site is a parameter rather than something set afterwards: an API that is
 // only half built between New and a later call is an API that serves a 404 for
@@ -144,12 +144,20 @@ func (a *API) health(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (a *API) createWorkspace(w http.ResponseWriter, r *http.Request) error {
-	if a.signupToken == "" {
-		return apiError{http.StatusForbidden, "forbidden", "this server does not create workspaces"}
-	}
-	presented, ok := bearer(r)
-	if !ok || !sameSecret(presented, a.signupToken) {
-		return errUnauthorized
+	// An unset signup token means open signup: anyone who can reach this
+	// server may create a workspace. That is the deliberate default, because
+	// the alternative -- a token every new user has to be handed out of band
+	// before the app does anything at all -- is a wall in front of the first
+	// thing anybody tries. Creation is still rate limited like every other
+	// endpoint, and a workspace costs a row and two keys.
+	//
+	// Setting WORK_SIGNUP_TOKEN closes it again for a server that should only
+	// ever hold the workspaces it already has.
+	if a.signupToken != "" {
+		presented, ok := bearer(r)
+		if !ok || !sameSecret(presented, a.signupToken) {
+			return errUnauthorized
+		}
 	}
 
 	var body struct {

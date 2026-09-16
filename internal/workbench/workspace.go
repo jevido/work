@@ -73,7 +73,12 @@ func (w *Workbench) UseWorkspace(ws *config.Workspace) error {
 	if ws == nil || ws.ID == "" {
 		return nil
 	}
-	if w.ops == nil {
+	// A local workspace needs no transport: there is no server in it to
+	// reach. Requiring one here would mean a build without a transport, or a
+	// machine whose transport failed to wire, opened to no workspace at all --
+	// losing the tabs and the outline of somebody who never asked for a
+	// server in the first place.
+	if w.ops == nil && ws.ServerURL != "" {
 		return ErrNoTransport
 	}
 	// Restored, not chosen: this came out of the config file, so writing it
@@ -94,10 +99,81 @@ func (w *Workbench) StartSync(ctx context.Context) {
 	}
 }
 
+// CreateLocalWorkspace makes a workspace that lives only on this machine.
+//
+// It is what setup does, and it is the reason opening Work for the first time
+// puts you in something you can use rather than in front of a form. Tabs, the
+// outline, the board and the merge all work; what is missing is the loop that
+// talks to a server, because there is no server in it. See Sync.local.
+//
+// The ID is minted here rather than handed out by anyone. It never leaves this
+// machine -- it names a folder under the state directory and nothing else --
+// so there is nobody to collide with and nothing to coordinate.
+//
+// A first tab comes with it, bound to the folder Work was started in. A
+// workspace whose only tab has no folder can run no agents, which is the same
+// dead end from one step further along.
+func (w *Workbench) CreateLocalWorkspace(name string) (*WorkspaceView, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, errors.New("workbench: empty workspace name")
+	}
+
+	id, err := mintID()
+	if err != nil {
+		return nil, err
+	}
+	actor, err := mintID()
+	if err != nil {
+		return nil, err
+	}
+	tabID, err := mintID()
+	if err != nil {
+		return nil, err
+	}
+
+	ws := &config.Workspace{
+		ID:    "local_" + id,
+		Name:  name,
+		Actor: actor,
+		Tabs: []config.Tab{{
+			ID:   tabID,
+			Name: name,
+			// The folder Work was started in, which is the one the app has
+			// always run agents in with no workspace at all. Binding it here
+			// rather than asking keeps setup to the one question it already
+			// asks; the tab can be pointed somewhere else at any time.
+			Dir: w.baseDir,
+		}},
+		ActiveTab: tabID,
+	}
+	if err := w.adopt(ws, true); err != nil {
+		return nil, err
+	}
+
+	// The tab goes into the document too, so that a workspace later shared
+	// with a server carries it rather than arriving empty. adopt has already
+	// installed the Sync, so this is the same path NewTab takes.
+	if s := w.sync.Load(); s != nil {
+		if batch, err := tabOps(s, tabID, name, false); err == nil {
+			// A tab that fails to reach the document is not worth failing the
+			// whole workspace for: it is in the config, it is on screen, and
+			// it works. The local document is rebuilt from the journal, so
+			// the cost of losing this is a tab missing from a share that has
+			// not happened yet.
+			_ = s.apply(batch)
+		}
+	}
+
+	w.publishWorkspace()
+	return w.Workspace(), nil
+}
+
 // CreateWorkspace makes a workspace on a server and joins it.
 //
 // signupToken is the server's own WORK_SIGNUP_TOKEN, not a workspace key --
-// there is no workspace to authenticate against yet. This call is the only
+// there is no workspace to authenticate against yet, and it is empty against
+// the ordinary server, which does not gate creation. This call is the only
 // time the server will ever show the keys, so both are stored here and there
 // is no way to ask for them again later.
 func (w *Workbench) CreateWorkspace(ctx context.Context, serverURL, signupToken, name string) (*WorkspaceView, error) {
@@ -109,9 +185,12 @@ func (w *Workbench) CreateWorkspace(ctx context.Context, serverURL, signupToken,
 	if name == "" {
 		return nil, errors.New("workbench: empty workspace name")
 	}
-	if signupToken = strings.TrimSpace(signupToken); signupToken == "" {
-		return nil, errors.New("workbench: empty signup token")
-	}
+	// An empty signup token is allowed and is the common case: a server with
+	// no WORK_SIGNUP_TOKEN set has open signup, and the empty bearer is what
+	// tells it so. A server that does gate creation answers 401, which is a
+	// better place for a missing token to be refused than here -- this side
+	// cannot know which kind of server it is talking to.
+	signupToken = strings.TrimSpace(signupToken)
 	if w.ops == nil {
 		return nil, ErrNoTransport
 	}

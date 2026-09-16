@@ -249,6 +249,24 @@
     void roster.load();
   });
 
+  /**
+   * And a workspace to put it all in.
+   *
+   * Setup asks which kind and has already made one by the time the app opens,
+   * so on a new machine this finds one and returns. It is here for a machine
+   * set up before setup asked: that one opened with no workspace at all, which
+   * meant a tab strip where every button answered "no workspace joined" --
+   * the state that made this app look broken on launch.
+   */
+  $effect(() => {
+    if (!config.open) return;
+    // Untracked for the reason workspaces.start() is: the call reads the
+    // workspace it is about to write, so a tracked one would re-run on its own
+    // result -- and re-running this particular effect means making another
+    // workspace.
+    untrack(() => void workspaces.ensureLocal());
+  });
+
   // Changes already on disk when the window opened.
   //
   // The review lives behind a button now, and a button is the only thing that
@@ -341,7 +359,7 @@
      the alternative is a flash of either the setup screen or an empty office,
      each of which says something untrue about how this app is configured. -->
 {#if config.status === "missing"}
-  <ConfigSetup {config} />
+  <ConfigSetup {config} {workspaces} />
 {:else if config.open}
   <main>
     <!--
@@ -367,6 +385,7 @@
       {workspaces}
       panelId={PANEL_ID}
       onnew={() => openDialog(workspaces.joined ? "tab" : "create")}
+      oncreate={() => openDialog("create")}
       onjoin={() => openDialog("join")}
     />
 
@@ -545,11 +564,17 @@
           <div class="no-workspace">
             <p>No workspace open.</p>
             <div class="row">
+              <!-- The one that needs nothing, first. It is what setup does, and
+                   it is here as well for a machine that was set up before setup
+                   asked -- or that left the workspace it had. -->
+              <button class="primary" onclick={() => workspaces.createLocal("Workspace")}>
+                Work on this machine
+              </button>
               <button
-                class="primary"
+                class="ghost"
                 onclick={(event) => openDialog("create", event.currentTarget)}
               >
-                New workspace
+                New workspace on a server
               </button>
               <button
                 class="ghost"

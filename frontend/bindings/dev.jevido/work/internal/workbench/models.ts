@@ -435,6 +435,14 @@ export interface Status {
     "joined": boolean;
 
     /**
+     * Local is true for a workspace with no server: tabs, the outline and the
+     * board all work and nothing syncs. It is a normal way to run Work and is
+     * reported separately from Joined because the two say different things --
+     * a local workspace *is* open, it simply has no peers.
+     */
+    "local"?: boolean;
+
+    /**
      * State is one of SyncOffline, SyncSyncing, SyncOnline, SyncRejected.
      */
     "state"?: string;

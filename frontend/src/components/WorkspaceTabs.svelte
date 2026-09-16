@@ -7,11 +7,16 @@
     /** The id of the region the tabs control, for aria-controls. */
     panelId,
     onnew,
+    oncreate,
     onjoin,
   }: {
     workspaces: Workspaces;
     panelId: string;
+    /** A tab in the workspace that is open. */
     onnew: () => void;
+    /** A new workspace on a server. */
+    oncreate: () => void;
+    /** Join one with a key. */
     onjoin: () => void;
   } = $props();
 
@@ -196,7 +201,14 @@
          workspace on a server when you wanted a tab is the same click with two
          meanings. -->
     <button onclick={onnew}>{workspaces.joined ? "New tab" : "New workspace"}</button>
-    {#if !workspaces.joined}
+    <!-- The way onto a server, kept on screen rather than behind having left
+         the workspace you are in. A workspace that lives on this machine is
+         the ordinary starting state now, so "how do I share this" is the
+         ordinary next question, and it used to have no answer anywhere. Hidden
+         when there is no transport to use, or when this workspace is already
+         on a server. -->
+    {#if workspaces.available && !workspaces.cloud}
+      <button onclick={oncreate}>On a server…</button>
       <button onclick={onjoin}>Join</button>
     {/if}
   </div>

@@ -136,13 +136,23 @@ func TestRoutingFailures(t *testing.T) {
 }
 
 func TestCreateWorkspace(t *testing.T) {
-	t.Run("closed when no signup token is configured", func(t *testing.T) {
+	t.Run("open when no signup token is configured", func(t *testing.T) {
 		srv, backing := serve(t, "")
-		resp := call(t, srv, http.MethodPost, "/v1/workspaces", "anything", map[string]any{"name": "x"})
-		expectStatus(t, resp, http.StatusForbidden, "forbidden")
-		if backing.created != 0 {
-			t.Error("a workspace was created anyway")
+		// No bearer at all, which is what the app sends against a server that
+		// is not gating creation. Signup being open by default is the whole
+		// reason the desktop app can put somebody in a workspace without
+		// handing them a secret first.
+		resp := call(t, srv, http.MethodPost, "/v1/workspaces", "", map[string]any{"name": "x"})
+		expectStatus(t, resp, http.StatusCreated, "")
+		if backing.created != 1 {
+			t.Errorf("created = %d, want 1", backing.created)
 		}
+	})
+
+	t.Run("a token is ignored when none is configured", func(t *testing.T) {
+		srv, _ := serve(t, "")
+		resp := call(t, srv, http.MethodPost, "/v1/workspaces", "anything", map[string]any{"name": "x"})
+		expectStatus(t, resp, http.StatusCreated, "")
 	})
 
 	t.Run("the wrong token is unauthorized", func(t *testing.T) {

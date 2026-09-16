@@ -37,6 +37,10 @@ const (
 	// cannot fix -- a revoked key, an op it will never accept. The outbox is
 	// kept and the loop stops asking; see APIError.Fatal.
 	SyncRejected = "rejected"
+	// SyncLocal means this workspace has no server. Everything else works --
+	// tabs, the outline, the board, the merge, the journal on disk -- and
+	// nothing is waiting to be sent, because there is nowhere to send it.
+	SyncLocal = "local"
 )
 
 // Sync intervals.
@@ -164,7 +168,12 @@ type Sync struct {
 // this rebuilds correctly at all, because an outbox on its own loses an op
 // the moment the server takes it.
 func newSync(client OpsClient, server, writeKey, workspaceID, actor string, emit Emitter) (*Sync, error) {
-	if client == nil {
+	// A workspace with no server is a local one, and is built the same way:
+	// the outbox, the journal, the merge and the document are all on this
+	// machine already. Only the loop at the end of them is missing, which is
+	// why a transport is required for a server and not otherwise. See
+	// Workbench.CreateLocalWorkspace.
+	if client == nil && strings.TrimSpace(server) != "" {
 		return nil, ErrNoTransport
 	}
 	dir, err := config.StateDir(workspaceID)
@@ -193,7 +202,11 @@ func newSync(client OpsClient, server, writeKey, workspaceID, actor string, emit
 		wake:     make(chan struct{}, 1),
 		finished: make(chan struct{}),
 	}
-	s.setState(SyncOffline)
+	if s.local() {
+		s.setState(SyncLocal)
+	} else {
+		s.setState(SyncOffline)
+	}
 	s.cursor.Store(readCursor(filepath.Join(dir, cursorFile)))
 
 	// One unmergeable op must not cost the user everything after it, so a
@@ -219,9 +232,23 @@ func newSync(client OpsClient, server, writeKey, workspaceID, actor string, emit
 	return s, nil
 }
 
+// local reports a workspace with no server behind it.
+//
+// Both halves are checked because they fail independently: a build with no
+// transport cannot reach a server it has the address of, and a local
+// workspace has no address to reach. Either way there is nothing to poll.
+func (s *Sync) local() bool { return s.client == nil || strings.TrimSpace(s.server) == "" }
+
 // start runs the push/pull loop until ctx ends or close is called. Calling it
 // twice on one Sync is a no-op after the first.
 func (s *Sync) start(ctx context.Context) {
+	// A local workspace has nothing to poll. Not starting the loop is the
+	// whole of what makes it local: everything the loop is not doing -- a
+	// timer, a request every three seconds, a backoff -- is work this machine
+	// would be doing to talk to nobody.
+	if s.local() {
+		return
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	if !s.stop.CompareAndSwap(nil, &cancel) {
 		cancel()
@@ -238,6 +265,9 @@ func (s *Sync) start(ctx context.Context) {
 // the other. Callers swap the Sync out under the lock and close it after.
 func (s *Sync) close() {
 	s.stopOnce.Do(func() {
+		// stop is nil when the loop never started, which is every local
+		// workspace. Waiting on finished there would wait for a goroutine
+		// that was never launched to close a channel nothing will close.
 		if cancel := s.stop.Load(); cancel != nil {
 			(*cancel)()
 			<-s.finished
@@ -297,6 +327,9 @@ func (s *Sync) loop(ctx context.Context) {
 // nudge asks the loop for a cycle now. It never blocks: a full channel already
 // means a cycle is pending, which is the same request.
 func (s *Sync) nudge() {
+	if s.local() {
+		return
+	}
 	select {
 	case s.wake <- struct{}{}:
 	default:
@@ -341,15 +374,26 @@ func (s *Sync) apply(batch []ops.Op) error {
 	// is what makes this a single fsync: both hold these ops, the synced one
 	// is replayed over the other at startup, so the journal losing its tail
 	// to a power cut costs nothing.
-	if err := s.journal.append(false, batch...); err != nil {
+	//
+	// A local workspace has no outbox write, so the journal takes the fsync
+	// instead -- still one, and still before anything is shown. The outbox is
+	// skipped rather than left to fill: nothing drains it without a server,
+	// so every op would sit there until the 50,000 cap started dropping them,
+	// and the pending count would climb forever in front of a user who has
+	// nothing to send. The journal is the durable record either way, and is
+	// what newSync rebuilds the document from.
+	local := s.local()
+	if err := s.journal.append(local, batch...); err != nil {
 		s.setErr(err)
 		s.publish()
 		return err
 	}
-	if err := s.q.append(batch...); err != nil {
-		s.setErr(err)
-		s.publish()
-		return err
+	if !local {
+		if err := s.q.append(batch...); err != nil {
+			s.setErr(err)
+			s.publish()
+			return err
+		}
 	}
 
 	s.mu.Lock()
@@ -684,7 +728,13 @@ type Status struct {
 	// Joined is false when no workspace has been joined, in which case every
 	// other field is zero and Work behaves exactly as it always has.
 	Joined bool `json:"joined"`
-	// State is one of SyncOffline, SyncSyncing, SyncOnline, SyncRejected.
+	// Local is true for a workspace with no server: tabs, the outline and the
+	// board all work and nothing syncs. It is a normal way to run Work and is
+	// reported separately from Joined because the two say different things --
+	// a local workspace *is* open, it simply has no peers.
+	Local bool `json:"local,omitempty"`
+	// State is one of SyncLocal, SyncOffline, SyncSyncing, SyncOnline,
+	// SyncRejected.
 	State string `json:"state,omitempty"`
 	// Pending is how many ops have not reached the server.
 	Pending int `json:"pending"`
@@ -714,6 +764,7 @@ func (s *Sync) status() Status {
 	}
 	return Status{
 		Joined:  true,
+		Local:   s.local(),
 		State:   state,
 		Pending: pending,
 		Dropped: dropped,

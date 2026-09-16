@@ -56,10 +56,15 @@ services:
       # anything reachable from outside that network means sslmode=require.
       - DATABASE_URL=postgres://work:${SERVICE_PASSWORD_POSTGRES}@postgres:5432/work?sslmode=disable
 
-      # Gates workspace creation. Coolify generates 64 bytes once and keeps
-      # it; read it out of the resource's environment when creating the first
-      # workspace, and unset this afterwards to close signup for good.
-      - WORK_SIGNUP_TOKEN=${SERVICE_BASE64_64_SIGNUP}
+      # Workspace creation is open, which is what an unset WORK_SIGNUP_TOKEN
+      # means. The app makes a workspace during setup, and a token nobody can
+      # be handed before they have the app is a wall in front of the first
+      # thing anyone does -- which is exactly what it was.
+      #
+      # Creation is still rate limited like every other endpoint, and a
+      # workspace is a row and two keys. To close it again, set this to
+      # ${SERVICE_BASE64_64_SIGNUP} (Coolify generates and keeps 64 bytes) and
+      # hand that token to whoever is allowed to create one.
 
       # info logs failures and lifecycle. Successful requests are debug on
       # purpose -- a viewer polling every few seconds would otherwise be the

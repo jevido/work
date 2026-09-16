@@ -122,9 +122,10 @@ unreachable.
 Creates a workspace and returns its keys. **This is the only time the keys are
 readable.**
 
-Gated by a server-configured signup token (`WORK_SIGNUP_TOKEN`), sent as the
-bearer token. Without that token configured the endpoint returns 403 and the
-server can only serve workspaces that already exist.
+Open by default: a server with no `WORK_SIGNUP_TOKEN` set creates a workspace
+for anyone who can reach it, rate limited like every other endpoint. Setting
+`WORK_SIGNUP_TOKEN` closes it to whoever holds that token, sent as the bearer;
+a request without it, or with the wrong one, is then a 401.
 
 Request:
 
@@ -548,7 +549,7 @@ Configuration is environment variables only:
 | --- | --- | --- |
 | `DATABASE_URL` | — | Postgres connection string. Required. |
 | `PORT` | `8080` | Port to listen on. |
-| `WORK_SIGNUP_TOKEN` | — | Bearer token for `POST /v1/workspaces`. Unset disables workspace creation; set, it must be at least 24 characters, because a short one leaves creation open to guessing while looking closed. |
+| `WORK_SIGNUP_TOKEN` | — | Bearer token for `POST /v1/workspaces`. Unset leaves workspace creation open to anyone who can reach the server, which is the default; set, it must be at least 24 characters, because a short one leaves creation open to guessing while looking closed. |
 | `WORK_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`. |
 | `WORK_SITE_DIR` | — | Directory holding the built viewer, served at `/`. Unset serves the API only, and `/` answers the same `not_found` as any other unknown path. Checked at startup: set and missing an `index.html` is a refusal to start, not a 500 later. |
 

@@ -68,10 +68,24 @@ export class Workspaces {
   /** Whether this build can talk to a workspace server at all. */
   available = $state(false);
 
-  /** The joined workspace, or null. Null is the ordinary case. */
+  /** The open workspace, or null. */
   view = $state<WorkspaceView | null>(null);
 
+  /**
+   * Whether there is a workspace at all -- local or on a server.
+   *
+   * This gates everything a workspace *has*: tabs, the × on them, the shared
+   * outline. It deliberately does not mean "syncing", because a local
+   * workspace has all of those and syncs nothing. What is on a server is
+   * `cloud`, and where sync stands is `state`.
+   */
   joined = $derived(this.view !== null);
+
+  /** True when the open workspace is on a server. Sharing needs this; tabs do not. */
+  cloud = $derived(!!this.view?.serverUrl);
+
+  /** True when there is a workspace and it is only on this machine. */
+  localOnly = $derived(this.view !== null && !this.view.serverUrl);
 
   /** Where sync stands, workspace-wide. Go's, not ours. */
   status = $state<Status | null>(null);
@@ -94,6 +108,15 @@ export class Workspaces {
   /** True while a call is in flight. */
   busy = $state(false);
 
+  /**
+   * True once the backend has been asked what it has.
+   *
+   * Nothing may conclude "there is no workspace" before this: until the first
+   * round trip lands, `view` is null on a machine that has one and on a
+   * machine that does not, and those two want opposite things done about it.
+   */
+  #painted = $state(false);
+
   /** The server to prefill: the one in use, else the last default. */
   lastServer = $state(DEFAULT_SERVER);
 
@@ -104,7 +127,7 @@ export class Workspaces {
    * Work and not a degraded one. The other four are Go's `Status.state`.
    */
   state = $derived<SyncState>(
-    !this.status?.joined
+    !this.status?.joined || this.status.local
       ? "local"
       : this.status.state === "rejected"
         ? "rejected"
@@ -222,6 +245,7 @@ export class Workspaces {
     } catch {
       this.status = null;
     }
+    this.#painted = true;
   }
 
   /**
@@ -349,12 +373,49 @@ export class Workspaces {
     if (workspace) workspace.name = name;
   }
 
+  /**
+   * Makes a workspace that lives only on this machine, and opens it.
+   *
+   * This is what setup does, and it is why a first run lands in something
+   * usable rather than in a form asking for a server. Nothing is sent
+   * anywhere; the tabs, the outline and the board all work, and putting it on
+   * a server is a later decision rather than a precondition.
+   */
+  async createLocal(name: string): Promise<boolean> {
+    const view = await this.#run(() => Workbench.CreateLocalWorkspace(name.trim() || "Workspace"));
+    if (!view) return false;
+    this.#adopt(view);
+    return true;
+  }
+
+  /**
+   * Makes sure there is a workspace, making a local one if there is not.
+   *
+   * Called once the config folder is settled. Setup asks the question itself
+   * and has usually answered it by then, so on a new machine this finds a
+   * workspace and does nothing; what it is for is every machine set up before
+   * setup asked, which opened to `LOCAL_TAB` and a tab strip where nothing
+   * worked -- no new tab, no folder to bind, no shared outline -- because Go
+   * answers "no workspace joined" to all of it.
+   *
+   * It waits for the first paint rather than racing it: creating a workspace
+   * because the backend has not answered yet would make one on every launch.
+   */
+  async ensureLocal(): Promise<void> {
+    if (!this.#painted || this.view !== null || this.busy) return;
+    await this.createLocal("Workspace");
+  }
+
   /** Makes a workspace on a server and joins it. Returns the read key. */
   async createShared(
     base: string,
     signupToken: string,
     name: string,
   ): Promise<{ readKey: string } | null> {
+    // The signup token goes through empty when there is none, which is the
+    // ordinary case: a server with WORK_SIGNUP_TOKEN unset does not gate
+    // creation, and the empty bearer is what says so. Only a server that has
+    // deliberately closed signup asks for one, and it says so in its refusal.
     const view = await this.#run(
       () => Workbench.CreateWorkspace(base.trim(), signupToken.trim(), name.trim() || "Untitled"),
       explainCreate,
@@ -411,11 +472,22 @@ export class Workspaces {
     return this.join(input, fallbackBase);
   }
 
-  /** Stops syncing and goes back to running purely locally. */
+  /**
+   * Stops syncing and goes back to running purely locally.
+   *
+   * And *into* a local workspace, not into nothing. Leaving used to drop the
+   * machine back to a state with no workspace at all, where the tab strip
+   * still drew but every button in it answered "no workspace joined" -- so
+   * leaving a team cost you tabs, a bindable folder and the shared outline,
+   * none of which has anything to do with a server. The workspace that is
+   * made is this machine's and empty; the one that was left is still on its
+   * server, and rejoining it needs the key it always needed.
+   */
   async leave(): Promise<boolean> {
     const done = await this.#run(() => Workbench.LeaveWorkspace());
     if (done === null) return false;
     this.#adopt(null);
+    await this.createLocal("Workspace");
     return true;
   }
 
@@ -480,10 +552,12 @@ export class Workspaces {
 
 function explainCreate(err: unknown): string {
   const text = explain(err);
-  if (/forbidden|403/i.test(text)) {
-    // The contract gives one 403 for both and the server cannot say which, so
-    // the message names both rather than guessing.
-    return "That server would not accept this signup token. It may be wrong, or the server may not be handing out new workspaces.";
+  if (/unauthorized|401|forbidden|403/i.test(text)) {
+    // Most servers do not gate creation at all, so somebody hitting this has
+    // either reached one that does or mistyped the address. Both are worth
+    // naming: "wrong token" is unhelpful advice to someone who was never
+    // given one.
+    return "That server only creates workspaces for people with its signup token. Put the token in Advanced, or check the address.";
   }
   return text;
 }
