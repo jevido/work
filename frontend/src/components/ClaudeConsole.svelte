@@ -51,6 +51,18 @@
    * the point is to think out loud.
    */
   const who = $derived(lead?.name ?? "Claude");
+
+  /**
+   * A cost, as a sum of money somebody would say out loud.
+   *
+   * Two decimal places, except that real spend under half a penny rounds to
+   * "$0.00", which reads as free. A transcript that has cost something has to
+   * look like it has cost something, so anything below the rounding floor says
+   * so as a bound rather than as a zero.
+   */
+  function money(usd: number): string {
+    return usd < 0.005 ? "<$0.01" : `$${usd.toFixed(2)}`;
+  }
   const isWork = $derived(session.mode === "work");
 
 
@@ -218,6 +230,22 @@
       </span>
     {/if}
 
+    <!-- What this conversation has cost since it was last cleared.
+
+         Only once there is one. A "$0.00" standing next to an empty transcript
+         is a number that means nothing and still asks to be read; the absence
+         says the same thing for free.
+
+         Tabular numerals and a fixed line height, because this row is a grid
+         whose other children are the transcript's ceiling: anything here that
+         changes height pushes the whole conversation down, and this one ticks
+         while you are reading. -->
+    {#if session.totalCostUsd > 0}
+      <span class="cost" title="What this conversation has cost since it was last cleared">
+        {money(session.totalCostUsd)}
+      </span>
+    {/if}
+
     <div class="status" data-state={session.status}>{statusLabel[session.status]}</div>
   </header>
 
@@ -316,7 +344,7 @@
           class="ghost"
           onclick={() => clear()}
           disabled={session.isEmpty}
-          title="Clears all three conversations, the board, and the agents' memory of them"
+          title="Clears this tab's conversation in this mode, and the agents' memory of it. Nothing else."
         >
           New chat
         </button>
@@ -438,6 +466,15 @@
     overflow: hidden;
     clip-path: inset(50%);
     white-space: nowrap;
+  }
+
+  .cost {
+    flex: none;
+    color: var(--muted);
+    font-family: ui-monospace, monospace;
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    line-height: 20px;
   }
 
   .status {

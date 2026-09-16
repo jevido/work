@@ -109,6 +109,15 @@ export class Workspaces {
   busy = $state(false);
 
   /**
+   * Told when a tab stops existing, so its transcripts can go with it.
+   *
+   * A callback rather than a reference to Conversations. This class knows
+   * about tabs and that one knows about conversations; an import here would
+   * make the two mutually dependent to save one line in App.
+   */
+  onTabGone: ((id: string) => void) | null = null;
+
+  /**
    * True once the backend has been asked what it has.
    *
    * Nothing may conclude "there is no workspace" before this: until the first
@@ -302,7 +311,14 @@ export class Workspaces {
     // timers are stopped; what they had written down is left on disk, because
     // a tab a colleague closed is not a reason to destroy the notes somebody
     // took in it.
-    for (const gone of existing.values()) gone.dispose();
+    for (const gone of existing.values()) {
+      gone.dispose();
+      // And the transcripts held for it, which are this side's alone. Told
+      // rather than imported: which conversations exist is the console's
+      // business and the tab list is this one's, and the arrow between them
+      // only needs to point one way.
+      this.onTabGone?.(gone.id);
+    }
 
     this.list = next;
     if (!next.some((w) => w.id === this.activeId)) {

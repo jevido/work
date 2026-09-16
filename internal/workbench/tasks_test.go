@@ -155,9 +155,14 @@ func TestATaskClosedElsewhereClosesItsCard(t *testing.T) {
 	}
 }
 
-// Clearing the conversation is "start again from the tasks", not "forget what
-// we agreed to do". The plan outlives a conversation because it is in the log.
-func TestClearConversationKeepsThePlan(t *testing.T) {
+// Clearing the board is "start again from the tasks", not "forget what we
+// agreed to do". The plan outlives it because the plan is in the log.
+//
+// A separate act from clearing a conversation, which it used to ride along
+// with. A transcript is one tab's talk about one thing and there are as many
+// as there are tabs times modes; the board is a picture of a tab's plan and
+// belongs to none of them.
+func TestClearBoardKeepsThePlan(t *testing.T) {
 	w, tab := joinedWorkbench(t, newFakeOps())
 
 	if _, err := w.ApplyEdits(tab, []Edit{
@@ -168,13 +173,72 @@ func TestClearConversationKeepsThePlan(t *testing.T) {
 	// Plus a card a run invented, which is the half that should not survive.
 	w.addCard("r1", "anton", "ephemeral")
 
-	w.ClearConversation()
+	w.ClearBoard()
 
 	if _, ok := cardTitled(w, "write the outbox"); !ok {
 		t.Errorf("the plan's task did not come back: %+v", w.Board())
 	}
 	if _, ok := cardTitled(w, "ephemeral"); ok {
-		t.Error("a run-invented card survived clearing the conversation")
+		t.Error("a run-invented card survived clearing the board")
+	}
+}
+
+// And clearing a conversation leaves the board exactly where it was. It is
+// somebody saying "start this chat again", not "throw away what is in flight".
+func TestClearConversationLeavesTheBoard(t *testing.T) {
+	w, tab := joinedWorkbench(t, newFakeOps())
+
+	if _, err := w.ApplyEdits(tab, []Edit{
+		{Kind: ops.KindCreateNode, Node: "task-1", Fields: map[string]any{FieldType: TypeTask, FieldText: "write the outbox"}},
+	}); err != nil {
+		t.Fatalf("apply edits: %v", err)
+	}
+	w.addCard("r1", "anton", "ephemeral")
+	before := len(w.Board())
+
+	w.ClearConversation(in(ModeWork))
+
+	if got := len(w.Board()); got != before {
+		t.Errorf("board holds %d cards after clearing a conversation, want %d", got, before)
+	}
+	if _, ok := cardTitled(w, "ephemeral"); !ok {
+		t.Error("clearing a conversation took a card off the board")
+	}
+}
+
+// Clearing one transcript is clearing one transcript. Every other one keeps
+// its session, which is the whole reason the key carries a tab and a mode.
+func TestClearConversationLeavesTheOthers(t *testing.T) {
+	w := newTestWorkbench(t)
+
+	here := Conversation{TabID: "tab-1", Mode: ModeIdea}
+	sameTab := Conversation{TabID: "tab-1", Mode: ModeWork}
+	otherTab := Conversation{TabID: "tab-2", Mode: ModeIdea}
+
+	for _, conv := range []Conversation{here, sameTab, otherTab} {
+		w.rememberSession(runSession("anton", conv), "run-"+conv.TabID+conv.Mode)
+		w.rememberSession(chatSession("anton", conv), "chat-"+conv.TabID+conv.Mode)
+	}
+
+	w.ClearConversation(here)
+
+	// Both halves of the cleared one go: a run's memory filed where its
+	// transcript's clear cannot reach it is a model continuing a conversation
+	// whose visible half is gone.
+	if got := w.sessionFor(runSession("anton", here)); got != "" {
+		t.Errorf("the cleared transcript kept its run session %q", got)
+	}
+	if got := w.sessionFor(chatSession("anton", here)); got != "" {
+		t.Errorf("the cleared transcript kept its chat session %q", got)
+	}
+
+	for _, conv := range []Conversation{sameTab, otherTab} {
+		if got := w.sessionFor(runSession("anton", conv)); got == "" {
+			t.Errorf("%+v lost its run session", conv)
+		}
+		if got := w.sessionFor(chatSession("anton", conv)); got == "" {
+			t.Errorf("%+v lost its chat session", conv)
+		}
 	}
 }
 
@@ -216,7 +280,7 @@ func TestNoWorkspaceMeansNoTaskAdoption(t *testing.T) {
 	w.addCard("r1", "anton", "ordinary local work")
 	w.adoptTasks()
 	w.shareDiscoveries("T1", []Discovery{{Kind: DiscoveryIdea, Text: "found something"}})
-	w.ClearConversation()
+	w.ClearBoard()
 
 	if n := len(w.Board()); n != 0 {
 		t.Fatalf("board holds %d cards after clearing, want 0", n)

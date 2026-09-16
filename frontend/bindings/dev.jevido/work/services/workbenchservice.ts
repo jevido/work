@@ -122,19 +122,31 @@ export function Changes(): $CancellablePromise<changes$0.Change[] | null> {
 }
 
 /**
- * Chat asks the coordinator a question without starting a run, so the input
- * stays usable while specialists are working.
+ * Chat asks a question without starting a run, so the input stays usable while
+ * specialists are working. Answered by whoever leads the conversation's mode.
  */
-export function Chat(prompt: string, mode: string): $CancellablePromise<workbench$0.Task> {
-    return $Call.ByID(3317554920, prompt, mode);
+export function Chat(conv: workbench$0.Conversation, prompt: string): $CancellablePromise<workbench$0.Task> {
+    return $Call.ByID(3317554920, conv, prompt);
 }
 
 /**
- * ClearConversation starts a new conversation: the agents forget the previous
- * exchange, and the next request opens a fresh session for each of them.
+ * ClearBoard empties the board and puts the tab's plan back on it. What
+ * clearing a conversation used to do on the way past, now that a conversation
+ * is one of many and the board belongs to none of them.
  */
-export function ClearConversation(): $CancellablePromise<void> {
-    return $Call.ByID(1913763400);
+export function ClearBoard(): $CancellablePromise<void> {
+    return $Call.ByID(225485669);
+}
+
+/**
+ * ClearConversation starts one transcript over: the agents forget what was said
+ * in it, and the next request there opens a fresh session.
+ * 
+ * One transcript. Every other conversation, and the board, are left alone --
+ * see Workbench.ClearConversation, and ClearBoard for the half that moved.
+ */
+export function ClearConversation(conv: workbench$0.Conversation): $CancellablePromise<void> {
+    return $Call.ByID(1913763400, conv);
 }
 
 /**
@@ -309,11 +321,16 @@ export function StartNextTask(): $CancellablePromise<workbench$0.Task> {
 }
 
 /**
- * Submit starts a run. An empty agentID gives the task to the coordinator, who
- * decides whether to answer it himself or split it between specialists.
+ * Submit starts a run in a conversation. An empty agentID gives the task to the
+ * coordinator, who decides whether to answer it himself or split it between
+ * specialists.
+ * 
+ * The conversation is not validated. An unknown tab id is a transcript nobody
+ * will look at rather than an error, and refusing one would break the machine
+ * that has joined no workspace and whose tab id is therefore empty.
  */
-export function Submit(agentID: string, prompt: string): $CancellablePromise<workbench$0.Task> {
-    return $Call.ByID(3576145318, agentID, prompt);
+export function Submit(conv: workbench$0.Conversation, agentID: string, prompt: string): $CancellablePromise<workbench$0.Task> {
+    return $Call.ByID(3576145318, conv, agentID, prompt);
 }
 
 /**

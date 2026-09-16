@@ -14,6 +14,7 @@ export type {
     BoardUpdate,
     ChangesEvent,
     ClaudeEvent,
+    Conversation,
     Document,
     Edit,
     Keys,

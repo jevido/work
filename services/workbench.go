@@ -174,9 +174,14 @@ func (s *WorkbenchService) ReloadAgents() ([]workbench.AgentStatus, error) {
 	return s.wb.ReloadAgents()
 }
 
-// Submit starts a run. An empty agentID gives the task to the coordinator, who
-// decides whether to answer it himself or split it between specialists.
-func (s *WorkbenchService) Submit(agentID, prompt string) (workbench.Task, error) {
+// Submit starts a run in a conversation. An empty agentID gives the task to the
+// coordinator, who decides whether to answer it himself or split it between
+// specialists.
+//
+// The conversation is not validated. An unknown tab id is a transcript nobody
+// will look at rather than an error, and refusing one would break the machine
+// that has joined no workspace and whose tab id is therefore empty.
+func (s *WorkbenchService) Submit(conv workbench.Conversation, agentID, prompt string) (workbench.Task, error) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		return workbench.Task{}, errors.New("prompt is empty")
@@ -184,12 +189,12 @@ func (s *WorkbenchService) Submit(agentID, prompt string) (workbench.Task, error
 	if len(prompt) > maxPromptBytes {
 		return workbench.Task{}, errors.New("prompt is too large")
 	}
-	return s.wb.Submit(strings.TrimSpace(agentID), prompt)
+	return s.wb.Submit(conv, strings.TrimSpace(agentID), prompt)
 }
 
-// Chat asks the coordinator a question without starting a run, so the input
-// stays usable while specialists are working.
-func (s *WorkbenchService) Chat(prompt, mode string) (workbench.Task, error) {
+// Chat asks a question without starting a run, so the input stays usable while
+// specialists are working. Answered by whoever leads the conversation's mode.
+func (s *WorkbenchService) Chat(conv workbench.Conversation, prompt string) (workbench.Task, error) {
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		return workbench.Task{}, errors.New("prompt is empty")
@@ -197,7 +202,7 @@ func (s *WorkbenchService) Chat(prompt, mode string) (workbench.Task, error) {
 	if len(prompt) > maxPromptBytes {
 		return workbench.Task{}, errors.New("prompt is too large")
 	}
-	return s.wb.Chat(prompt, mode)
+	return s.wb.Chat(conv, prompt)
 }
 
 // Changes lists the files the last run touched, with their diffs.
@@ -220,10 +225,20 @@ func (s *WorkbenchService) Board() []board.Card {
 	return s.wb.Board()
 }
 
-// ClearConversation starts a new conversation: the agents forget the previous
-// exchange, and the next request opens a fresh session for each of them.
-func (s *WorkbenchService) ClearConversation() {
-	s.wb.ClearConversation()
+// ClearConversation starts one transcript over: the agents forget what was said
+// in it, and the next request there opens a fresh session.
+//
+// One transcript. Every other conversation, and the board, are left alone --
+// see Workbench.ClearConversation, and ClearBoard for the half that moved.
+func (s *WorkbenchService) ClearConversation(conv workbench.Conversation) {
+	s.wb.ClearConversation(conv)
+}
+
+// ClearBoard empties the board and puts the tab's plan back on it. What
+// clearing a conversation used to do on the way past, now that a conversation
+// is one of many and the board belongs to none of them.
+func (s *WorkbenchService) ClearBoard() {
+	s.wb.ClearBoard()
 }
 
 // Cancel stops a run, including any specialists working inside it.

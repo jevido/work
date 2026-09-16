@@ -123,13 +123,17 @@ type Workbench struct {
 	// so a follow-up turn continues where the last one left off instead of
 	// starting from nothing. Keyed by agent ID.
 	sessions map[sessionKey]string
-	// turns counts user requests in this conversation. Anton is told when he
-	// is answering a follow-up rather than an opening question.
-	turns int
+	// turns counts user requests per conversation. The lead is told when it is
+	// answering a follow-up rather than an opening question.
+	//
+	// Per conversation rather than one number, for the same reason the sessions
+	// are: a freshly cleared transcript whose first question is announced as a
+	// follow-up is a model told it remembers something it does not.
+	turns map[Conversation]int
 	// chatTurns counts side-channel questions, separately: the side channel is
 	// its own conversation with its own history, so its follow-ups are not the
 	// run's follow-ups.
-	chatTurns int
+	chatTurns map[Conversation]int
 	// review holds the working tree as it was before the last run, so its file
 	// changes can be listed and reverted afterwards.
 	review *changes.Snapshot
@@ -162,9 +166,13 @@ type run struct {
 	// rather than to do work. Nil for every other run. See restructure.go.
 	proposal *proposalRun
 
-	// mode is which conversation a side-channel turn belongs to. Empty on a
-	// run, which has no mode: a run is work, whatever is on screen.
-	mode string
+	// conv is the transcript this run belongs to: the tab it was asked from
+	// and the mode it was asked in.
+	//
+	// On every run, not only on a side-channel one. It used to be a mode and
+	// empty for runs, because a run is work whatever is on screen -- true, and
+	// not enough once a transcript can be cleared on its own. See sessionKey.
+	conv Conversation
 }
 
 // taskID mints a stable, readable ID for one Claude call inside the run.
@@ -175,15 +183,17 @@ func (r *run) taskID(suffix string) string {
 // New returns a Workbench. workDir is the directory Claude runs in.
 func New(reg *agents.Registry, runner *claude.Runner, emit Emitter, workDir string) *Workbench {
 	w := &Workbench{
-		registry: reg,
-		runner:   runner,
-		emit:     emit,
-		baseDir:  workDir,
-		workDir:  workDir,
-		board:    board.New(),
-		state:    make(map[string]AgentState),
-		current:  make(map[string]string),
-		sessions: make(map[sessionKey]string),
+		registry:  reg,
+		runner:    runner,
+		emit:      emit,
+		baseDir:   workDir,
+		workDir:   workDir,
+		board:     board.New(),
+		state:     make(map[string]AgentState),
+		current:   make(map[string]string),
+		sessions:  make(map[sessionKey]string),
+		turns:     make(map[Conversation]int),
+		chatTurns: make(map[Conversation]int),
 		// Something has to be chosen. Inheriting the user's own Claude
 		// configuration was the old behaviour and it meant agents that could
 		// not act, since nothing here can answer a permission prompt.
@@ -225,7 +235,8 @@ func (w *Workbench) Agents() []AgentStatus {
 // An empty agentID gives the task to the coordinator, who routes it: he either
 // answers himself or splits it between specialists. A named agentID skips
 // routing and puts that one agent straight to work.
-func (w *Workbench) Submit(agentID, prompt string) (Task, error) {
+func (w *Workbench) Submit(conv Conversation, agentID, prompt string) (Task, error) {
+	conv = conv.normalise()
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		return Task{}, errors.New("workbench: empty prompt")
@@ -255,6 +266,7 @@ func (w *Workbench) Submit(agentID, prompt string) (Task, error) {
 		id:     "r" + strconv.FormatUint(w.nextRun.Add(1), 10),
 		prompt: prompt,
 		cancel: cancel,
+		conv:   conv,
 	}
 
 	w.mu.Lock()
@@ -264,8 +276,8 @@ func (w *Workbench) Submit(agentID, prompt string) (Task, error) {
 		return Task{}, errors.New("workbench: a task is already running")
 	}
 	w.active = r
-	w.turns++
-	followUp := w.turns > 1
+	w.turns[conv]++
+	followUp := w.turns[conv] > 1
 	w.mu.Unlock()
 	r.followUp = followUp
 
@@ -312,7 +324,8 @@ func (w *Workbench) Submit(agentID, prompt string) (Task, error) {
 // concurrent answer would interleave into the first. A question asked with
 // nothing running is still a question, not a run -- the caller decides which
 // it wants, and Submit remains the way to start work.
-func (w *Workbench) Chat(prompt, mode string) (Task, error) {
+func (w *Workbench) Chat(conv Conversation, prompt string) (Task, error) {
+	conv = conv.normalise()
 	prompt = strings.TrimSpace(prompt)
 	if prompt == "" {
 		return Task{}, errors.New("workbench: empty prompt")
@@ -327,7 +340,7 @@ func (w *Workbench) Chat(prompt, mode string) (Task, error) {
 	// Whoever leads this mode, which is the coordinator only in work. A
 	// question asked over the map is a question about the map, and the agent
 	// whose whole prompt is about routing tasks is the wrong one to answer it.
-	lead, ok := w.registry.For(mode)
+	lead, ok := w.registry.For(conv.Mode)
 	if !ok {
 		return Task{}, errors.New("workbench: no agent configured")
 	}
@@ -338,7 +351,7 @@ func (w *Workbench) Chat(prompt, mode string) (Task, error) {
 		prompt: prompt,
 		cancel: cancel,
 		chat:   true,
-		mode:   mode,
+		conv:   conv,
 	}
 
 	w.mu.Lock()
@@ -348,8 +361,8 @@ func (w *Workbench) Chat(prompt, mode string) (Task, error) {
 		return Task{}, errors.New("workbench: still answering the last question")
 	}
 	w.chat = r
-	w.chatTurns++
-	r.followUp = w.chatTurns > 1
+	w.chatTurns[conv]++
+	r.followUp = w.chatTurns[conv] > 1
 	// What the run is working on, read while the lock is held so the answer
 	// describes the run that was live when the question was asked.
 	var about string
@@ -386,7 +399,7 @@ func (w *Workbench) Chat(prompt, mode string) (Task, error) {
 // answer is one side-channel turn, with the same bad-session retry executeStep
 // uses and none of its bookkeeping.
 func (w *Workbench) answer(ctx context.Context, r *run, lead agents.Agent, about string) error {
-	key := chatSession(lead.ID, r.mode)
+	key := chatSession(lead.ID, r.conv)
 	taskID := r.taskID(lead.ID)
 	prompt := chatPrompt(r.prompt, about)
 
@@ -432,23 +445,44 @@ func (w *Workbench) Board() []board.Card {
 	return w.board.Snapshot()
 }
 
-// ClearConversation forgets every agent's session and empties the board, so the
-// next request starts a new conversation rather than continuing this one.
-func (w *Workbench) ClearConversation() {
-	w.mu.Lock()
-	w.sessions = make(map[sessionKey]string)
-	w.turns = 0
-	w.chatTurns = 0
-	w.mu.Unlock()
+// ClearConversation forgets one transcript's sessions, so the next request in
+// it starts a new conversation rather than continuing this one.
+//
+// One transcript, not all of them, and nothing else at all. This used to reset
+// every agent's memory and empty the board as well, which was defensible when
+// there were three conversations and one of them was always the one you meant.
+// There are as many as there are tabs times modes now, and a button that wiped
+// them all plus the board would be a button nobody could afford to press.
+//
+// The board in particular is not this call's to empty. It is a picture of a
+// tab's plan, not of a conversation, and it outlives every transcript that
+// discussed it. See ClearBoard, which is where that act went.
+func (w *Workbench) ClearConversation(conv Conversation) {
+	conv = conv.normalise()
 
+	w.mu.Lock()
+	for key := range w.sessions {
+		if key.tab == conv.TabID && key.mode == conv.Mode {
+			delete(w.sessions, key)
+		}
+	}
+	delete(w.turns, conv)
+	delete(w.chatTurns, conv)
+	w.mu.Unlock()
+}
+
+// ClearBoard empties the board and puts the tab's plan back on it.
+//
+// What ClearConversation used to do on the way past, now that it is about one
+// conversation and the board is about none of them. Clearing is "start again
+// from the tasks", not "forget what we agreed to do": the plan outlives the
+// cards, so the tab's tasks come straight back as fresh ones -- and with no
+// workspace joined this does nothing and the board stays empty, exactly as it
+// always has.
+func (w *Workbench) ClearBoard() {
 	w.board.Clear()
 	w.forgetTasks()
 	w.publishBoard()
-
-	// The plan outlives the conversation. Clearing is "start again from the
-	// tasks", not "forget what we agreed to do", so the tab's tasks come
-	// straight back as fresh cards -- with no workspace joined this does
-	// nothing and the board stays empty, exactly as it always has.
 	w.adoptTasks()
 }
 
@@ -838,11 +872,11 @@ func (w *Workbench) executeStep(
 	w.beginTask(r, agent.ID, taskID, phase)
 	w.moveCard(cardID, board.StatusDoing, "")
 
-	resume := w.sessionFor(runSession(agent.ID))
+	resume := w.sessionFor(runSession(agent.ID, r.conv))
 	out, produced, err := w.streamStep(ctx, r, agent, phase, taskID, prompt, resume)
 
 	if err != nil && resume != "" && !produced && ctx.Err() == nil {
-		w.forgetSession(runSession(agent.ID))
+		w.forgetSession(runSession(agent.ID, r.conv))
 		out, _, err = w.streamStep(ctx, r, agent, phase, taskID, prompt, "")
 	}
 
@@ -883,9 +917,9 @@ func (w *Workbench) streamStep(
 
 	// A side-channel turn continues its own conversation, not the agent's, so
 	// two live Claude processes never resume the same session.
-	key := runSession(agent.ID)
+	key := runSession(agent.ID, r.conv)
 	if r.chat {
-		key = chatSession(agent.ID, r.mode)
+		key = chatSession(agent.ID, r.conv)
 	}
 
 	request := claude.Request{
@@ -1230,40 +1264,70 @@ func (w *Workbench) systemPrompt(a agents.Agent) string {
 	return strings.Join(parts, "\n\n")
 }
 
+// Conversation names one transcript: a tab, and a mode within it.
+//
+// Both halves, because both are things a person switches between and expects
+// to find where they left them. A transcript keyed by mode alone is shared by
+// every tab in that mode, so two projects open side by side answer each other's
+// questions out of one history -- and one keyed by tab alone mixes the outline
+// you were shaping with the run you were watching.
+//
+// A struct rather than two more positional string parameters on four entry
+// points. Submit, Chat, Restructure and ClearConversation would each grow the
+// same pair, and Restructure already shows what that looks like: a signature
+// where transposing two strings compiles and misfiles a conversation.
+type Conversation struct {
+	// TabID is the workspace tab. Empty is legitimate -- it is the single
+	// conversation of a machine that has joined nothing -- and is not an error.
+	TabID string `json:"tabId"`
+	Mode  string `json:"mode"`
+}
+
+// normalise clamps the mode, so an unknown one files under work rather than
+// opening a transcript nothing else will ever address.
+func (c Conversation) normalise() Conversation {
+	if c.Mode != ModeIdea && c.Mode != ModePlanning {
+		c.Mode = ModeWork
+	}
+	return c
+}
+
 // sessionKey identifies one conversation an agent is holding.
 //
 // It is a struct rather than a decorated string because an agent ID is just a
 // folder name: any separator a suffix could use is a legal thing to call a
-// folder, so a suffix could be forged by naming one. There is nothing to
-// collide with here.
+// folder, so a suffix could be forged by naming one. A tab id is a node id and
+// has the same property. There is nothing to collide with here.
 type sessionKey struct {
 	agentID string
-	// chat marks the coordinator's side-channel conversation, which is kept
-	// apart from the run's so the two never resume each other.
+	// chat marks the side-channel conversation, which is kept apart from the
+	// run's so the two never resume each other.
 	chat bool
-	// mode is which conversation a chat belongs to: idea, planning or work.
+	// tab and mode are the transcript this session belongs to -- on the run
+	// key as well as the chat key.
 	//
-	// On the chat key only. A run's session is per agent and per run and has
-	// nothing to do with modes -- but the side channel is one conversation a
-	// person has, and they have three. Without this the transcripts would look
-	// separate on screen while the model read one history with all three in it,
-	// which is worse than not splitting at all: it looks fixed and is not.
+	// The run key carrying them is the part worth arguing. It used to be per
+	// agent and nothing else, on the grounds that a run has no mode: a run is
+	// work, whatever is on screen. That was true and is no longer sufficient,
+	// because clearing a transcript now clears one transcript. A run whose
+	// memory is filed somewhere its transcript's New chat cannot reach leaves
+	// the model continuing a conversation whose visible half is gone -- which
+	// is the exact failure the mode split was introduced to prevent, arriving
+	// from the other side. The key is the transcript.
+	tab  string
 	mode string
 }
 
 // runSession is the key for an agent's conversation inside runs.
-func runSession(agentID string) sessionKey {
-	return sessionKey{agentID: agentID}
+func runSession(agentID string, conv Conversation) sessionKey {
+	conv = conv.normalise()
+	return sessionKey{agentID: agentID, tab: conv.TabID, mode: conv.Mode}
 }
 
-// chatSession is the key for the coordinator's side-channel conversation.
-func chatSession(agentID, mode string) sessionKey {
-	if mode != ModeIdea && mode != ModePlanning {
-		// Anything that is not one of the two thinking modes is work's, which
-		// is where the side channel has always lived.
-		mode = ModeWork
-	}
-	return sessionKey{agentID: agentID, chat: true, mode: mode}
+// chatSession is the key for the side-channel conversation.
+func chatSession(agentID string, conv Conversation) sessionKey {
+	conv = conv.normalise()
+	return sessionKey{agentID: agentID, chat: true, tab: conv.TabID, mode: conv.Mode}
 }
 
 // sessionFor returns the session held under key in this conversation, if any.

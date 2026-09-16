@@ -114,7 +114,7 @@ func TestNoWorkspaceIsTheOldBehaviour(t *testing.T) {
 	if svc.Board() != nil && len(svc.Board()) != 0 {
 		t.Errorf("Board() = %+v, want empty", svc.Board())
 	}
-	svc.ClearConversation()
+	svc.ClearConversation(workbench.Conversation{Mode: "work"})
 	if svc.GetConfigPath() != "" {
 		t.Errorf("GetConfigPath() = %q, want empty on a first run", svc.GetConfigPath())
 	}

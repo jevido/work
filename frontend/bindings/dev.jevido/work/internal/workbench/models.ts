@@ -211,6 +211,29 @@ export interface ClaudeEvent {
 }
 
 /**
+ * Conversation names one transcript: a tab, and a mode within it.
+ * 
+ * Both halves, because both are things a person switches between and expects
+ * to find where they left them. A transcript keyed by mode alone is shared by
+ * every tab in that mode, so two projects open side by side answer each other's
+ * questions out of one history -- and one keyed by tab alone mixes the outline
+ * you were shaping with the run you were watching.
+ * 
+ * A struct rather than two more positional string parameters on four entry
+ * points. Submit, Chat, Restructure and ClearConversation would each grow the
+ * same pair, and Restructure already shows what that looks like: a signature
+ * where transposing two strings compiles and misfiles a conversation.
+ */
+export interface Conversation {
+    /**
+     * TabID is the workspace tab. Empty is legitimate -- it is the single
+     * conversation of a machine that has joined nothing -- and is not an error.
+     */
+    "tabId": string;
+    "mode": string;
+}
+
+/**
  * Document is the merged workspace as the frontend sees it.
  * 
  * Detached is not an error case to hide. It is what an eventually consistent

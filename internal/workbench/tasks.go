@@ -608,7 +608,19 @@ func (w *Workbench) StartNextTask() (Task, error) {
 	// Started before it is marked, so a refused run -- no CLI, one already in
 	// flight -- does not leave a task claiming to be underway with nothing
 	// working on it.
-	task, err := w.Submit("", taskPrompt(next))
+	//
+	// Filed against the active tab's work transcript. Nobody typed this: it
+	// came off the plan, and the plan belongs to a tab -- so it belongs in the
+	// conversation somebody watching that tab is looking at, which is the one
+	// place they would go to see what happened.
+	w.wsMu.Lock()
+	active := ""
+	if w.ws != nil {
+		active = w.ws.ActiveTab
+	}
+	w.wsMu.Unlock()
+
+	task, err := w.Submit(Conversation{TabID: active, Mode: ModeWork}, "", taskPrompt(next))
 	if err != nil {
 		return Task{}, err
 	}

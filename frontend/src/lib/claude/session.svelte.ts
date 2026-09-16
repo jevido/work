@@ -179,11 +179,23 @@ export class ClaudeSession {
   /**
    * Which conversation this is, for the backend to keep its own memory of it.
    *
-   * A session that does not know its mode would resume the wrong one, and the
-   * three transcripts would read as separate while the model continued a single
-   * history with all of them in it -- which looks fixed and is not.
+   * Both halves, because both are things a person switches between. A session
+   * that does not know its mode resumes the wrong one; a session that does not
+   * know its tab is shared by every tab in that mode, so two projects open side
+   * by side answer each other's questions out of one history. Either way the
+   * transcripts read as separate while the model continues a single one, which
+   * looks fixed and is not.
+   *
+   * Plain fields rather than $state: they are set once when the session is
+   * minted and never change for its life. See Conversations.for.
    */
   mode = "work";
+  tab = "";
+
+  /** The pair, as the backend spells it. */
+  get conversation(): { tabId: string; mode: string } {
+    return { tabId: this.tab, mode: this.mode };
+  }
 
   /** True when there is nothing on screen to clear. */
   isEmpty = $derived(this.entries.length === 0);
@@ -192,6 +204,18 @@ export class ClaudeSession {
   private runCostUsd = 0;
   /** What the side channel has cost, kept out of the run's total. */
   private chatCostUsd = 0;
+
+  /**
+   * What this conversation has cost since it was last cleared.
+   *
+   * A third number next to two that look like it, and the distinction is worth
+   * stating: the two above answer "what did *this* run cost" and are reset at
+   * the start of every one, which is what the per-run notice line reports. This
+   * one only ever resets when the conversation does. Without it there is no
+   * answer at all to "what has this transcript cost me", which is the number
+   * somebody with nine of them open actually wants.
+   */
+  totalCostUsd = $state(0);
   private nextId = 0;
 
   /** Agent identities, for labelling turns and plan steps. */
@@ -399,6 +423,11 @@ export class ClaudeSession {
         } else {
           this.runCostUsd += e.data.costUsd ?? 0;
         }
+        // And the conversation's own total, which nothing resets but a clear.
+        // Counted here rather than below the plan-phase return so a routing
+        // turn is in it: it was paid for, and a number that quietly omits a
+        // third of the spend is worse than no number.
+        this.totalCostUsd += e.data.costUsd ?? 0;
         // The routing turn has no entry of its own -- the plan stands in for it
         // -- but its cost still belongs to the run.
         if (e.data.phase === "plan") return;
@@ -477,7 +506,7 @@ export class ClaudeSession {
     this.status = "planning";
 
     try {
-      const task = await Workbench.Submit(agentId, text);
+      const task = await Workbench.Submit(this.conversation, agentId, text);
       this.runId = task.id;
     } catch (err) {
       this.notice(messageOf(err), "error");
@@ -500,7 +529,7 @@ export class ClaudeSession {
     this.chatStatus = "planning";
 
     try {
-      const task = await Workbench.Chat(text, this.mode);
+      const task = await Workbench.Chat(this.conversation, text);
       this.chatId = task.id;
     } catch (err) {
       this.notice(messageOf(err), "error");
@@ -557,37 +586,28 @@ export class ClaudeSession {
     this.chatStatus = "idle";
     this.chatId = null;
     this.chatCostUsd = 0;
+    this.totalCostUsd = 0;
     this.draft = "";
+    // The indexes point into the transcript that just went, so they go with
+    // it. A stale turn left in here would take a new run's events.
   }
 
   /**
    * Empties this transcript and forgets the agents' memory of it.
    *
-   * The backend half of this is the window's rather than one mode's:
-   * ClearConversation forgets every session and empties the board, and making
-   * that per-mode would mean the board clearing or not depending on which mode
-   * somebody happened to be looking at. So Conversations.clear() empties all
-   * three on screen to match, and the button says what it does -- a Clear that
-   * silently emptied two conversations nobody could see is the kind of thing
-   * that is only noticed after something has been lost.
+   * This one, and nothing else. The backend half used to be the window's --
+   * every session of every agent, plus the board -- which was defensible when
+   * there were three transcripts and one of them was always the one you meant.
+   * There is one per tab per mode now, and a button that emptied all of them
+   * and the board would be a button nobody could afford to press.
+   *
+   * The screen half is forget(), because the two are the same act seen from
+   * either side and keeping two copies of that list is how they drift.
    */
   async clear(): Promise<void> {
-    this.cancelFlush();
-    this.pending.clear();
-    this.entries = [];
-    // The indexes point into the transcript that just went, so they go with
-    // it. A stale turn left in here would take a new run's events.
-    this.turns.clear();
-    this.tools.clear();
-    this.status = "idle";
-    this.runId = null;
-    this.runCostUsd = 0;
-    this.chatStatus = "idle";
-    this.chatId = null;
-    this.chatCostUsd = 0;
-    this.draft = "";
+    this.forget();
     try {
-      await Workbench.ClearConversation();
+      await Workbench.ClearConversation(this.conversation);
     } catch {
       // Nothing useful to say: the screen is clear either way, and the next
       // request will simply continue the old session.

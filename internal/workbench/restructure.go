@@ -89,7 +89,7 @@ func (w *Workbench) Restructure(tabID, mode, request string) (Task, error) {
 		// Its own conversation, the same one the mode's chat uses -- but a
 		// restructuring never resumes, so this only decides which transcript it
 		// is counted against.
-		mode: mode,
+		conv: Conversation{TabID: tabID, Mode: mode},
 		proposal: &proposalRun{
 			mcpConfig: config,
 			state:     state,

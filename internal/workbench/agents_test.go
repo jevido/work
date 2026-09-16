@@ -105,8 +105,8 @@ func TestReloadAgentsReconcilesSessions(t *testing.T) {
 		t.Fatalf("ReloadAgents: %v", err)
 	}
 
-	w.rememberSession(runSession("anton"), "session-anton")
-	w.rememberSession(runSession("temp"), "session-temp")
+	w.rememberSession(runSession("anton", in(ModeWork)), "session-anton")
+	w.rememberSession(runSession("temp", in(ModeWork)), "session-temp")
 
 	if err := os.RemoveAll(gone); err != nil {
 		t.Fatal(err)
@@ -115,10 +115,10 @@ func TestReloadAgentsReconcilesSessions(t *testing.T) {
 		t.Fatalf("ReloadAgents after removal: %v", err)
 	}
 
-	if got := w.sessionFor(runSession("anton")); got != "session-anton" {
+	if got := w.sessionFor(runSession("anton", in(ModeWork))); got != "session-anton" {
 		t.Errorf("surviving agent lost their session: %q", got)
 	}
-	if got := w.sessionFor(runSession("temp")); got != "" {
+	if got := w.sessionFor(runSession("temp", in(ModeWork))); got != "" {
 		t.Errorf("departed agent kept a session: %q", got)
 	}
 }

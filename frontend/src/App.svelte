@@ -129,8 +129,9 @@
 
   const active = $derived(workspaces.active);
 
-  /** The transcript for the mode on screen. */
-  const session = $derived(conversations.for(active?.mode ?? "work"));
+  /** The transcript for the tab and mode on screen. Both, because a tab you
+      switch away from keeps its conversation where you left it. */
+  const session = $derived(conversations.for(active?.id ?? "", active?.mode ?? "work"));
 
   /**
    * Whether the tab on screen is the tab agents run in.
@@ -189,10 +190,14 @@
   /*
     Which conversation new work belongs to. Read at the moment it starts rather
     than when its output arrives: a run takes a while and people do not sit and
-    watch it, so the mode on screen when the answer comes back is routinely not
-    the one that asked.
+    watch it, so what is on screen when the answer comes back is routinely not
+    what asked -- a different mode, and now a different tab as well.
   */
-  conversations.current = () => active?.mode ?? "work";
+  conversations.current = () => session;
+
+  // A tab that goes takes its transcripts with it -- unless something in them
+  // is still running, which Conversations.forget refuses on.
+  workspaces.onTabGone = (id) => conversations.forget(id);
 
   $effect(() => conversations.listen());
   $effect(() => board.listen());
@@ -628,7 +633,7 @@
           {session}
           {review}
           lead={roster.leadFor(active?.mode ?? "work")}
-          clear={() => conversations.clear()}
+          clear={() => conversations.clear(session)}
         >
           {#snippet controls()}
             <PermissionMenu {permissions} />
