@@ -48,9 +48,13 @@ func (w *Workbench) Restructure(tabID, mode, request string) (Task, error) {
 		return Task{}, fmt.Errorf("workbench: local claude CLI not found on PATH: %w", err)
 	}
 
-	lead, ok := w.registry.Coordinator()
+	// The mode's own agent. This is the call behind the chat panel in idea and
+	// planning, and it is the whole reason those modes have an owner: the
+	// person is thinking out loud at somebody, and who that somebody is
+	// changes the answer more than any prompt here does.
+	lead, ok := w.registry.For(mode)
 	if !ok {
-		return Task{}, errors.New("workbench: no coordinator configured")
+		return Task{}, errors.New("workbench: no agent configured")
 	}
 
 	// The state is read before anything is started, so what Claude is told is

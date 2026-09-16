@@ -11,12 +11,70 @@
   import type { Workspace } from "../lib/workspace/workspace.svelte";
   import type { Restructuring } from "../lib/workspace/restructure.svelte";
   import AskClaude from "./AskClaude.svelte";
+  import MindmapCanvas from "./MindmapCanvas.svelte";
 
   let { workspace, restructuring }: { workspace: Workspace; restructuring: Restructuring } =
     $props();
 
   /** What was just done, for the live region. */
   let said = $state("");
+
+  /**
+   * The region the plan is being read through, or null for the whole plan.
+   *
+   * A plan is one flat ordered list, and past about fifteen items the question
+   * stops being "what is next" and becomes "what is next *about this*". A
+   * region already answers that: it is a cluster somebody drew around a set of
+   * lines and said was one piece of work, and the tasks extracted from those
+   * lines are that piece's plan.
+   *
+   * A filter and not a separate document. Position is global -- number 3 is
+   * number 3 of the plan whether or not the other six are on screen -- so what
+   * this hides is rows, never order.
+   */
+  let through = $state<string | null>(null);
+
+  /** The regions that still exist, so a filter cannot outlive the one it names. */
+  const regions = $derived(workspace.regions);
+
+  $effect(() => {
+    if (through !== null && !regions.some((region) => region.id === through)) through = null;
+  });
+
+  /** The line the map pane draws from: the branch the chosen region hangs off. */
+  const mapRoot = $derived(through ? workspace.regionRootOf(through) : null);
+
+  /**
+   * The tasks on screen, which is all of them or the ones from one region.
+   *
+   * Their number is the position in the whole plan, not in the filtered view.
+   * Renumbering under a filter would make "take number 3 next" mean two
+   * different tasks depending on what somebody had clicked.
+   */
+  const shown = $derived.by(() => {
+    const all = workspace.tasks.map((task, at) => ({ task, at }));
+    if (!through) return all;
+    const members = new Set(workspace.regionMembers(through));
+    return all.filter(({ task }) => {
+      const source = sourceIdOf(task);
+      return source !== null && members.has(source);
+    });
+  });
+
+  const done = $derived(workspace.tasks.filter((task) => statusOf(task) === "done").length);
+
+  /** The first task not finished, which is what work mode picks up. */
+  const next = $derived(workspace.tasks.findIndex((task) => statusOf(task) !== "done"));
+
+  function extract() {
+    if (!through) return;
+    const made = workspace.extractRegion(through);
+    say(
+      made === 0
+        ? "Every line in that region is already on the plan."
+        : `Added ${made} ${made === 1 ? "task" : "tasks"} from the region.`,
+    );
+  }
 
   /**
    * The inputs, by task id, so a reorder can keep the caret on the task that
@@ -125,9 +183,17 @@
 <section class="plan" aria-label="Plan">
   <header>
     <h2>Plan</h2>
-    <p class="hint">
-      In order. <kbd>Alt</kbd>+<kbd>↑↓</kbd> to reorder, <kbd>Enter</kbd> for a new task.
+    <!-- Counts rather than a sentence about how the list works. The keys are
+         in the strip along the bottom of the window now, and what this line is
+         worth saying is how much there is and how much of it is finished. -->
+    <p class="counts">
+      {workspace.tasks.length}
+      {workspace.tasks.length === 1 ? "task" : "tasks"}{#if done > 0} · {done} done{/if} · order is
+      the content
     </p>
+    {#if through}
+      <button class="ghost" onclick={extract}>Extract from region</button>
+    {/if}
     <button class="ghost" onclick={add}>Add task</button>
   </header>
 
@@ -141,8 +207,69 @@
 
   <p class="announce" role="status" aria-live="polite">{said}</p>
 
+  <div class="columns">
+    <!--
+      The map of the region the plan is being read through.
+
+      Only when there is one. A pane that was always there would be a third of
+      the width of the plan spent on an empty box for everybody who has never
+      drawn a region -- and the plan, unlike the outline, is a list whose whole
+      job is to be read straight down.
+    -->
+    {#if through && mapRoot}
+      <aside class="map-pane" aria-label="The region this plan came from">
+        <p class="pane-title">Map · the region this plan came from</p>
+        <MindmapCanvas {workspace} rootedAt={mapRoot} compact />
+        <p class="pane-note">
+          Only the tasks extracted from this region are listed. <strong>Extract from
+          region</strong> puts the rest of its lines on the plan.
+        </p>
+      </aside>
+    {/if}
+
+    <div class="list">
+      {#if regions.length > 0}
+        <!--
+          Radios rather than a select, and one of them is "everything".
+          Filtering a plan is a thing somebody flicks between while reading, and
+          a dropdown makes each flick two clicks and a menu over the list they
+          are trying to read.
+        -->
+        <fieldset class="through">
+          <legend class="sr">Read the plan through</legend>
+          <label class:on={through === null}>
+            <input
+              type="radio"
+              name="plan-region-{workspace.id}"
+              checked={through === null}
+              onchange={() => (through = null)}
+            />
+            <span>All</span>
+          </label>
+          {#each regions as region (region.id)}
+            <label class:on={through === region.id}>
+              <input
+                type="radio"
+                name="plan-region-{workspace.id}"
+                checked={through === region.id}
+                onchange={() => (through = region.id)}
+              />
+              <span>{region.name}</span>
+            </label>
+          {/each}
+        </fieldset>
+      {/if}
+
   <div class="scroller">
-    {#if workspace.tasks.length === 0}
+    {#if workspace.tasks.length > 0 && shown.length === 0}
+      <div class="empty">
+        <p>Nothing on the plan from that region yet.</p>
+        <p class="quiet">
+          <strong>Extract from region</strong> puts each of its lines on the plan, in the
+          order they are written.
+        </p>
+      </div>
+    {:else if workspace.tasks.length === 0}
       <div class="empty">
         <p>Nothing on the plan yet.</p>
         <p class="quiet">
@@ -156,11 +283,11 @@
       <!-- An ordered list, because the order is the content. A screen reader
            saying "3 of 9" on every task is the plan's main fact. -->
       <ol>
-        {#each workspace.tasks as task, at (task.id)}
+        {#each shown as { task, at } (task.id)}
           {@const status = statusOf(task)}
           {@const source = workspace.sourceOf(task)}
           {@const deletedSource = source === null && sourceIdOf(task) !== null}
-          <li data-status={status}>
+          <li data-status={status} style="--number: '{at + 1}'">
             <div class="head">
               <label class="status">
                 <span class="sr">Status of {labelOf(task, 40)}</span>
@@ -252,6 +379,15 @@
       </ol>
     {/if}
   </div>
+
+      {#if next >= 0}
+        <!-- The one thing the plan is for, said once at the end of it rather
+             than as a badge on a row: which of these is next is a fact about
+             the order, and the order is the whole list. -->
+        <p class="next">Work mode takes number {next + 1} next.</p>
+      {/if}
+    </div>
+  </div>
 </section>
 
 <style>
@@ -280,11 +416,107 @@
     color: var(--muted);
   }
 
-  .hint {
+  .counts {
+    margin: 0 auto 0 0;
+    color: var(--muted);
+    font-size: 11.5px;
+  }
+
+  /* Two columns when a region is being read through, one when not. The map is
+     a fixed width because it is a picture: letting it share the slack would
+     shrink the plan every time somebody clicked a region. */
+  .columns {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+  }
+
+  .map-pane {
+    display: flex;
+    flex: none;
+    flex-direction: column;
+    gap: 8px;
+    width: 430px;
+    min-height: 0;
+    padding: 12px;
+    border-right: 1px solid var(--line);
+  }
+
+  .pane-title,
+  .pane-note {
     margin: 0;
-    margin-right: auto;
+    flex: none;
     color: var(--muted);
     font-size: 11px;
+  }
+
+  .pane-note {
+    padding: 10px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    background: var(--panel-2);
+    line-height: 1.55;
+  }
+
+  .pane-note strong {
+    color: var(--text);
+    font-weight: 500;
+  }
+
+  .list {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    flex-direction: column;
+  }
+
+  .through {
+    display: flex;
+    flex: none;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin: 0;
+    padding: 8px 12px 0;
+    border: none;
+  }
+
+  .through label {
+    padding: 2px 9px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--panel-2);
+    color: var(--muted);
+    font-size: 11px;
+    cursor: pointer;
+  }
+
+  .through label.on {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  /* The radio itself is off screen, not hidden: the label is what is drawn, and
+     an input with display:none is an input the keyboard cannot reach. */
+  .through input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+  }
+
+  .through label:has(:focus-visible) {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
+  .next {
+    flex: none;
+    margin: 0;
+    padding: 8px 12px;
+    border-top: 1px solid var(--line);
+    color: var(--muted);
+    font-size: 11.5px;
   }
 
   kbd {
@@ -307,20 +539,23 @@
     margin: 0;
     padding: 0;
     list-style: none;
-    counter-reset: task;
   }
 
   li {
-    counter-increment: task;
     padding: 5px 0 5px 26px;
     border-bottom: 1px solid var(--line);
     position: relative;
   }
 
   /* The number is drawn rather than read out: the input's own label already
-     says "Task 3 of 9", and a list marker would say the number twice. */
+     says "Task 3 of 9", and a list marker would say the number twice.
+
+     It comes from the row rather than from a CSS counter, because filtering
+     the list to one region must not renumber it: these are positions in the
+     plan, and "take number 3 next" has to mean the same task whatever somebody
+     has clicked. A counter counts what is on screen. */
   li::before {
-    content: counter(task);
+    content: var(--number, "");
     position: absolute;
     left: 0;
     top: 10px;
@@ -342,11 +577,15 @@
     gap: 6px;
   }
 
+  /* Drawn as a pill, and still a native select underneath. A hand-rolled
+     three-state control here would be reimplementing a listbox badly: this one
+     already knows the keyboard, the touch picker and the platform's own
+     conventions, and the only thing the design wanted from it was its shape. */
   select {
     flex: none;
-    padding: 2px 4px;
+    padding: 1px 6px;
     border: 1px solid var(--line);
-    border-radius: 4px;
+    border-radius: 999px;
     background: var(--panel-2);
     color: var(--muted);
     font: inherit;

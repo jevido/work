@@ -7,20 +7,38 @@ import (
 	"testing"
 )
 
-// A fresh root gets the coordinator and nobody else: the team is the user's
-// to author, and a folder they did not create is a folder they did not ask for.
-func TestEnsureSeedsCoordinatorOnly(t *testing.T) {
+// A fresh root gets the built-in team and nobody else. Two agents, for two
+// different reasons -- Scan cannot assemble a team without a coordinator, and
+// the idea and planning modes would otherwise be led by him -- and everyone
+// beyond them is the user's to author. A folder they did not create is a folder
+// they did not ask for.
+func TestEnsureSeedsTheBuiltInTeam(t *testing.T) {
 	root := t.TempDir()
 	if err := Ensure(root); err != nil {
 		t.Fatalf("Ensure: %v", err)
 	}
 
-	dir := filepath.Join(root, AgentsDirName, CoordinatorFolder)
-	if _, err := os.Stat(filepath.Join(dir, PersonalityFileName)); err != nil {
-		t.Errorf("no %s: %v", PersonalityFileName, err)
+	for _, folder := range []string{CoordinatorFolder, ThinkerFolder} {
+		dir := filepath.Join(root, AgentsDirName, folder)
+		if _, err := os.Stat(filepath.Join(dir, PersonalityFileName)); err != nil {
+			t.Errorf("%s has no %s: %v", folder, PersonalityFileName, err)
+		}
+		if info, err := os.Stat(filepath.Join(dir, SkillsDirName)); err != nil || !info.IsDir() {
+			t.Errorf("%s has no %s directory: %v", folder, SkillsDirName, err)
+		}
 	}
-	if info, err := os.Stat(filepath.Join(dir, SkillsDirName)); err != nil || !info.IsDir() {
-		t.Errorf("no %s directory: %v", SkillsDirName, err)
+
+	// The personality file is the person's document, not a copy of the system
+	// prompt. Seeding it from the prompt sent Claude its own instructions twice
+	// on every turn, for the life of the folder.
+	seeded, err := os.ReadFile(
+		filepath.Join(root, AgentsDirName, CoordinatorFolder, PersonalityFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	built, _ := Default().Get(CoordinatorFolder)
+	if strings.Contains(string(seeded), built.SystemPrompt) {
+		t.Error("the starter personality is a copy of the system prompt")
 	}
 
 	entries, err := os.ReadDir(filepath.Join(root, AgentsDirName))
@@ -32,16 +50,34 @@ func TestEnsureSeedsCoordinatorOnly(t *testing.T) {
 		names = append(names, e.Name())
 	}
 	// The template sits beside the agents without being one, so a fresh root
-	// holds the coordinator and something to copy.
-	if len(names) != 2 {
-		t.Errorf("seeded %v, want %s and %s", names, CoordinatorFolder, TemplateFolderName)
+	// holds the two built-ins and something to copy.
+	if len(names) != 3 {
+		t.Errorf("seeded %v, want %s, %s and %s",
+			names, CoordinatorFolder, ThinkerFolder, TemplateFolderName)
 	}
 	list, err := Scan(root)
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
-	if len(list) != 1 || list[0].ID != CoordinatorFolder {
-		t.Errorf("scanned %d agents, want only %s", len(list), CoordinatorFolder)
+	if len(list) != 2 {
+		t.Fatalf("scanned %d agents, want the two built-ins", len(list))
+	}
+	// Order matters: the office draws the roster in the order Scan returns it,
+	// and the coordinator sits at the front of the room.
+	if list[0].ID != CoordinatorFolder || list[1].ID != ThinkerFolder {
+		t.Errorf("scanned %s then %s, want %s then %s",
+			list[0].ID, list[1].ID, CoordinatorFolder, ThinkerFolder)
+	}
+
+	// A fresh root can route, which is a different property from having two
+	// folders in it: the routing schema needs at least one non-coordinator to
+	// enumerate, and until now a fresh root had none.
+	fresh := NewRegistry(list...)
+	if lead, ok := fresh.For("idea"); !ok || lead.ID != ThinkerFolder {
+		t.Errorf("For(idea) = %+v, %v; want %s", lead, ok, ThinkerFolder)
+	}
+	if lead, ok := fresh.For("work"); !ok || lead.ID != CoordinatorFolder {
+		t.Errorf("For(work) = %+v, %v; want %s", lead, ok, CoordinatorFolder)
 	}
 }
 
@@ -130,12 +166,19 @@ func TestScanAcceptsACopiedTemplate(t *testing.T) {
 	}
 }
 
-// A one-agent office is the state right after setup, so Anton alone must be a
-// scannable, seatable team rather than an edge case.
+// A one-agent office is what a roster somebody has edited down to looks like,
+// so Anton alone must be a scannable, seatable team rather than an edge case --
+// and the modes he does not own have to fall back to him rather than stop.
 func TestScanCoordinatorAlone(t *testing.T) {
 	root := t.TempDir()
 	if err := Ensure(root); err != nil {
 		t.Fatalf("Ensure: %v", err)
+	}
+	// Deleted rather than never seeded: Ensure puts the built-in team back on
+	// every call, so this is the state of a root somebody has pruned and then
+	// reopened, which is the one that has to keep working.
+	if err := os.RemoveAll(filepath.Join(root, AgentsDirName, ThinkerFolder)); err != nil {
+		t.Fatal(err)
 	}
 
 	list, err := Scan(root)
@@ -148,6 +191,14 @@ func TestScanCoordinatorAlone(t *testing.T) {
 	AssignDesks(list)
 	if list[0].Desk.X == 0 && list[0].Desk.Y == 0 {
 		t.Error("coordinator got no desk")
+	}
+
+	pruned := NewRegistry(list...)
+	for _, mode := range []string{"idea", "planning", "work"} {
+		lead, ok := pruned.For(mode)
+		if !ok || lead.ID != CoordinatorFolder {
+			t.Errorf("For(%q) = %+v, %v; want the coordinator to stand in", mode, lead, ok)
+		}
 	}
 }
 
@@ -180,8 +231,8 @@ func TestScanPicksUpHandMadeFolder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Scan: %v", err)
 	}
-	if len(list) != 2 {
-		t.Fatalf("got %d agents, want 2", len(list))
+	if len(list) != 3 {
+		t.Fatalf("got %d agents, want 3 (the two built-ins and the hand-made one)", len(list))
 	}
 	if list[0].ID != "anton" || list[0].Role != RoleCoordinator {
 		t.Errorf("coordinator is not first: %+v", list[0])

@@ -60,6 +60,26 @@ export interface AgentStatus {
     "skillset": string[] | null;
 
     /**
+     * Modes are the conversations this agent leads: "idea", "planning",
+     * "work". Empty means it leads none, which is true of every agent the user
+     * authors and of every specialist.
+     * 
+     * A field rather than a third Role, because Role is read in five places
+     * that each ask a binary question -- who gets a desk at the front, who may
+     * be delegated to, who is named in the roster, who receives a task first --
+     * and the answer at all five for a mode owner is "the same as anybody
+     * else". Leading a conversation and being delegable are different
+     * properties, and collapsing them into one enum means changing either one
+     * moves the other.
+     * 
+     * Not settable from disk, for the reason Role is not: Scan attaches the
+     * built-in struct by folder name, so agents/jared inherits these and a
+     * folder called anything else cannot quietly take a mode off the agent
+     * that owns it. See Registry.For for what happens when nobody claims one.
+     */
+    "modes"?: string[] | null;
+
+    /**
      * Personality is a short description of how the agent behaves: the traits
      * that colour an answer without changing what it knows.
      */
@@ -443,7 +463,8 @@ export interface Status {
     "local"?: boolean;
 
     /**
-     * State is one of SyncOffline, SyncSyncing, SyncOnline, SyncRejected.
+     * State is one of SyncLocal, SyncOffline, SyncSyncing, SyncOnline,
+     * SyncRejected.
      */
     "state"?: string;
 

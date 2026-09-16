@@ -16,7 +16,7 @@
    * takes a document to seed one with. A button that pretended otherwise
    * would lose whatever was in the outline.
    */
-  export type Purpose = "create" | "join" | "rekey" | "tab";
+  export type Purpose = "create" | "join" | "rekey" | "tab" | "keys";
 
   let {
     purpose,
@@ -37,15 +37,37 @@
   let signupToken = $state("");
   let invite = $state("");
 
-  /** The read key, once there is one. The only moment the server will show it. */
-  let readKey = $state<string | null>(null);
-  let copied = $state(false);
+  /** True once a workspace has been made, so the dialog can show its keys. */
+  let made = $state(false);
+  /** Which field was last copied, so one button at a time says "Copied". */
+  let copied = $state<string | null>(null);
+
+  /**
+   * The keys, whenever anybody asks.
+   *
+   * This used to be a read key shown once, at creation, with a line saying the
+   * server would never show it again. The second half of that was true and the
+   * first half was the wrong thing to build on it: a key is a door, not a
+   * password. Everyone who is in the workspace holds one already, and somebody
+   * who wants to send a colleague a read-only link an hour later should not
+   * have to make a new workspace to get one.
+   *
+   * The server genuinely cannot show an old key -- it keeps hashes -- so the
+   * button that gets you one mints a new one. The old ones keep working.
+   */
+  $effect(() => {
+    if (purpose === "keys") void workspaces.loadKeys();
+  });
+
+  const keys = $derived(workspaces.keys);
+  const showingKeys = $derived(purpose === "keys" || made);
 
   const TITLES: Record<Purpose, string> = {
     create: "New workspace",
     join: "Join a workspace",
     rekey: "Use a different key",
     tab: "New tab",
+    keys: "Keys for this workspace",
   };
 
   /**
@@ -74,6 +96,8 @@
         return invite.trim() !== "";
       case "tab":
         return name.trim() !== "";
+      case "keys":
+        return false;
     }
   });
 
@@ -83,10 +107,11 @@
 
     switch (purpose) {
       case "create": {
-        const made = await workspaces.createShared(server.trim(), signupToken.trim(), name);
-        // The dialog stays open on success, because it is now holding the one
-        // copy of the read key that will ever exist.
-        if (made) readKey = made.readKey;
+        // The dialog stays open on success and turns into the keys panel: the
+        // next thing anybody does after making a workspace is invite somebody
+        // to it. Not because this is the last chance to see anything -- the
+        // same panel opens from the badge whenever you want it.
+        if (await workspaces.createShared(server.trim(), signupToken.trim(), name)) made = true;
         return;
       }
       case "join":
@@ -97,6 +122,8 @@
         return;
       case "tab":
         if (await workspaces.newTab(name)) onclose();
+        return;
+      case "keys":
         return;
     }
   }
@@ -113,20 +140,26 @@
     if (await workspaces.leave()) onclose();
   }
 
-  async function copy() {
-    if (!readKey) return;
+  async function copy(what: string, text: string) {
+    if (!text) return;
     try {
-      await navigator.clipboard.writeText(viewerLink);
-      copied = true;
+      await navigator.clipboard.writeText(text);
+      copied = what;
     } catch {
-      // No clipboard permission. The field is selectable, which is what the
-      // button was a shortcut for.
-      copied = false;
+      // No clipboard permission. Every field here is selectable, which is what
+      // the button was a shortcut for.
+      copied = null;
     }
   }
 
+  /** The server the keys belong to: the joined one, else whatever was typed. */
+  const base = $derived((workspaces.view?.serverUrl || server).trim().replace(/\/+$/, ""));
+
   /** What you actually send somebody: the viewer, with the read key in the fragment. */
-  const viewerLink = $derived(`${server.trim().replace(/\/+$/, "")}/#k=${readKey ?? ""}`);
+  const viewerLink = $derived(keys?.readKey ? `${base}/#k=${keys.readKey}` : "");
+
+  /** The same for somebody who is meant to be able to change things. */
+  const joinLink = $derived(keys?.writeKey ? `${base}/#k=${keys.writeKey}` : "");
 
   /**
    * Native <dialog>, opened modally.
@@ -146,25 +179,86 @@
   <form onsubmit={submit}>
     <h2 id="workspace-dialog-title">{TITLES[purpose]}</h2>
 
-    {#if readKey !== null}
-      <!-- Done, and now holding something that cannot be recovered. -->
-      <p class="lede">
-        Created. This is the only time the server will show the read key, so take it
-        now.
-      </p>
+    {#if showingKeys}
+      <!--
+        Both keys, whenever anybody asks.
+
+        A key is a door, not a password: it is what somebody needs to be in the
+        workspace at all, and everyone who is already in it is holding one. The
+        version of this that showed a read key once and said the server would
+        never show it again was treating a share link like a recovery code --
+        and it left the only way to get one being to make a new workspace.
+      -->
+      {#if made}
+        <p class="lede">Created. These are its keys — this panel opens again from the badge.</p>
+      {/if}
 
       <label>
-        <span>Link for a read-only viewer</span>
-        <input type="text" value={viewerLink} readonly onfocus={(e) => e.currentTarget.select()} />
+        <span>Read-only link</span>
+        <input
+          type="text"
+          value={viewerLink}
+          readonly
+          placeholder="none on this machine yet"
+          onfocus={(e) => e.currentTarget.select()}
+        />
       </label>
       <p class="note">
-        Anyone with this link can read the outline and the plan, and change nothing.
+        Anyone with this can read the map and the plan in a browser, and change nothing.
+        {#if !keys?.readKey}
+          This machine has no read key — it joined with a write key, and the server keeps
+          only hashes, so there is no old one to show. Make one.
+        {/if}
+      </p>
+      <div class="row">
+        <button
+          type="button"
+          class="ghost"
+          disabled={!viewerLink}
+          onclick={() => copy("read", viewerLink)}
+        >
+          {copied === "read" ? "Copied" : "Copy"}
+        </button>
+        <button type="button" class="ghost" disabled={workspaces.busy} onclick={() => workspaces.mint("read")}>
+          {keys?.readKey ? "Make a fresh one" : "Make a read key"}
+        </button>
+      </div>
+
+      <label>
+        <span>Write key</span>
+        <input type="text" value={keys?.writeKey ?? ""} readonly onfocus={(e) => e.currentTarget.select()} />
+      </label>
+      <p class="note">
+        This is the one this machine syncs with. Anyone holding it can change the
+        workspace, so send it only to people who should be able to.
+      </p>
+      <div class="row">
+        <button
+          type="button"
+          class="ghost"
+          disabled={!joinLink}
+          onclick={() => copy("write", joinLink)}
+        >
+          {copied === "write" ? "Copied" : "Copy link"}
+        </button>
+        <button
+          type="button"
+          class="ghost"
+          disabled={workspaces.busy}
+          onclick={() => workspaces.mint("write")}
+        >
+          Make another write key
+        </button>
+      </div>
+      <p class="note">
+        Making a key never takes one away: every key already in use keeps working.
       </p>
 
+      {#if workspaces.error}
+        <p class="error" role="alert">{workspaces.error}</p>
+      {/if}
+
       <footer>
-        <button type="button" class="ghost" onclick={copy}>
-          {copied ? "Copied" : "Copy link"}
-        </button>
         <button type="button" class="primary" onclick={onclose}>Done</button>
       </footer>
     {:else}
@@ -363,6 +457,29 @@
 
   details {
     margin: -4px 0 0;
+  }
+
+  /* The two buttons that belong to the field above them: copy it, or ask the
+     server for a new one. Right-aligned so they read as attached to the field
+     rather than as the dialog's own actions, which are in the footer. */
+  .row {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin: -6px 0 0;
+  }
+
+  .row button {
+    padding: 4px 10px;
+    border-radius: 5px;
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+  }
+
+  .row button:disabled {
+    opacity: 0.45;
+    cursor: default;
   }
 
   summary {

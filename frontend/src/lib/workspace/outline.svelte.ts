@@ -20,6 +20,8 @@ import type { Workspace } from "./workspace.svelte";
 export type Caret = "start" | "end";
 
 export interface OutlineContext {
+  /** The line the caret has been asked for but has not reached. See wants. */
+  readonly wants: string | null;
   workspace: Workspace;
   /** Registers a line's input, and applies a focus that was waiting for it. */
   register(id: string, el: HTMLInputElement): () => void;
@@ -63,6 +65,18 @@ export class OutlineKeys {
   /** The line the caret is in, or null. Drives nothing but the row's styling. */
   active = $state<string | null>(null);
 
+  /**
+   * The line the caret has been asked for but has not reached yet.
+   *
+   * There used to be one input per line, all of them mounted, so asking for the
+   * caret was only ever a matter of waiting for the DOM. The map has one input
+   * and moves it: the line somebody is editing is the line the input is over,
+   * so a request to focus another line is first a request to *put* the input
+   * there. That is what this is for -- the canvas follows it, moves the editor,
+   * and the register below does the rest exactly as before.
+   */
+  wants = $state<string | null>(null);
+
   #workspace: Workspace;
   #inputs = new Map<string, HTMLInputElement>();
   #want: { id: string; caret: Caret } | null = null;
@@ -83,7 +97,15 @@ export class OutlineKeys {
   exit: HTMLElement | null = null;
 
   context(): OutlineContext {
+    // A getter rather than a copied value: `wants` changes after this object
+    // is built, and the map reads it inside an effect. A plain property would
+    // be the value it had the moment the context was created, which is null
+    // and stays null.
+    const keys = this;
     return {
+      get wants() {
+        return keys.wants;
+      },
       workspace: this.#workspace,
       register: (id, el) => this.register(id, el),
       keydown: (event, row) => this.keydown(event, row),
@@ -125,6 +147,7 @@ export class OutlineKeys {
    */
   focus(id: string, caret: Caret = "end"): void {
     this.#want = { id, caret };
+    this.wants = id;
     void tick().then(() => this.#apply());
   }
 
@@ -134,6 +157,7 @@ export class OutlineKeys {
     const el = this.#inputs.get(want.id);
     if (!el) return;
     this.#want = null;
+    this.wants = null;
     el.focus();
     const at = want.caret === "start" ? 0 : el.value.length;
     el.setSelectionRange(at, at);

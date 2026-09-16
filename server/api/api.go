@@ -44,6 +44,7 @@ type Store interface {
 	Lookup(ctx context.Context, key string) (store.Auth, error)
 	Workspace(ctx context.Context, id string) (store.Workspace, error)
 	CreateWorkspace(ctx context.Context, name string) (store.Created, error)
+	MintKey(ctx context.Context, workspaceID string, access store.Access) (string, error)
 	Append(ctx context.Context, workspaceID string, list []ops.Op) (store.AppendResult, error)
 	Log(ctx context.Context, workspaceID string, since int64, limit int) ([]store.Entry, int64, error)
 }
@@ -99,6 +100,12 @@ func (a *API) Handler() http.Handler {
 
 	mux.Handle("GET /v1/workspace", a.authed(store.AccessRead, a.workspace))
 	mux.Handle("/v1/workspace", a.plain(methodNotAllowed))
+
+	// Write access, and not because minting is a write to the log -- it is
+	// not. It is because a read key that could mint a write key would be a read
+	// key with write access, one request later.
+	mux.Handle("POST /v1/keys", a.authed(store.AccessWrite, a.mintKey))
+	mux.Handle("/v1/keys", a.plain(methodNotAllowed))
 
 	mux.Handle("POST /v1/ops", a.authed(store.AccessWrite, a.appendOps))
 	mux.Handle("GET /v1/ops", a.authed(store.AccessRead, a.readLog))
@@ -183,6 +190,41 @@ func (a *API) createWorkspace(w http.ResponseWriter, r *http.Request) error {
 		WriteKey  string        `json:"writeKey"`
 		ReadKey   string        `json:"readKey"`
 	}{describe(created.Workspace), created.WriteKey, created.ReadKey})
+}
+
+// mintKey issues another key for the workspace the caller's key opens.
+//
+// There is no endpoint that reads a key back, and there cannot be: keys are
+// stored as hashes, so the plaintext of the one handed out at creation does not
+// exist anywhere on this side. What somebody actually wants when they ask to
+// "see the read key again" is a read key they can send to a colleague, and this
+// gives them one.
+//
+// The keys already in use keep working. Minting is not rotation, and a button
+// that quietly cut off every other machine in the workspace would be a very
+// expensive way to get a link.
+func (a *API) mintKey(w http.ResponseWriter, r *http.Request, auth store.Auth) error {
+	var body struct {
+		Access string `json:"access"`
+	}
+	if err := decode(w, r, &body); err != nil {
+		return err
+	}
+	access := store.Access(strings.TrimSpace(body.Access))
+	if access != store.AccessRead && access != store.AccessWrite {
+		return apiError{http.StatusBadRequest, "bad_request", `access must be "read" or "write"`}
+	}
+
+	key, err := a.store.MintKey(r.Context(), auth.WorkspaceID, access)
+	if err != nil {
+		return fmt.Errorf("minting a key: %w", err)
+	}
+	a.logger.Info("key minted", "workspace", auth.WorkspaceID, "access", access)
+
+	return writeJSON(w, http.StatusCreated, struct {
+		Key    string       `json:"key"`
+		Access store.Access `json:"access"`
+	}{key, access})
 }
 
 func (a *API) workspace(w http.ResponseWriter, r *http.Request, auth store.Auth) error {

@@ -49,6 +49,23 @@ type Agent struct {
 	// coordinator's routing prompt is built from these, so they are the part
 	// of an agent's identity that changes where work goes.
 	Skillset []string `json:"skillset"`
+	// Modes are the conversations this agent leads: "idea", "planning",
+	// "work". Empty means it leads none, which is true of every agent the user
+	// authors and of every specialist.
+	//
+	// A field rather than a third Role, because Role is read in five places
+	// that each ask a binary question -- who gets a desk at the front, who may
+	// be delegated to, who is named in the roster, who receives a task first --
+	// and the answer at all five for a mode owner is "the same as anybody
+	// else". Leading a conversation and being delegable are different
+	// properties, and collapsing them into one enum means changing either one
+	// moves the other.
+	//
+	// Not settable from disk, for the reason Role is not: Scan attaches the
+	// built-in struct by folder name, so agents/jared inherits these and a
+	// folder called anything else cannot quietly take a mode off the agent
+	// that owns it. See Registry.For for what happens when nobody claims one.
+	Modes []string `json:"modes,omitempty"`
 	// Personality is a short description of how the agent behaves: the traits
 	// that colour an answer without changing what it knows.
 	Personality string `json:"personality,omitempty"`
@@ -81,6 +98,19 @@ type Agent struct {
 	// SystemPrompt is appended to Claude's own system prompt when this agent
 	// runs. Not wired into delegation yet; Anton's is used for direct tasks.
 	SystemPrompt string `json:"-"`
+	// Starter is what a built-in agent's PERSONALITY.md is seeded with.
+	//
+	// Deliberately not SystemPrompt, which is what Ensure used to write. That
+	// was a quiet bug: the personality file is read back and appended to the
+	// system prompt on every turn (see Workbench.systemPrompt), so seeding it
+	// from the prompt sent the agent its own instructions twice, for the life
+	// of the folder, growing the preamble of every request for nothing.
+	//
+	// This is a different document with a different reader. SystemPrompt is
+	// written for Claude and says how to behave; this is written for the person
+	// who will open the file, and says what the agent is for and what to change
+	// to make it theirs.
+	Starter string `json:"-"`
 	// AllowedTools restricts which tools the agent may use. Empty means the
 	// local Claude defaults apply.
 	AllowedTools []string `json:"-"`
@@ -179,13 +209,44 @@ func (r *Registry) Coordinator() (Agent, bool) {
 	return Agent{}, false
 }
 
-// Default is the team Work insists on, which is the coordinator and nobody
-// else. Specialists are the user's to author: a folder under agents/ is an
-// agent, and agents/_template is there to be copied into one.
+// Coordinator returns the agent that receives tasks first, and For returns
+// the one that leads a conversation.
 //
-// Anton is here rather than on disk because Scan cannot assemble a team
-// without a coordinator, so his role, colour and planning model are Work's to
-// guarantee. His personality file is still the user's document.
+// Two lookups rather than one because they answer different questions. A task
+// arrives with no mode and goes to whoever routes; a conversation arrives with
+// a mode and goes to whoever owns that kind of thinking. Anton is the answer to
+// the first in every mode there is, and to the second only in work.
+func (r *Registry) For(mode string) (Agent, bool) {
+	r.mu.RLock()
+	for _, a := range r.ordered {
+		for _, m := range a.Modes {
+			if m == mode {
+				r.mu.RUnlock()
+				return a, true
+			}
+		}
+	}
+	r.mu.RUnlock()
+
+	// Nobody claims it, which is the ordinary state of a roster somebody has
+	// edited: deleting agents/jared must leave idea mode working rather than
+	// answering "no agent configured" to every question. The coordinator is
+	// what this app had before modes had owners, so it is what it falls back
+	// to.
+	return r.Coordinator()
+}
+
+// Default is the team Work insists on: the two agents that own something no
+// folder can be missing for. Everyone else is the user's to author -- a folder
+// under agents/ is an agent, and agents/_template is there to be copied.
+//
+// Anton because Scan cannot assemble a team without a coordinator. Jared
+// because idea and planning would otherwise be led by the agent whose whole
+// prompt is about routing work, and an app whose thinking modes are run by the
+// person who hands out tasks is the thing having two of them is for.
+//
+// Their roles, colours, models and modes are Work's to guarantee. Their
+// personality files are the user's documents.
 func Default() *Registry {
 	return newPlacedRegistry(
 		Agent{
@@ -200,9 +261,20 @@ func Default() *Registry {
 			// Every routed task pays for a planning turn, so it runs on a
 			// cheaper, faster model than the work itself.
 			PlanModel: "sonnet",
+			// Work, and only work. He is still the agent every task is routed
+			// through whatever mode raised it -- routing has no mode -- but the
+			// idea and planning conversations belong to Jared below.
+			Modes: []string{"work"},
 			Skillset: []string{
 				"task intake", "planning", "delegation", "synthesis",
 			},
+			Starter: "Anton routes work. He reads a task, decides whether to do " +
+				"it himself or split it between the specialists who exist, and " +
+				"owns the files while they do.\n\n" +
+				"Write here how you want him to behave: how much to explain, when " +
+				"to push back on a task as written, how cautious to be about " +
+				"splitting work up. What he already knows about routing and file " +
+				"ownership is built in and does not need repeating.\n",
 			// Deliberately names no colleagues. Every turn he takes is handed
 			// the roster as it actually is, so a prompt that also listed a team
 			// would be a second, staler answer to the same question -- and it
@@ -231,6 +303,52 @@ func Default() *Registry {
 				"is finished with the files. Say plainly in your answer when a " +
 				"share of the work waited, and when a share never got its second " +
 				"run and is therefore unfinished.",
+		},
+		Agent{
+			ID:     "jared",
+			Name:   "Jared",
+			Role:   RoleSpecialist,
+			Title:  "Product engineer",
+			Colour: "#7aa2f7",
+			// A specialist as well as a mode owner, and both on purpose. Anton
+			// may hand him a step like anyone else -- shaping a feature is work
+			// somebody has to do -- and these are the terms the routing prompt
+			// matches on.
+			Skillset: []string{
+				"shaping an idea into something buildable",
+				"asking what a thing is actually for",
+				"breaking work into ordered tasks",
+				"spotting what two ideas have in common",
+			},
+			Modes: []string{"idea", "planning"},
+			SystemPrompt: "You are Jared. You lead the idea and planning " +
+				"conversations in the Work workbench: somebody is thinking out " +
+				"loud and you are thinking with them.\n\n" +
+				"Write things down. A conversation that ends with agreement and " +
+				"an unchanged map has produced nothing -- when a line is worth " +
+				"keeping, put it on the map, and say in a sentence what you " +
+				"added and why. Prefer a short line in the right place to a long " +
+				"one anywhere; a map is read at a glance and a paragraph in a box " +
+				"is a paragraph nobody reads.\n\n" +
+				"Push back. If two branches say the same thing, say so. If a " +
+				"line is three ideas wearing one coat, split it. If somebody is " +
+				"about to plan work for a problem they have not stated, ask what " +
+				"the problem is before you help them solve it. Being agreeable " +
+				"is not the job.\n\n" +
+				"In planning mode the order is the content: a plan is a sequence " +
+				"somebody can pick up cold, smallest genuinely-shippable step " +
+				"first, each one small enough to finish. Say when a task is too " +
+				"big rather than writing it down and hoping.\n\n" +
+				"Do not write code and do not start work. That is Anton's, and " +
+				"the map is not where it happens.",
+			Starter: "Jared thinks with you. He leads the idea and planning " +
+				"conversations, writes what is worth keeping onto the map, and " +
+				"argues when two ideas are the same idea.\n\n" +
+				"Write here how you want him to think with you: how hard to push " +
+				"back, how much to write down versus ask about first, what kind " +
+				"of thinking you want help with. He also takes ordinary work " +
+				"steps when Anton hands him one, so say if you would rather he " +
+				"did not.\n",
 		},
 	)
 }

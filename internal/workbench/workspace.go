@@ -379,6 +379,63 @@ func (w *Workbench) Keys() (Keys, error) {
 	return Keys{WriteKey: w.ws.WriteKey, ReadKey: w.ws.ReadKey}, nil
 }
 
+// MintKey asks the server for another key for the joined workspace.
+//
+// The way a key is ever got hold of again, and a mint rather than a read
+// because there is nothing to read: the server stores hashes, so the plaintext
+// handed out at creation exists only wherever it was written down. A machine
+// that joined with a write key never had the read key at all, and this is how
+// it gets one to send somebody.
+//
+// A minted read key is kept. It is the same thing the creating machine already
+// has in its config, so keeping it means "show me the read key" answers
+// instantly forever after rather than issuing a new one every time somebody
+// opens the panel. A minted write key is not kept: this machine already has one
+// that works, and replacing it would be swapping a credential that is in use
+// for one that has never been tried.
+func (w *Workbench) MintKey(ctx context.Context, access string) (string, error) {
+	access = strings.TrimSpace(access)
+	if access != "read" && access != "write" {
+		return "", fmt.Errorf("workbench: %q is not an access level", access)
+	}
+	if w.ops == nil {
+		return "", ErrNoTransport
+	}
+
+	w.wsMu.Lock()
+	ws := w.ws
+	w.wsMu.Unlock()
+	if ws == nil {
+		return "", errors.New("workbench: no workspace joined")
+	}
+	if ws.ServerURL == "" {
+		return "", errors.New("workbench: this workspace is only on this machine, so it has no keys")
+	}
+
+	key, err := w.ops.Mint(ctx, ws.ServerURL, ws.WriteKey, access)
+	if err != nil {
+		return "", fmt.Errorf("workbench: mint %s key: %w", access, err)
+	}
+	if key == "" {
+		return "", errors.New("workbench: the server returned an empty key")
+	}
+
+	if access == "read" {
+		w.wsMu.Lock()
+		if w.ws != nil {
+			w.ws.ReadKey = key
+		}
+		w.wsMu.Unlock()
+		if err := w.persist(); err != nil {
+			// The key is good and is already in the caller's hands; failing
+			// here would throw away something the server will not show again.
+			// The cost of not writing it down is one more mint next time.
+			return key, nil
+		}
+	}
+	return key, nil
+}
+
 // SyncStatus is where the second stage stands. With no workspace joined it
 // reports the zero Status, whose Joined is false -- which is the whole answer.
 func (w *Workbench) SyncStatus() Status {

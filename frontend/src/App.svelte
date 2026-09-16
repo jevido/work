@@ -2,6 +2,7 @@
   import { untrack } from "svelte";
   import ClaudeConsole from "./components/ClaudeConsole.svelte";
   import ConfigSetup from "./components/ConfigSetup.svelte";
+  import HintBar from "./components/HintBar.svelte";
   import IdeaOutline from "./components/IdeaOutline.svelte";
   import KanbanBoard from "./components/KanbanBoard.svelte";
   import NextTask from "./components/NextTask.svelte";
@@ -308,6 +309,13 @@
   // rather than being handed a copy of it at startup.
   $effect(() => conversations.setAgents(roster.identities));
 
+  /** The last two segments of a path, which is as much as a strip has room for. */
+  function tail(path: string): string {
+    const parts = path.split(/[\\/]/).filter(Boolean);
+    if (parts.length <= 2) return path;
+    return `…/${parts.slice(-2).join("/")}`;
+  }
+
   function openDialog(purpose: Purpose, from?: EventTarget | null) {
     dialogOpener = from instanceof HTMLElement ? from : (document.activeElement as HTMLElement);
     workspaces.error = null;
@@ -387,6 +395,7 @@
       onnew={() => openDialog(workspaces.joined ? "tab" : "create")}
       oncreate={() => openDialog("create")}
       onjoin={() => openDialog("join")}
+      onkeys={() => openDialog("keys")}
     />
 
     <div class="body">
@@ -416,11 +425,25 @@
             {#key active.id}
               <ModeToggle bind:mode={active.mode} group={active.id} />
             {/key}
-            <!-- What the mode is for, in the strip that switches it. The
-                 toggle already says which one you are in, so repeating the
-                 name here would be the same word twice; this says what you
-                 came here to do. -->
-            <p class="what">{MODE_HINTS[active.mode]}</p>
+            <!--
+              Which folder all of this is about.
+
+              The outline, the plan and the office are three views of one
+              project, and until now nothing on screen said which project. What
+              each mode is *for* is still here -- ModeToggle carries it as the
+              title on every option -- and it was the same three sentences on
+              every launch, which is a thing you read once.
+
+              The tail rather than the whole path: the interesting end of a
+              project folder is the last segment or two, and a long absolute
+              path pushes the sync badge off the strip. The whole of it is on
+              the title, for when the tail is ambiguous.
+            -->
+            {#if active.dir}
+              <p class="where" title={active.dir}>{tail(active.dir)}</p>
+            {:else}
+              <p class="what">{MODE_HINTS[active.mode]}</p>
+            {/if}
             <SyncBadge {workspaces} onfix={(purpose) => openDialog(purpose)} />
           </div>
 
@@ -601,7 +624,12 @@
 
              The app's own controls live in its header row, which is the only
              strip in the window that is neither the work nor the watching. -->
-        <ClaudeConsole {session} {review} clear={() => conversations.clear()}>
+        <ClaudeConsole
+          {session}
+          {review}
+          lead={roster.leadFor(active?.mode ?? "work")}
+          clear={() => conversations.clear()}
+        >
           {#snippet controls()}
             <PermissionMenu {permissions} />
             <SettingsMenu {config} review={proposals} />
@@ -609,6 +637,19 @@
         </ClaudeConsole>
       </aside>
     </div>
+
+    <!--
+      What the keyboard does here, along the bottom of the window.
+
+      Outside .body rather than inside a pane, and that is the whole reason it
+      works: it spans the map, the plan and the console alike, so it is in the
+      same place whichever of them you are looking at. Work mode has none --
+      the office is watched rather than typed into, and a strip of shortcuts
+      for a screen with no caret would be three lies in a row.
+    -->
+    {#if active && active.mode !== "work"}
+      <HintBar mode={active.mode} />
+    {/if}
   </main>
 {/if}
 
@@ -641,9 +682,14 @@
 
   main {
     display: grid;
-    /* The tab strip takes its own height off the top; everything else shares
-       what is left. */
-    grid-template-rows: auto minmax(0, 1fr);
+    /* Three rows, and the two `auto` ones are the point: the tab strip takes
+       its own height off the top and the hint strip takes its off the bottom,
+       so both are always there at their natural size and the middle gets
+       whatever is left. Declaring two rows for three children put the hint
+       strip in an implicit row the template had not budgeted for, which came
+       out of the tab strip -- the one part of this window that must never move
+       or shrink, because it is how you get to the other tabs. */
+    grid-template-rows: auto minmax(0, 1fr) auto;
     height: 100%;
     overflow: hidden;
   }
@@ -696,6 +742,18 @@
     margin-right: auto;
     color: var(--muted);
     font-size: 11px;
+  }
+
+  /* Monospace, because it is a path: the eye reads a path by its separators,
+     and a proportional font moves them around under the same folder names. */
+  .where {
+    margin: 0 auto 0 0;
+    overflow: hidden;
+    color: var(--muted);
+    font-family: ui-monospace, monospace;
+    font-size: 11px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   /*

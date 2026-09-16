@@ -11,9 +11,16 @@
     "moduleDetection": "force",
     "skipLibCheck": true,
     "noEmit": true,
-    "strict": true
+    "strict": true,
+    /* Matches the one alias in vite.config.ts. The map is drawn from the
+       desktop app's geometry; see that file for why this one is safe where an
+       alias onto the merge was not. */
+    "baseUrl": ".",
+    "paths": {
+      "@mindmap/*": ["../frontend/src/lib/mindmap/*"]
+    }
   },
   /* The Vite config is Node's, not the browser's, and typing it here would
      mean pulling @types/node into a project whose only job is a static page. */
-  "include": ["src/**/*.ts", "src/**/*.svelte"]
+  "include": ["src/**/*.ts", "src/**/*.svelte", "../frontend/src/lib/mindmap/*.ts"]
 }

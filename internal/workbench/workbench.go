@@ -324,9 +324,12 @@ func (w *Workbench) Chat(prompt, mode string) (Task, error) {
 	w.chatAdmit.Lock()
 	defer w.chatAdmit.Unlock()
 
-	lead, ok := w.registry.Coordinator()
+	// Whoever leads this mode, which is the coordinator only in work. A
+	// question asked over the map is a question about the map, and the agent
+	// whose whole prompt is about routing tasks is the wrong one to answer it.
+	lead, ok := w.registry.For(mode)
 	if !ok {
-		return Task{}, errors.New("workbench: no coordinator configured")
+		return Task{}, errors.New("workbench: no agent configured")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1217,7 +1220,11 @@ func (w *Workbench) systemPrompt(a agents.Agent) string {
 	if personality, err := agents.ReadPersonality(a.Dir); err == nil && personality != "" {
 		parts = append(parts, personality)
 	}
-	if a.Role == agents.RoleCoordinator {
+	// The coordinator, and anyone who leads a conversation. Both are asked
+	// "who works here" -- the coordinator because he routes, a mode owner
+	// because they are the one on screen when somebody wonders -- and an agent
+	// answering that from nothing invents colleagues or denies real ones.
+	if a.Role == agents.RoleCoordinator || len(a.Modes) > 0 {
 		parts = append(parts, rosterBlock(w.registry))
 	}
 	return strings.Join(parts, "\n\n")

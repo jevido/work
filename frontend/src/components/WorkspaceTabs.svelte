@@ -9,6 +9,7 @@
     onnew,
     oncreate,
     onjoin,
+    onkeys,
   }: {
     workspaces: Workspaces;
     panelId: string;
@@ -18,6 +19,8 @@
     oncreate: () => void;
     /** Join one with a key. */
     onjoin: () => void;
+    /** Show this workspace's keys, so somebody can be invited to it. */
+    onkeys: () => void;
   } = $props();
 
   /** The tab a close would retire for everybody. */
@@ -210,6 +213,11 @@
     {#if workspaces.available && !workspaces.cloud}
       <button onclick={oncreate}>On a server…</button>
       <button onclick={onjoin}>Join</button>
+    {:else if workspaces.cloud}
+      <!-- The keys, from the strip as well as from the badge. Inviting somebody
+           is a thing you do at the level of the workspace, which is what this
+           bar is, and it is not a sync status. -->
+      <button onclick={onkeys}>Keys…</button>
     {/if}
   </div>
 </div>

@@ -99,11 +99,12 @@
              selectable: a mistyped or wrong-level folder is the one failure this
              screen exists to catch, and it is caught by reading it. -->
         <p class="path" aria-label="Chosen folder">{config.path}</p>
-        <!-- Setup leaves one agent behind, so say where the rest come from:
-             the next step is a mkdir, not another screen. -->
+        <!-- Setup leaves two agents behind, so say who they are and where the
+             rest come from: the next step is a mkdir, not another screen. -->
         <p class="aside">
-          You start with Anton alone. Add a colleague by making a folder next to
-          his, then Reload config from the wrench.
+          You start with Anton, who routes work, and Jared, who thinks with you in
+          Idea and Planning. Add a colleague by making a folder next to theirs, then
+          Reload config from the wrench.
         </p>
       {:else}
         <p>
@@ -216,8 +217,8 @@
 {#if dialog}
   <!-- The same dialog the running app uses. Setup asking for a server and a key
        in its own words would be a second copy of the error handling, the
-       read-key warning and the "this is the only time you will see this link"
-       screen, kept in step with the first by hand. -->
+       read-key warning and the keys panel, kept in step with the first by
+       hand. -->
   <WorkspaceDialog purpose={dialog} {workspaces} onclose={closeDialog} />
 {/if}
 

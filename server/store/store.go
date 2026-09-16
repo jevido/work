@@ -100,7 +100,11 @@ type Auth struct {
 	Access      Access
 }
 
-// Created is a new workspace and the only time its keys are readable.
+// Created is a new workspace and the keys it was opened with.
+//
+// The only time these two are readable, because only hashes are kept. Another
+// key for the same workspace is a MintKey away, which is what somebody asking
+// to "see the read key again" actually needs.
 type Created struct {
 	Workspace Workspace
 	WriteKey  string
@@ -229,6 +233,43 @@ func (s *Store) CreateWorkspace(ctx context.Context, name string) (Created, erro
 		return Created{}, err
 	}
 	return created, nil
+}
+
+// MintKey issues another key for a workspace that already exists.
+//
+// This is how a key is ever "read back", and it is a mint rather than a read
+// because the plaintext is nowhere: CreateWorkspace hashes both keys and keeps
+// only the hashes, so there is nothing to return. Issuing a fresh one gets
+// somebody the credential they were asking for without the database ever
+// holding a credential at all.
+//
+// Existing keys are left alone. Losing every other machine's access because
+// somebody wanted a link to send a colleague would be a surprising amount of
+// damage for one button; revoking is its own act, and the column is there for
+// when it is built.
+func (s *Store) MintKey(ctx context.Context, workspaceID string, access Access) (string, error) {
+	if access != AccessRead && access != AccessWrite {
+		return "", fmt.Errorf("minting a key: %q is not an access level", access)
+	}
+	prefix := "rk_"
+	if access == AccessWrite {
+		prefix = "wk_"
+	}
+	key, hash, err := newKey(prefix)
+	if err != nil {
+		return "", err
+	}
+	// The workspace is named in the insert rather than checked first: the
+	// foreign key already refuses a workspace that is not there, and checking
+	// separately would be a second round trip that can still be wrong by the
+	// time the insert runs.
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO workspace_keys (key_hash, workspace_id, access) VALUES ($1, $2, $3)`,
+		hash, workspaceID, access,
+	); err != nil {
+		return "", fmt.Errorf("inserting a %s key: %w", access, err)
+	}
+	return key, nil
 }
 
 // Append writes ops to the end of a workspace's log.

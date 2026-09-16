@@ -300,6 +300,18 @@ func (s *WorkbenchService) JoinWorkspace(serverURL, writeKey string) (*workbench
 	return s.wb.JoinWorkspace(ctx, serverURL, writeKey)
 }
 
+// MintKey issues another key for the joined workspace: "read" for a link to
+// send somebody, "write" for another machine to join with.
+//
+// There is no call that reads a key back, because the server keeps only hashes
+// of them. Asking for one is asking for a new one, and the keys already in use
+// keep working.
+func (s *WorkbenchService) MintKey(access string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), joinTimeout)
+	defer cancel()
+	return s.wb.MintKey(ctx, access)
+}
+
 // LeaveWorkspace stops syncing and returns Work to running purely locally.
 // Ops that never reached the server are kept, not discarded.
 func (s *WorkbenchService) LeaveWorkspace() error {

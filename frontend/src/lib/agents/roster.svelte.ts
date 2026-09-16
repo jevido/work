@@ -47,6 +47,27 @@ export class Roster {
     }
   }
 
+  /**
+   * Who leads a conversation in this mode.
+   *
+   * The same question Go's `Registry.For` answers, asked here for one reason:
+   * the console has to say whose box you are typing into, and naming the wrong
+   * agent is worse than naming none. It is a read of the roster rather than a
+   * call, because the roster is already here and a round trip per keystroke to
+   * learn a name would be absurd.
+   *
+   * Falls back to the coordinator exactly as Go does, and then to null for a
+   * team that has neither -- which is a roster that failed to load, and is
+   * already drawn as an empty office.
+   */
+  leadFor(mode: string): AgentStatus | null {
+    return (
+      this.list.find((a) => (a.modes ?? []).includes(mode)) ??
+      this.list.find((a) => a.role === "coordinator") ??
+      null
+    );
+  }
+
   /** One agent, or null if they are not on the team. */
   find(agentId: string): AgentStatus | null {
     return this.list.find((a) => a.id === agentId) ?? null;

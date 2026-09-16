@@ -263,14 +263,15 @@ export class Workspaces {
     if (view?.serverUrl) this.lastServer = view.serverUrl;
 
     const existing = new Map(this.list.map((w) => [w.id, w]));
-    const wanted: { id: string; name: string; bound: boolean }[] = view
+    const wanted: { id: string; name: string; bound: boolean; dir: string }[] = view
       ? (view.tabs ?? []).map((tab) => ({
           id: tab.id,
           name: tab.name?.trim() || "Untitled tab",
           bound: tab.bound,
+          dir: tab.dir ?? "",
         }))
       : // Unjoined: the one local tab, which is the app as it has always been.
-        [{ id: LOCAL_TAB, name: "Workspace", bound: true }];
+        [{ id: LOCAL_TAB, name: "Workspace", bound: true, dir: "" }];
 
     const next: Workspace[] = [];
     for (const want of wanted) {
@@ -278,6 +279,7 @@ export class Workspaces {
       const workspace = found ?? Storage.open(want.id);
       workspace.name = want.name;
       workspace.bound = want.bound;
+      workspace.dir = want.dir;
       // Where this tab's edits go to become ops, or null when there is no
       // workspace to send them to. LOCAL_TAB is the app with nothing joined:
       // its outline is this machine's and has nowhere else to be, which is the
@@ -406,6 +408,37 @@ export class Workspaces {
     await this.createLocal("Workspace");
   }
 
+  /**
+   * The workspace's keys, once somebody has asked to see them.
+   *
+   * Null until then. They are credentials, not state the app needs, and they
+   * ride on no payload that is fetched as a matter of course -- see
+   * WorkbenchService.Workspace, which deliberately leaves them off the view.
+   */
+  keys = $state<{ writeKey: string; readKey: string } | null>(null);
+
+  /** Reads the keys this machine has. Empty strings for the ones it has not. */
+  async loadKeys(): Promise<void> {
+    const got = await this.#run(() => Workbench.WorkspaceKeys());
+    this.keys = got ? { writeKey: got.writeKey ?? "", readKey: got.readKey ?? "" } : null;
+  }
+
+  /**
+   * Asks the server for another key, and keeps it.
+   *
+   * There is no call that reads a key back and there never will be: the server
+   * stores hashes of them, so the one it handed out at creation exists only
+   * wherever somebody wrote it down. This is what "let me see the read key
+   * again" actually resolves to -- a read key you can send somebody -- and the
+   * keys already in use keep working, so nobody is cut off by it.
+   */
+  async mint(access: "read" | "write"): Promise<string | null> {
+    const key = await this.#run(() => Workbench.MintKey(access));
+    if (key === null) return null;
+    await this.loadKeys();
+    return key;
+  }
+
   /** Makes a workspace on a server and joins it. Returns the read key. */
   async createShared(
     base: string,
@@ -422,10 +455,10 @@ export class Workspaces {
     );
     if (!view) return null;
     this.#adopt(view);
-    // The read key is not on the view -- it never rides along on a payload the
-    // frontend fetches as a matter of course -- so it is asked for by name.
-    const keys = await this.#run(() => Workbench.WorkspaceKeys());
-    return { readKey: keys?.readKey ?? "" };
+    // The keys are not on the view -- they never ride along on a payload the
+    // frontend fetches as a matter of course -- so they are asked for by name.
+    await this.loadKeys();
+    return { readKey: this.keys?.readKey ?? "" };
   }
 
   /**
@@ -458,6 +491,8 @@ export class Workspaces {
     const view = await this.#run(() => Workbench.JoinWorkspace(base, invite.key));
     if (!view) return false;
     this.#adopt(view);
+    // Whatever the last workspace's were, they are not this one's.
+    this.keys = null;
     return true;
   }
 
@@ -487,6 +522,7 @@ export class Workspaces {
     const done = await this.#run(() => Workbench.LeaveWorkspace());
     if (done === null) return false;
     this.#adopt(null);
+    this.keys = null;
     await this.createLocal("Workspace");
     return true;
   }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -29,7 +30,10 @@ type fakeStore struct {
 	pingErr error
 	// appendErr is returned by the next Append, for testing error mapping.
 	appendErr error
-	created   int
+	// mintErr is returned by the next MintKey, for the same reason.
+	mintErr error
+	created int
+	minted  int
 
 	// logSince records the `since` of every Log call, which is how the document
 	// tests show that a poll finding nothing new costs one query rather than a
@@ -112,6 +116,24 @@ func (f *fakeStore) CreateWorkspace(_ context.Context, name string) (store.Creat
 		WriteKey:  "wk_" + fixedHex(name+"-write"),
 		ReadKey:   "rk_" + fixedHex(name+"-read"),
 	}, nil
+}
+
+func (f *fakeStore) MintKey(_ context.Context, workspaceID string, access store.Access) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.mintErr != nil {
+		return "", f.mintErr
+	}
+	f.minted++
+	prefix := "rk_"
+	if access == store.AccessWrite {
+		prefix = "wk_"
+	}
+	key := prefix + fixedHex(fmt.Sprintf("%s-%s-%d", workspaceID, access, f.minted))
+	// Registered like any other key, so a test can turn round and use what it
+	// was handed -- which is the whole promise of the endpoint.
+	f.keys[key] = store.Auth{WorkspaceID: workspaceID, Access: access}
+	return key, nil
 }
 
 func (f *fakeStore) Append(_ context.Context, workspaceID string, list []ops.Op) (store.AppendResult, error) {

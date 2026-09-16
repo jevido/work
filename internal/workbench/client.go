@@ -21,6 +21,7 @@ import (
 const (
 	routeWorkspaces = "/v1/workspaces"
 	routeWorkspace  = "/v1/workspace"
+	routeKeys       = "/v1/keys"
 	routeOps        = "/v1/ops"
 
 	// maxPushOps and maxPullOps are the server's documented limits, not
@@ -40,7 +41,11 @@ type Workspace struct {
 	CreatedAt string `json:"createdAt"`
 }
 
-// Created is the one and only time a workspace's keys are readable.
+// Created is a new workspace and the keys it was opened with.
+//
+// Not the only time they are readable any more: Mint issues another whenever
+// somebody wants one. It is still the only time *these* two are, because the
+// server keeps hashes and has nothing to hand back.
 type Created struct {
 	Workspace Workspace `json:"workspace"`
 	WriteKey  string    `json:"writeKey"`
@@ -102,6 +107,14 @@ type OpsClient interface {
 	// Meta reads the workspace a key belongs to. It is also how a key is
 	// checked: a bad key fails here, at the point it was typed.
 	Meta(ctx context.Context, serverURL, key string) (Meta, error)
+	// Mint issues another key for the workspace the write key opens.
+	//
+	// There is no call that reads a key back and there cannot be: the server
+	// keeps hashes, so the plaintext of the one handed out at creation exists
+	// nowhere on that side. Somebody asking to "see the read key again" wants
+	// a read key to send a colleague, and this is how they get one. Keys
+	// already in use are unaffected.
+	Mint(ctx context.Context, serverURL, writeKey, access string) (string, error)
 	// Push appends ops. At most maxPushOps per call.
 	Push(ctx context.Context, serverURL, writeKey string, batch []ops.Op) (PushResult, error)
 	// Pull returns ops with a sequence strictly greater than since.
@@ -200,6 +213,20 @@ func (c *HTTPClient) Create(ctx context.Context, serverURL, signupToken, name st
 }
 
 // Meta reads the workspace a key belongs to.
+// Mint asks the server for another key. See OpsClient.Mint.
+func (c *HTTPClient) Mint(ctx context.Context, serverURL, writeKey, access string) (string, error) {
+	body := struct {
+		Access string `json:"access"`
+	}{access}
+	var out struct {
+		Key string `json:"key"`
+	}
+	if err := c.do(ctx, http.MethodPost, serverURL+routeKeys, writeKey, body, &out); err != nil {
+		return "", err
+	}
+	return out.Key, nil
+}
+
 func (c *HTTPClient) Meta(ctx context.Context, serverURL, key string) (Meta, error) {
 	var out Meta
 	err := c.do(ctx, http.MethodGet, serverURL+routeWorkspace, key, nil, &out)

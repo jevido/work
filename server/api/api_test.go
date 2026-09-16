@@ -135,6 +135,81 @@ func TestRoutingFailures(t *testing.T) {
 	})
 }
 
+// Minting is how a key is ever got hold of again, because there is no reading
+// one back: the store keeps hashes. What somebody wants when they ask to see
+// the read key again is a read key to send somebody, and this is that.
+func TestMintKey(t *testing.T) {
+	t.Run("a write key mints a read key that works", func(t *testing.T) {
+		srv, backing := serve(t, "")
+		writeKey, _ := backing.withWorkspace("ws_1")
+
+		resp := call(t, srv, http.MethodPost, "/v1/keys", writeKey, map[string]any{"access": "read"})
+		body := expectStatus(t, resp, http.StatusCreated, "")
+		minted, _ := body["key"].(string)
+		if !strings.HasPrefix(minted, "rk_") {
+			t.Fatalf("key = %q, want an rk_ prefix", minted)
+		}
+		if body["access"] != "read" {
+			t.Errorf("access = %v, want read", body["access"])
+		}
+
+		// Usable, which is the entire point. A key that comes back and then
+		// opens nothing is worse than no endpoint.
+		expectStatus(t, call(t, srv, http.MethodGet, "/v1/workspace", minted, nil), http.StatusOK, "")
+	})
+
+	t.Run("the keys already in use keep working", func(t *testing.T) {
+		srv, backing := serve(t, "")
+		writeKey, readKey := backing.withWorkspace("ws_1")
+
+		expectStatus(t,
+			call(t, srv, http.MethodPost, "/v1/keys", writeKey, map[string]any{"access": "read"}),
+			http.StatusCreated, "")
+
+		// Minting is not rotation. Cutting off every other machine in the
+		// workspace would be a startling amount of damage for one button.
+		expectStatus(t, call(t, srv, http.MethodGet, "/v1/workspace", readKey, nil), http.StatusOK, "")
+		expectStatus(t, call(t, srv, http.MethodGet, "/v1/workspace", writeKey, nil), http.StatusOK, "")
+	})
+
+	t.Run("a read key may not mint anything", func(t *testing.T) {
+		srv, backing := serve(t, "")
+		_, readKey := backing.withWorkspace("ws_1")
+
+		// A read key that could mint a write key would be a read key with write
+		// access, one request later.
+		for _, access := range []string{"read", "write"} {
+			resp := call(t, srv, http.MethodPost, "/v1/keys", readKey, map[string]any{"access": access})
+			expectStatus(t, resp, http.StatusForbidden, "forbidden")
+		}
+		if backing.minted != 0 {
+			t.Errorf("minted = %d, want 0", backing.minted)
+		}
+	})
+
+	t.Run("the access level is checked", func(t *testing.T) {
+		srv, backing := serve(t, "")
+		writeKey, _ := backing.withWorkspace("ws_1")
+
+		for _, access := range []any{"", "admin", "READ", 7} {
+			resp := call(t, srv, http.MethodPost, "/v1/keys", writeKey, map[string]any{"access": access})
+			if resp.StatusCode == http.StatusCreated {
+				t.Fatalf("access %v was accepted", access)
+			}
+			resp.Body.Close()
+		}
+		if backing.minted != 0 {
+			t.Errorf("minted = %d, want 0", backing.minted)
+		}
+	})
+
+	t.Run("no key is unauthorized", func(t *testing.T) {
+		srv, _ := serve(t, "")
+		resp := call(t, srv, http.MethodPost, "/v1/keys", "", map[string]any{"access": "read"})
+		expectStatus(t, resp, http.StatusUnauthorized, "unauthorized")
+	})
+}
+
 func TestCreateWorkspace(t *testing.T) {
 	t.Run("open when no signup token is configured", func(t *testing.T) {
 		srv, backing := serve(t, "")

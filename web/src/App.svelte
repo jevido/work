@@ -7,6 +7,7 @@
     statusOf,
     textOf,
   } from "./lib/doc";
+  import MapView from "./components/MapView.svelte";
   import OutlineBranch from "./components/OutlineBranch.svelte";
   import { forget, recall, remember, takeKey } from "./lib/key";
   import { ViewState, setView } from "./lib/view.svelte";
@@ -20,6 +21,17 @@
   // happen to have a link on them.
   view.relations = viewer;
   setView(view);
+
+  /**
+   * Which view of the outline is on screen: the map, or the lines.
+   *
+   * The map first, because that is what this page is worth sending somebody.
+   * A read-only list of an outline is a document; a read-only *map* of one is
+   * the shape of somebody's thinking, which is the thing that does not fit in
+   * a message. The lines are one click away and are what a screen reader gets
+   * either way -- the canvas is aria-hidden, so switching is about looking.
+   */
+  let shape = $state<"map" | "outline">("map");
 
   /** What somebody typed into the "paste a link" field. */
   let pasted = $state("");
@@ -123,6 +135,19 @@
     }
   }
 
+  /**
+   * Follows a task back to the line it came from.
+   *
+   * Switches to the lines first. The jump opens whatever is folded in the way
+   * and scrolls the line into view, and neither of those means anything while
+   * the map is on screen -- the map has no folds and nothing to scroll, so
+   * from the reader's side the button would do nothing at all.
+   */
+  function follow(id: string) {
+    shape = "outline";
+    view.jumpTo(viewer.tree, id);
+  }
+
   function forgetKey() {
     forget();
     saved = false;
@@ -195,11 +220,40 @@
 {:else}
   <main>
     <section id="outline" aria-labelledby="outline-heading">
-      <h2 id="outline-heading">Outline</h2>
+      <div class="section-head">
+        <h2 id="outline-heading">{shape === "map" ? "Map" : "Outline"}</h2>
+        <!-- Real radios drawn as a segmented control: one tab stop, arrow keys
+             between the two, and announced as one of two rather than as two
+             unrelated buttons. -->
+        <fieldset class="views">
+          <legend class="sr">View</legend>
+          <label class:on={shape === "map"}>
+            <input
+              type="radio"
+              name="viewer-shape"
+              checked={shape === "map"}
+              onchange={() => (shape = "map")}
+            />
+            <span>Map</span>
+          </label>
+          <label class:on={shape === "outline"}>
+            <input
+              type="radio"
+              name="viewer-shape"
+              checked={shape === "outline"}
+              onchange={() => (shape = "outline")}
+            />
+            <span>Lines</span>
+          </label>
+        </fieldset>
+      </div>
+
       {#if viewer.outline.length === 0}
         <p class="empty">
           {viewer.status === "loading" ? "Loading the outline…" : "The outline is empty."}
         </p>
+      {:else if shape === "map"}
+        <MapView {viewer} />
       {:else}
         <OutlineBranch nodes={viewer.outline} />
       {/if}
@@ -245,7 +299,7 @@
                   in the way, scrolls to the line and marks it. All of that is
                   this browser's, and none of it reaches the server.
                 -->
-                <button class="source" onclick={() => view.jumpTo(viewer.tree, source.id)}>
+                <button class="source" onclick={() => follow(source.id)}>
                   from <span class="from">{textOf(source).trim() || "an empty line"}</span>
                 </button>
               {:else if sourceId}
@@ -370,6 +424,70 @@
       grid-template-columns: minmax(0, 1fr);
       gap: 24px;
     }
+  }
+
+  .section-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+
+  .section-head h2 {
+    margin: 0;
+  }
+
+  .views {
+    display: flex;
+    gap: 1px;
+    margin: 0 0 0 auto;
+    padding: 1px;
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    background: var(--line);
+  }
+
+  .views label {
+    padding: 3px 10px;
+    background: var(--panel);
+    color: var(--muted);
+    font-size: 11px;
+    cursor: pointer;
+  }
+
+  .views label:first-of-type {
+    border-radius: 3px 0 0 3px;
+  }
+
+  .views label:last-of-type {
+    border-radius: 0 3px 3px 0;
+  }
+
+  .views label.on {
+    background: var(--panel-2);
+    color: var(--text);
+    box-shadow: inset 0 -2px 0 var(--accent);
+  }
+
+  /* Off screen rather than display:none: the label is what is drawn, and an
+     input that is not rendered is an input the keyboard cannot reach. */
+  .views input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+  }
+
+  .views label:has(:focus-visible) {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
+  /* The map is a picture and wants room; the lines size themselves. */
+  #outline {
+    min-height: 420px;
+    display: flex;
+    flex-direction: column;
   }
 
   main.gate {

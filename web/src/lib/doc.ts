@@ -189,6 +189,37 @@ export function statusOf(node: DocNode): TaskState {
   return value === "doing" || value === "done" ? value : "todo";
 }
 
+/**
+ * The outline, flattened to rows, for the map to place.
+ *
+ * The same shape the desktop app's `outlineRows` produces, because both feed
+ * the same layout code -- see frontend/src/lib/mindmap/layout.ts, which types
+ * its input structurally for exactly this reason. Everything that makes a Row
+ * in the desktop app is about editing (fold state, sibling counts, how far up
+ * "move" may go); a map needs an id, some text, a depth and a parent, and that
+ * is all this produces.
+ *
+ * Folded branches are skipped, so the map and the outline on the same page
+ * agree about what is on screen. A viewer that quietly opened everything would
+ * be showing a shape nobody in the workspace is looking at.
+ */
+export function mapRows(
+  tree: readonly DocNode[],
+): { node: { id: string; fields: Record<string, unknown> }; depth: number; parentId: string }[] {
+  const rows: { node: DocNode; depth: number; parentId: string }[] = [];
+  walk(tree.filter(isOutlineNode), "", 0);
+  return rows;
+
+  function walk(nodes: readonly DocNode[], parentId: string, depth: number) {
+    for (const node of nodes) {
+      rows.push({ node, depth, parentId });
+      if (!isCollapsed(node) && node.children.length > 0) {
+        walk(node.children.filter(isOutlineNode), node.id, depth + 1);
+      }
+    }
+  }
+}
+
 /** The idea a task came out of, if it came out of one. */
 export function sourceIdOf(node: DocNode): string | null {
   const value = node.fields[FIELD_EXTRACTED_FROM];

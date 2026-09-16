@@ -29,9 +29,16 @@ const (
 	// Work guarantees it exists and reads the names out of it for the profile
 	// view; nothing puts them in front of Claude yet.
 	SkillsDirName = "skills"
-	// CoordinatorFolder is the one agent Work insists on: without a
-	// coordinator there is nobody to hand a task to.
+	// CoordinatorFolder is the agent Work cannot assemble a team without:
+	// with no coordinator there is nobody to hand a task to, and Scan says so
+	// rather than returning a roster that cannot work.
 	CoordinatorFolder = "anton"
+	// ThinkerFolder leads the idea and planning conversations. Guaranteed for
+	// a softer reason than the coordinator -- deleting it falls back to him
+	// rather than failing -- but guaranteed, because those two modes are
+	// otherwise run by the agent whose whole prompt is about routing work.
+	// See Registry.For.
+	ThinkerFolder = "jared"
 	// TemplateFolderName is a ready-made agent folder to copy. It lives among
 	// the agents because that is where a copy of it belongs, and it is skipped
 	// by the scan on the underscore rule below.
@@ -93,10 +100,17 @@ func Ensure(root string) error {
 		return fmt.Errorf("agents: read %s: %w", dir, err)
 	}
 
-	// Only the coordinator is guaranteed, fresh root or not: Scan cannot
-	// build a team without one, and everyone else is the user's to add.
-	if a, ok := Default().Get(CoordinatorFolder); ok {
-		if err := writeAgentFolder(filepath.Join(dir, a.ID), a.Name, a.SystemPrompt); err != nil {
+	// The built-in team is guaranteed, fresh root or not. That is two agents
+	// now rather than one, and for two different reasons: Scan cannot build a
+	// team without a coordinator, and the idea and planning conversations
+	// would otherwise fall back to him -- see Default. Everyone else is the
+	// user's to add.
+	//
+	// Idempotent, because writeAgentFolder never touches a PERSONALITY.md that
+	// already exists. A root somebody has been editing for months comes through
+	// this untouched.
+	for _, a := range Default().All() {
+		if err := writeAgentFolder(filepath.Join(dir, a.ID), a.Name, a.Starter); err != nil {
 			return err
 		}
 	}
@@ -179,7 +193,14 @@ func writeTemplate(dir string) error {
 // writeAgentFolder creates one agent folder, its skills/ directory and, if it
 // has none, a starter PERSONALITY.md. An existing personality file is never
 // touched: it is the user's document.
-func writeAgentFolder(dir, name, prompt string) error {
+//
+// `starter` is Agent.Starter, and used to be Agent.SystemPrompt. That was a
+// quiet bug worth naming here as well as there: the personality file is read
+// back and appended to the system prompt on every single turn, so seeding it
+// from the prompt handed Claude the same instructions twice for the life of
+// the folder. A document written for the person who opens the file is a
+// different document from one written for the model.
+func writeAgentFolder(dir, name, starter string) error {
 	if err := os.MkdirAll(filepath.Join(dir, SkillsDirName), 0o755); err != nil {
 		return fmt.Errorf("agents: create %s: %w", dir, err)
 	}
@@ -191,12 +212,12 @@ func writeAgentFolder(dir, name, prompt string) error {
 		return fmt.Errorf("agents: read %s: %w", path, err)
 	}
 
-	if prompt == "" {
-		prompt = fmt.Sprintf(
+	if starter == "" {
+		starter = fmt.Sprintf(
 			"Describe %s here: what they own, how they work, what they push back on. "+
-				"This file is read fresh every time they are given a task.", name)
+				"This file is read fresh every time they are given a task.\n", name)
 	}
-	body := fmt.Sprintf("# %s\n\n%s\n", name, prompt)
+	body := fmt.Sprintf("# %s\n\n%s", name, starter)
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		return fmt.Errorf("agents: write %s: %w", path, err)
 	}

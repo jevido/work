@@ -126,6 +126,18 @@ export class Workspace {
   bound = $state(true);
 
   /**
+   * The project folder this tab runs agents in on this machine, or empty.
+   *
+   * Per-machine like `bound`, and for the same reason: the folder is never
+   * synced, because a path that is right here is wrong on every other machine
+   * in the workspace. Shown in the mode bar so that "which project am I
+   * looking at" is answerable without opening a menu -- the outline, the plan
+   * and the office all belong to a folder, and nothing on screen used to say
+   * which one.
+   */
+  dir = $state("");
+
+  /**
    * The merged document.
    *
    * `$state.raw` and rebuilt rather than mutated: the merge is not reactive --
@@ -176,6 +188,32 @@ export class Workspace {
     this.reveal(id);
     this.revealRequest = id;
     this.mode = "idea";
+  }
+
+  /**
+   * A line whose link picker should open, set by the keyboard.
+   *
+   * The same note-on-the-door as `revealRequest`, for the same reason: the
+   * picker's open state belongs to the row that draws it, and the key that
+   * opens it is pressed in a textarea several components away. Passing a
+   * callback down the recursion instead would mean every level of OutlineRow
+   * carrying a prop it does not use.
+   *
+   * Cleared by whoever acts on it, and never written down. Which picker is
+   * open is about this second.
+   */
+  linkRequest = $state<string | null>(null);
+
+  /** Opens the link picker on a line, from the keyboard. */
+  requestLink(id: string): void {
+    this.linkRequest = id;
+  }
+
+  /** Consumes the request, so opening the picker twice needs two keypresses. */
+  takeLinkRequest(id: string): boolean {
+    if (this.linkRequest !== id) return false;
+    this.linkRequest = null;
+    return true;
   }
 
   #state: State;
@@ -643,6 +681,74 @@ export class Workspace {
     return id;
   }
 
+  /**
+   * Every region in this tab, named, in the order their lines appear.
+   *
+   * Region nodes sit at the top level of the tree in creation order, which is
+   * not the order anybody reads them in: a region made this morning around the
+   * first branch belongs at the top of a list, not underneath one made last
+   * week around the last. So they are ordered by where their first line is,
+   * which is where the eye would find them on the map.
+   */
+  regions = $derived.by(() => {
+    const g = this.graph;
+    const seen = new Map<string, number>();
+    this.rows.forEach((row, at) => {
+      const region = g.regionOf.get(row.node.id);
+      if (region !== undefined && !seen.has(region)) seen.set(region, at);
+    });
+    return [...g.regions.entries()]
+      .map(([id, name]) => ({ id, name, at: seen.get(id) ?? Infinity }))
+      .filter((region) => region.at !== Infinity)
+      .sort((a, b) => a.at - b.at)
+      .map(({ id, name }) => ({ id, name: name.trim() || "Unnamed region" }));
+  });
+
+  /**
+   * The topmost line of a region, which is the branch it was made from.
+   *
+   * `group` puts a whole branch in one region, so the first of its lines in
+   * outline order is that branch's root -- and that is what the plan's map
+   * pane draws, because a region drawn without the line it hangs off is a box
+   * of sentences with nothing above them saying what they are about.
+   */
+  regionRootOf(regionId: string): string | null {
+    const g = this.graph;
+    for (const row of this.rows) {
+      if (g.regionOf.get(row.node.id) === regionId) return row.node.id;
+    }
+    return null;
+  }
+
+  /** The lines in a region, in outline order. */
+  regionMembers(regionId: string): string[] {
+    const g = this.graph;
+    return this.rows.filter((row) => g.regionOf.get(row.node.id) === regionId).map((r) => r.node.id);
+  }
+
+  /**
+   * Puts every line of a region on the plan that is not there already.
+   *
+   * The bulk version of the Ctrl+Enter that promotes one line, and the reason
+   * regions are worth drawing at all: grouping a cluster is how somebody says
+   * "this is one piece of work", and the next thing they want is that piece
+   * broken into an ordered list.
+   *
+   * Lines already on the plan are skipped rather than duplicated. Running this
+   * twice on a region somebody has since added a line to should add that line,
+   * not a second copy of the other six.
+   *
+   * @returns how many tasks were made, so the caller can say so.
+   */
+  extractRegion(regionId: string): number {
+    let made = 0;
+    for (const member of this.regionMembers(regionId)) {
+      if (this.taskFor(member)) continue;
+      if (this.promote(member)) made++;
+    }
+    return made;
+  }
+
   /** Takes a line out of its region. The region itself is left alone. */
   ungroup(id: string): boolean {
     if (!this.graph.regionOf.has(id)) return false;
@@ -734,6 +840,27 @@ export class Workspace {
   sourceOf(task: Node): TreeNode | null {
     const id = sourceIdOf(task);
     return id ? findInTree(this.tree, id) : null;
+  }
+
+  /**
+   * How many tasks came out of a line.
+   *
+   * Counted from the tasks rather than read off the line, because the link is
+   * written on the task -- `extractedFrom` -- and one line can be broken up
+   * more than once. `taskFor` answers a different question, "is this already on
+   * the plan", and can only ever say one; this is what the map puts on a box.
+   *
+   * Derived per call rather than memoised. The plan is tens of items, this runs
+   * once per box on a repaint, and a cache would be a second thing to
+   * invalidate every time an op lands.
+   */
+  tasksOf(nodeId: string): number {
+    if (nodeId === "") return 0;
+    let found = 0;
+    for (const task of this.tasks) {
+      if (sourceIdOf(task) === nodeId) found++;
+    }
+    return found;
   }
 
   /** True if this line is already on the plan, so its button can say so. */

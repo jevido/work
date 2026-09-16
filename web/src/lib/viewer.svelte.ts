@@ -24,6 +24,7 @@ import {
   planTasks,
   readDocument,
   regionIdOf,
+  sourceIdOf,
   textOf,
   type DocNode,
 } from "./doc";
@@ -135,6 +136,37 @@ export class Viewer {
     const region = this.graph.regionOf.get(id);
     if (!region) return null;
     return this.graph.regions.get(region) ?? null;
+  }
+
+  /**
+   * The same answer with the region's id on it, which the map needs.
+   *
+   * The map draws one box around every line of a region, so it has to know
+   * which lines belong together -- and two regions can perfectly well share a
+   * name. `regionOf` answers the question the outline asks, "what is this line
+   * part of, in words", and that one cannot tell them apart.
+   */
+  regionEntryOf(id: string): { id: string; name: string } | null {
+    const region = this.graph.regionOf.get(id);
+    if (!region) return null;
+    const name = this.graph.regions.get(region);
+    if (name === undefined) return null;
+    return { id: region, name };
+  }
+
+  /**
+   * How many tasks were extracted from a line.
+   *
+   * Counted over the plan rather than read off the line: the link is written on
+   * the task, and one line can be broken up more than once.
+   */
+  tasksOf(id: string): number {
+    if (id === "") return 0;
+    let found = 0;
+    for (const task of this.tasks) {
+      if (sourceIdOf(task) === id) found++;
+    }
+    return found;
   }
 
   /** The plan, already in position order -- the merge sorted it. */

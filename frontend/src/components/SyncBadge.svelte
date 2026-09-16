@@ -99,6 +99,10 @@
   const action = $derived.by(() => {
     if (state === "rejected") return { text: "Use another key", run: () => onfix("rekey") };
     if (state === "offline") return { text: "Retry now", run: () => workspaces.retry() };
+    // Nothing is wrong, and this is not a fix -- it is the way to the keys,
+    // which is the thing people want from a synced workspace most often and
+    // which used to be reachable only in the seconds after creating one.
+    if (workspaces.cloud) return { text: "Keys", run: () => onfix("keys") };
     return null;
   });
 

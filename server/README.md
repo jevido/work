@@ -155,6 +155,40 @@ Workspace IDs and keys are opaque. They are `ws_`, `wk_` and `rk_` followed by
 32 hex characters today, and nothing but the prefix is promised — do not parse
 one, derive one, or sort by one.
 
+**These two keys are readable once.** Not as a policy: `workspace_keys` stores
+a SHA-256 of each key and nothing else, so after this response the plaintext
+exists only wherever the caller put it. There is no endpoint that reads a key
+back and there cannot be one. To get another, mint one.
+
+### `POST /v1/keys`
+
+Write key. Issues another key for the same workspace.
+
+```json
+{ "access": "read" }
+```
+
+`access` is `"read"` or `"write"`. Response `201 Created`:
+
+```json
+{
+  "key": "rk_8b4d2f6a0c9e7b5d3a1f8c6e4b2d0a9f",
+  "access": "read"
+}
+```
+
+This is what "show me the read key again" resolves to. Somebody asking for it
+wants a read-only link to send a colleague, and a fresh read key is that —
+identical in every way that matters to the one handed out at creation.
+
+Write access, and not because minting writes to the log. It is because a read
+key that could mint a write key would be a read key with write access, one
+request later.
+
+**Minting is not rotation.** Every key already in use keeps working; nothing is
+revoked. A workspace may hold any number of keys of either kind, and cutting off
+every other machine in it would be a startling amount of damage for one button.
+
 ### `GET /v1/workspace`
 
 Read or write key. Metadata for the workspace the key belongs to.

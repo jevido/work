@@ -11,14 +11,15 @@
     review,
     controls,
     clear,
+    lead = null,
   }: {
     session: ClaudeSession;
     /**
      * Clearing, which reaches further than this transcript.
      *
-     * Passed in rather than called on the session, because the backend's half
-     * of it forgets every agent's memory and empties the board -- so all three
-     * conversations go, and only the caller knows about the other two.
+     * Passed in rather than called on the session, because which conversation
+     * is being cleared is the app's knowledge, not this component's: it holds
+     * one session and the app holds the tab and mode that name it.
      */
     clear: () => void;
     review: ChangeReviewState;
@@ -30,7 +31,27 @@
      * component owns the row they sit in and nothing about what is in them.
      */
     controls?: Snippet;
+    /**
+     * Who answers in this mode, for the copy that names them.
+     *
+     * Passed in rather than read from a roster here, because the console is a
+     * view of one session and the roster is the app's. Null while the team is
+     * still loading, or for a roster that failed to -- the copy falls back to
+     * saying nothing about who, which is better than being wrong about it.
+     */
+    lead?: { name: string } | null;
   } = $props();
+
+  /**
+   * What each mode's composer is for, in the words of whoever answers it.
+   *
+   * Two sentences rather than one, because the two modes want opposite things
+   * from you: work mode takes an instruction and idea mode takes a thought. A
+   * box that says "Give Jared work" would get instructions in the one place
+   * the point is to think out loud.
+   */
+  const who = $derived(lead?.name ?? "Claude");
+  const isWork = $derived(session.mode === "work");
 
 
   let scroller: HTMLDivElement | undefined = $state();
@@ -85,7 +106,8 @@
   function submit() {
     const text = session.draft;
     // Only the side channel blocks the composer now: while a run is going,
-    // submit puts the question to Anton instead of starting a second run.
+    // submit puts the question to whoever leads this mode instead of starting
+    // a second run.
     if (!text.trim() || session.chatBusy) return;
     session.draft = "";
     pinned = true;
@@ -209,7 +231,13 @@
 
   <div class="scroller" bind:this={scroller} onscroll={onScroll}>
     {#if session.isEmpty}
-      <p class="hint">Give Anton work. He decides who on the team should take it.</p>
+      <p class="hint">
+        {#if isWork}
+          Give {who} work. He decides who on the team should take it.
+        {:else}
+          Think out loud at {who}. What is worth keeping goes on the map.
+        {/if}
+      </p>
     {/if}
 
     {#each session.entries as entry (entry.id)}
@@ -270,8 +298,10 @@
       bind:value={session.draft}
       onkeydown={onKeydown}
       placeholder={session.busy
-        ? "Ask Anton about the work in progress…   (Shift+Enter for a new line)"
-        : "Give Anton work…   (Shift+Enter for a new line)"}
+        ? `Ask ${who} about the work in progress…   (Shift+Enter for a new line)`
+        : isWork
+          ? `Give ${who} work…   (Shift+Enter for a new line)`
+          : `Think out loud at ${who}…   (Shift+Enter for a new line)`}
       rows="2"
       spellcheck="false"
     ></textarea>

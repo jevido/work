@@ -3,19 +3,8 @@
   import { OutlineKeys, setOutline } from "../lib/workspace/outline.svelte";
   import type { Workspace } from "../lib/workspace/workspace.svelte";
   import type { Restructuring } from "../lib/workspace/restructure.svelte";
-  import OutlineRow from "./OutlineRow.svelte";
   import MindmapCanvas from "./MindmapCanvas.svelte";
   import AskClaude from "./AskClaude.svelte";
-
-  /**
-   * Which view of the same document is on screen.
-   *
-   * Two views, not two documents. The outline is the faster way to write and
-   * the only one a screen reader can use, so the map is switched to rather than
-   * switched for -- the idea has said from the start that the renderer follows
-   * the data, and this is that and not a replacement.
-   */
-  let view = $state<"outline" | "map">("outline");
 
   /** The name being typed for a new region, or null when none is. */
   let grouping = $state<string | null>(null);
@@ -128,47 +117,57 @@
     const opened = workspace.unfoldAll();
     keys.say(`Unfolded ${opened} ${opened === 1 ? "branch" : "branches"}.`);
   }
+
+  /**
+   * The two shortcuts for the things the outline cannot say by nesting.
+   *
+   * Here rather than on the row, because both act on the line the caret is on
+   * and the caret is in a textarea that has its own handler for every key that
+   * moves or indents. These two do neither, so they are caught on the way up.
+   *
+   * Both need a line to act on. With nothing focused they do nothing rather
+   * than guessing at the first line, which would put a region around a branch
+   * somebody was not looking at.
+   */
+  /**
+   * Binds the shortcuts to the section imperatively.
+   *
+   * An `onkeydown` in the markup would be a keyboard handler on a `<section>`,
+   * which the a11y rules refuse for a good reason: a non-interactive element
+   * with a key handler is usually one that should have been a button. This is
+   * the other case -- the keys are pressed in the textareas inside, and this is
+   * only where they are caught on the way up, because the handler needs the
+   * whole outline's state rather than one row's.
+   */
+  function shortcuts(node: HTMLElement) {
+    node.addEventListener("keydown", onShortcut);
+    return () => node.removeEventListener("keydown", onShortcut);
+  }
+
+  function onShortcut(event: KeyboardEvent) {
+    if (!(event.ctrlKey || event.metaKey) || event.shiftKey || event.altKey) return;
+    const line = lastLine;
+    if (!line) return;
+    const key = event.key.toLowerCase();
+    if (key === "l") {
+      event.preventDefault();
+      workspace.requestLink(line);
+      keys.say("Pick a line to link to.");
+    } else if (key === "g") {
+      event.preventDefault();
+      grouping = grouping === null ? "" : null;
+      keys.say(grouping === null ? "Grouping cancelled." : "Name this region.");
+    }
+  }
 </script>
 
-<section class="idea" tabindex="-1" aria-label="Idea outline" {@attach exitTarget}>
+<section class="idea" tabindex="-1" aria-label="Idea outline" {@attach exitTarget} {@attach shortcuts}>
   <header>
     <h2>Outline</h2>
-    <p class="hint">
-      <!-- The keys, in the order somebody meets them. Written out rather than
-           hidden behind a "?" because Tab does not indent anywhere else in
-           this app, and a person who does not know that will try it once and
-           conclude the outline is broken. -->
-      <kbd>Enter</kbd> new line · <kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd> nest ·
-      <kbd>Alt</kbd>+<kbd>↑↓</kbd> move · <kbd>Alt</kbd>+<kbd>←→</kbd> fold ·
-      <kbd>Ctrl</kbd>+<kbd>Enter</kbd> to plan · <kbd>Esc</kbd> leave
-    </p>
-    <!--
-      Real radios, drawn as a segmented control, for the same reason ModeToggle
-      uses them: one tab stop, arrow keys between the options, and announced as
-      one of two rather than as two unrelated buttons.
-    -->
-    <fieldset class="views">
-      <legend class="sr">View</legend>
-      <label class:on={view === "outline"}>
-        <input
-          type="radio"
-          name="idea-view-{workspace.id}"
-          checked={view === "outline"}
-          onchange={() => (view = "outline")}
-        />
-        <span>Outline</span>
-      </label>
-      <label class:on={view === "map"}>
-        <input
-          type="radio"
-          name="idea-view-{workspace.id}"
-          checked={view === "map"}
-          onchange={() => (view = "map")}
-        />
-        <span>Map</span>
-      </label>
-    </fieldset>
-
+    <!-- The keys used to be written out here. They are in the strip along the
+         bottom of the window now, where planning mode's are too: two lists of
+         shortcuts in two different places, each covering half of what the same
+         caret can do, is how you end up reading neither. See HintBar. -->
     {#if lastLine}
       <button class="ghost" onclick={() => (grouping = grouping === null ? "" : null)}>
         Group branch
@@ -222,24 +221,24 @@
   <p class="announce" role="status" aria-live="polite">{keys.said}</p>
 
   <!--
-    Both views are mounted, and the one that is not on screen is hidden rather
-    than removed. The canvas keeps where somebody had panned to, and the outline
-    keeps the caret and the scroll -- exactly why the office and the console sit
-    where they do in App.svelte.
+    The map, and nothing beside it.
+
+    There was an indented list of inputs here until now, with the canvas as a
+    second view you switched to. It is gone: the map is the document. Clicking a
+    box opens a real input over it and every key the list understood works in
+    it -- the same handler, see MindmapCanvas.
   -->
-  <MindmapCanvas {workspace} focused={lastLine} shown={view === "map"} />
+  <MindmapCanvas {workspace} focused={lastLine} />
 
-  <div class="scroller" class:hidden={view === "map"}>
-    {#if workspace.rows.length === 0}
-      <div class="empty">
-        <p>Nothing here yet.</p>
-        <button class="primary" onclick={start}>Start the outline</button>
-      </div>
-    {:else}
-      <OutlineRow rows={workspace.rows} />
-    {/if}
+  {#if workspace.rows.length === 0}
+    <div class="empty">
+      <p>Nothing here yet.</p>
+      <button class="primary" onclick={start}>Start the outline</button>
+    </div>
+  {/if}
 
-    {#if workspace.detached.length > 0}
+  {#if workspace.detached.length > 0}
+    <div class="strays">
       <!--
         Lines the tree cannot reach: their parent was deleted somewhere else,
         or two people moved the same branch at once. The merge keeps them and
@@ -264,12 +263,13 @@
           {/each}
         </ul>
       </section>
-    {/if}
-  </div>
+    </div>
+  {/if}
 </section>
 
 <style>
   .idea {
+    position: relative;
     display: flex;
     flex-direction: column;
     height: 100%;
@@ -293,7 +293,9 @@
   }
 
   h2 {
-    margin: 0;
+    /* Takes the slack the keyboard hint used to, so the view switch and the
+       buttons stay against the right edge of the header. */
+    margin: 0 auto 0 0;
     font-size: 12px;
     font-weight: 600;
     letter-spacing: 0.02em;
@@ -301,35 +303,24 @@
     color: var(--muted);
   }
 
-  .hint {
-    margin: 0;
-    margin-right: auto;
-    color: var(--muted);
-    font-size: 11px;
-  }
-
-  kbd {
-    padding: 0 3px;
-    border: 1px solid var(--line);
-    border-radius: 3px;
-    background: var(--panel-2);
-    font-family: inherit;
-    font-size: 10px;
-  }
-
-  .scroller {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    padding: 8px 12px 40px;
-  }
-
+  /* Over the map rather than instead of it. An empty map is a legitimate thing
+     to be looking at -- it is what a new tab is -- and a panel that replaced it
+     would tear the canvas down every time somebody deleted the last line, then
+     build a new one with no pan and no zoom when they wrote another. */
   .empty {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
     display: grid;
-    justify-items: start;
+    place-content: center;
+    justify-items: center;
     gap: 8px;
-    padding: 24px 0;
     color: var(--muted);
+    pointer-events: none;
+  }
+
+  .empty button {
+    pointer-events: auto;
   }
 
   .empty p {
@@ -460,38 +451,13 @@
     white-space: nowrap;
   }
 
-  .scroller.hidden {
-    display: none;
-  }
-
-  .views {
-    display: flex;
-    gap: 1px;
-    margin: 0;
-    padding: 1px;
-    border: 1px solid var(--line);
-    border-radius: 5px;
-    background: var(--line);
-  }
-
-  .views label {
-    padding: 3px 10px;
-    background: var(--panel);
-    color: var(--muted);
-    font-size: 11px;
-    line-height: 1.4;
-    cursor: pointer;
-  }
-
-  .views label.on {
-    color: inherit;
-  }
-
-  .views input {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    opacity: 0;
-    pointer-events: none;
+  /* Lines the tree cannot reach, under the map rather than in it: they have no
+     parent, so there is nowhere on a tree to draw them. */
+  .strays {
+    flex: none;
+    max-height: 30%;
+    overflow-y: auto;
+    padding: 8px 12px;
+    border-top: 1px solid var(--line);
   }
 </style>

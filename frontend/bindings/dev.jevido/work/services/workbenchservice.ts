@@ -193,6 +193,18 @@ export function LeaveWorkspace(): $CancellablePromise<void> {
 }
 
 /**
+ * MintKey issues another key for the joined workspace: "read" for a link to
+ * send somebody, "write" for another machine to join with.
+ * 
+ * There is no call that reads a key back, because the server keeps only hashes
+ * of them. Asking for one is asking for a new one, and the keys already in use
+ * keep working.
+ */
+export function MintKey(access: string): $CancellablePromise<string> {
+    return $Call.ByID(255128169, access);
+}
+
+/**
  * NewTab creates a workspace tab. It has no folder yet -- see BindTabFolder.
  */
 export function NewTab(name: string): $CancellablePromise<workbench$0.TabView> {

@@ -53,6 +53,47 @@
        label. */
     --on-accent: #ffffff;
 
+    /*
+     * The map, in daylight.
+     *
+     * The canvas cannot inherit a colour the way an element does, so the
+     * renderer reads these by name and falls back to its dark values per
+     * variable -- see frontend/src/lib/mindmap/palette.ts. The desktop app
+     * defines none of them, which is why they are here and not in its
+     * stylesheet.
+     *
+     * The four tiers keep their job: the root is the most solid thing on the
+     * page and each step out is a shade lighter, so depth still reads at a
+     * glance. Inverted from the dark theme, where each step out is darker.
+     */
+    --map-fill-0: #dde1e8;
+    --map-edge-0: #9aa3b2;
+    --map-text-0: #14171d;
+    --map-fill-1: #e7eaf0;
+    --map-edge-1: #b3bbc8;
+    --map-text-1: #14171d;
+    --map-fill-2: #f1f3f7;
+    --map-edge-2: #c8cfda;
+    --map-text-2: #14171d;
+    --map-fill-3: #f8f9fb;
+    --map-edge-3: #d7dbe2;
+    --map-text-3: #4a5260;
+
+    --map-branch: rgba(71, 85, 105, 0.5);
+    --map-twig: rgba(71, 85, 105, 0.32);
+    /* Darker than the dark theme's blue: the same hue at the same lightness
+       disappears on white. */
+    --map-link: rgba(37, 99, 235, 0.8);
+    --map-dangling: rgba(71, 85, 105, 0.4);
+    --map-region: rgba(37, 99, 235, 0.06);
+    --map-region-edge: rgba(37, 99, 235, 0.3);
+    --map-focus-edge: #8a5f00;
+    --map-focus-fill: #fdf3dc;
+    --map-focus-glow: rgba(138, 95, 0, 0.14);
+    --map-drop-fill: rgba(37, 99, 235, 0.18);
+    --map-muted: rgba(20, 23, 29, 0.6);
+    --map-count: #5c6472;
+
     color-scheme: light;
   }
 }

@@ -73,8 +73,10 @@ type Workspace struct {
 	WriteKey string `json:"writeKey,omitempty"`
 	// ReadKey is the key that can see the workspace and not change it -- the
 	// one to paste into the web viewer. The server hands both out once, when
-	// the workspace is created, and cannot show either again; a machine that
-	// joined with a write key it was given has no read key to keep.
+	// the workspace is created and cannot show either again -- it keeps only
+	// hashes. A machine that joined with a write key it was given therefore
+	// has no read key here until somebody mints one; see Workbench.MintKey,
+	// which writes what it gets back to this field.
 	ReadKey string `json:"readKey,omitempty"`
 	// Actor identifies this machine within the workspace. It is minted on
 	// join, never reused, and it prefixes every op ID this machine produces --

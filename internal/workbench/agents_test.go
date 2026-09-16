@@ -40,8 +40,8 @@ func TestReloadAgentsPicksUpFolderChanges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UseConfigRoot: %v", err)
 	}
-	if len(list) != 1 {
-		t.Fatalf("got %d agents, want only the coordinator", len(list))
+	if len(list) != 2 {
+		t.Fatalf("got %d agents, want the two built-ins", len(list))
 	}
 	if w.ConfigRoot() != root {
 		t.Errorf("ConfigRoot = %q, want %q", w.ConfigRoot(), root)
@@ -55,8 +55,8 @@ func TestReloadAgentsPicksUpFolderChanges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReloadAgents: %v", err)
 	}
-	if len(list) != 2 {
-		t.Fatalf("got %d agents after adding a folder, want 2", len(list))
+	if len(list) != 3 {
+		t.Fatalf("got %d agents after adding a folder, want 3", len(list))
 	}
 
 	// A brand new agent must be idle and dispatchable, not missing from the
@@ -83,8 +83,8 @@ func TestReloadAgentsPicksUpFolderChanges(t *testing.T) {
 	if list, err = w.ReloadAgents(); err != nil {
 		t.Fatalf("ReloadAgents after removal: %v", err)
 	}
-	if len(list) != 1 {
-		t.Fatalf("got %d agents after removing a folder, want 1", len(list))
+	if len(list) != 2 {
+		t.Fatalf("got %d agents after removing a folder, want the two built-ins", len(list))
 	}
 }
 
@@ -179,23 +179,62 @@ func TestSystemPromptWithoutAFolder(t *testing.T) {
 	}
 }
 
-// Right after setup the office holds only Anton, so a task must still run --
-// on the coordinator himself -- instead of failing for want of specialists.
+// An office with nobody to delegate to must still run a task -- on the
+// coordinator himself -- instead of failing for want of specialists.
+//
+// Built by hand rather than from a fresh config root. A fresh root used to be
+// a coordinator alone and is not any more, and the property under test is
+// about the shape of a roster, not about what setup happens to produce.
 func TestExecuteRoutedWithNoSpecialists(t *testing.T) {
 	w := newTestWorkbench(t)
-	root := t.TempDir()
-	list, err := w.UseConfigRoot(root)
-	if err != nil {
-		t.Fatalf("UseConfigRoot: %v", err)
+	coordinator, ok := agents.Default().Get("anton")
+	if !ok {
+		t.Fatal("no coordinator in the built-in team")
 	}
-	if len(list) != 1 {
-		t.Fatalf("got %d agents, want only the coordinator", len(list))
-	}
+	w.registry.Replace([]agents.Agent{coordinator})
+
 	if _, err := planSchema(w.registry); err == nil {
 		t.Fatal("planSchema should refuse a roster with no specialists")
 	}
 	if got := specialistIDs(w.registry); len(got) != 0 {
 		t.Fatalf("specialistIDs = %v, want none", got)
+	}
+}
+
+// And the roster setup does produce can route, which is a different property:
+// the routing schema enumerates the non-coordinators, and until Jared existed
+// a fresh root had none of them.
+func TestAFreshRootCanRoute(t *testing.T) {
+	w := newTestWorkbench(t)
+	if _, err := w.UseConfigRoot(t.TempDir()); err != nil {
+		t.Fatalf("UseConfigRoot: %v", err)
+	}
+
+	if _, err := planSchema(w.registry); err != nil {
+		t.Fatalf("planSchema on a fresh root: %v", err)
+	}
+	if got := specialistIDs(w.registry); len(got) != 1 || got[0] != "jared" {
+		t.Errorf("specialistIDs = %v, want [jared]", got)
+	}
+}
+
+// Idea and planning are led by the agent who owns them; work is the
+// coordinator's. This is the whole of the mode binding, seen from the outside.
+func TestConversationsAreLedByTheirModeOwner(t *testing.T) {
+	w := newTestWorkbench(t)
+	if _, err := w.UseConfigRoot(t.TempDir()); err != nil {
+		t.Fatalf("UseConfigRoot: %v", err)
+	}
+
+	for mode, want := range map[string]string{
+		ModeIdea:     "jared",
+		ModePlanning: "jared",
+		ModeWork:     "anton",
+	} {
+		lead, ok := w.registry.For(mode)
+		if !ok || lead.ID != want {
+			t.Errorf("For(%q) = %+v, %v; want %s", mode, lead, ok, want)
+		}
 	}
 }
 
