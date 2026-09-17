@@ -74,6 +74,19 @@ RUN --mount=type=cache,target=/root/.npm \
 
 COPY web/ ./
 
+# The map, which is the desktop app's and is shared rather than copied.
+#
+# `@mindmap/*` resolves to ../frontend/src/lib/mindmap in both the viewer's
+# vite config and its tsconfig, so with WORKDIR /web it has to land at
+# /frontend/src/lib/mindmap -- outside this stage's working directory, which
+# looks wrong and is exactly what the alias asks for. Without it the stage
+# below fails on "Cannot find module '@mindmap/renderer'".
+#
+# Only this one directory comes over. It imports nothing outside itself: it is
+# pure geometry and painting, which is what makes it shareable with a page
+# that has no document model at all.
+COPY frontend/src/lib/mindmap /frontend/src/lib/mindmap
+
 # Typechecked here as well as in CI, for the same reason the stage above runs
 # go test: the check that gates an artifact belongs beside the artifact, not in
 # a job that could be skipped or reordered.
