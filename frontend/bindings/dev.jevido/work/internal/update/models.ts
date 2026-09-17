@@ -16,3 +16,44 @@ export interface AvailableEvent {
      */
     "releaseUrl": string;
 }
+
+/**
+ * Found is what one check saw, for a caller that asked rather than waited.
+ * 
+ * The background poll says nothing when there is nothing to say -- silence is
+ * the right answer to "no new release" six hours after the last one. Somebody
+ * who pressed a button is owed a sentence either way, so this reports the
+ * version it saw and whether it beats the running one, and the caller decides
+ * what to put on screen.
+ */
+export interface Found {
+    /**
+     * Version is the newest release's tag, empty when nothing was asked
+     * because this is a development build.
+     */
+    "version": string;
+
+    /**
+     * ReleaseURL is that release's page, for "see what changed".
+     */
+    "releaseUrl": string;
+
+    /**
+     * Newer says whether Version beats the running one, which is the only
+     * question the button was really asking.
+     */
+    "newer": boolean;
+
+    /**
+     * Current is the running version, so the answer can name both.
+     */
+    "current": string;
+
+    /**
+     * Dev marks a build that was never stamped by the release workflow.
+     * Nothing was asked of GitHub: a local build is usually ahead of the
+     * newest release, and offering to "update" it to something older is
+     * worse than saying so.
+     */
+    "dev": boolean;
+}

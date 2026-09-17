@@ -7,6 +7,8 @@ package services
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -279,10 +281,16 @@ func (s *WorkbenchService) Workspace() *workbench.WorkspaceView {
 	return s.wb.Workspace()
 }
 
-// WorkspaceKeys returns the workspace's write key, and its read key if this
-// machine is the one that created it. This is what an invitation is made of.
+// WorkspaceKeys returns both of the workspace's keys.
+//
+// Both, always, and the same two every time: a machine that joined with a
+// write key and so has no read key gets one minted and kept on the first ask,
+// so opening this panel twice shows one pair rather than issuing a credential
+// each time. See Workbench.EnsureKeys.
 func (s *WorkbenchService) WorkspaceKeys() (workbench.Keys, error) {
-	return s.wb.Keys()
+	ctx, cancel := context.WithTimeout(context.Background(), joinTimeout)
+	defer cancel()
+	return s.wb.EnsureKeys(ctx)
 }
 
 // CreateLocalWorkspace makes a workspace that lives only on this machine and
@@ -481,6 +489,37 @@ func (s *WorkbenchService) CloseTab(tabID string) error {
 		return errors.New("tabId is empty")
 	}
 	return s.wb.CloseTab(tabID)
+}
+
+// SetTabFolder points a tab at a folder by path, for somebody who would rather
+// type or paste one than walk a picker.
+//
+// The same call the picker ends in, with the same validation behind it: a path
+// that does not exist, or names a file, is refused by Workbench.BindTab and the
+// tab keeps the folder it had. A leading ~ is expanded here because a path
+// typed by a person is a path typed the way people write them, and nothing
+// further down knows what a home directory is.
+func (s *WorkbenchService) SetTabFolder(tabID, path string) (string, error) {
+	tabID = strings.TrimSpace(tabID)
+	if tabID == "" {
+		return "", errors.New("tabId is empty")
+	}
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return "", errors.New("folder is empty")
+	}
+	if path == "~" || strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		path = filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(path, "~"), "/"))
+	}
+	path = filepath.Clean(path)
+	if err := s.wb.BindTab(tabID, path); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 // BindTabFolder asks the user which project on this machine a tab means,

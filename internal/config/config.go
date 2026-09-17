@@ -41,6 +41,10 @@ type Config struct {
 	// it has joined none. Nil is the ordinary case and the one Work has always
 	// had: no workspace means no server, no queue and no ops.
 	Workspace *Workspace `json:"workspace,omitempty"`
+	// KnownWorkspaces are workspaces this machine holds keys for,
+	// beyond the one it is joined to. See Known: it is what lets a branch be
+	// merged back into its parent without somebody hunting for the key.
+	KnownWorkspaces []Known `json:"knownWorkspaces,omitempty"`
 	// ReviewProposalsFirst holds Claude's restructurings in the review panel
 	// instead of applying them.
 	//
@@ -112,6 +116,30 @@ type Workspace struct {
 	// The zero value is the behaviour this app had for its whole life, so a
 	// config written by an older build needs no migration.
 	HoldPush bool `json:"holdPush,omitempty"`
+}
+
+// Known is a workspace this machine has keys for.
+//
+// Every workspace made here or joined from here goes in, and stays in when the
+// machine leaves it. Not a list of workspaces to join and not a history:
+// joining is still one at a time and Workspace above is still the one that is
+// joined. This is where the keys live once they are no longer the current
+// workspace's, because the server cannot show them again -- it keeps hashes --
+// so a key that is only in a workspace this machine has left is a key that is
+// gone.
+//
+// It is a credential store, which is why it lives in the file that is already
+// 0600 for exactly that reason, and why Forget exists: somebody who wants a
+// key off this machine needs a way to take it off.
+type Known struct {
+	ID        string `json:"id"`
+	Name      string `json:"name,omitempty"`
+	ServerURL string `json:"serverUrl"`
+	WriteKey  string `json:"writeKey,omitempty"`
+	// ReadKey is the one that goes in a viewer link. Empty on a machine that
+	// joined with a write key and has never asked for one; see
+	// Workbench.EnsureKeys, which mints it and writes it here.
+	ReadKey string `json:"readKey,omitempty"`
 }
 
 // Tab is one tab of a workspace as this machine sees it.
@@ -335,4 +363,60 @@ func Save(c Config) error {
 		return fmt.Errorf("config: replace %s: %w", path, err)
 	}
 	return nil
+}
+
+// Remember records the keys for a workspace, so they outlive being joined to
+// it.
+//
+// Idempotent by workspace id: re-joining updates the entry rather than leaving
+// two, one of which is stale. Empty fields do not overwrite stored ones --
+// a machine that has a read key and then reports only a write key has not
+// stopped having the read key, and the server cannot hand it out again.
+//
+// A workspace with no write key is not remembered: there would be nothing in
+// the entry worth having.
+func (c *Config) Remember(k Known) {
+	if k.ID == "" || k.WriteKey == "" {
+		return
+	}
+	for i := range c.KnownWorkspaces {
+		if c.KnownWorkspaces[i].ID != k.ID {
+			continue
+		}
+		was := c.KnownWorkspaces[i]
+		if k.Name == "" {
+			k.Name = was.Name
+		}
+		if k.ReadKey == "" {
+			k.ReadKey = was.ReadKey
+		}
+		if k.ServerURL == "" {
+			k.ServerURL = was.ServerURL
+		}
+		c.KnownWorkspaces[i] = k
+		return
+	}
+	c.KnownWorkspaces = append(c.KnownWorkspaces, k)
+}
+
+// Forget drops a remembered workspace. Taking a key off a machine has to be
+// possible, or storing it was not a decision anybody could reverse.
+func (c *Config) Forget(id string) {
+	kept := c.KnownWorkspaces[:0]
+	for _, k := range c.KnownWorkspaces {
+		if k.ID != id {
+			kept = append(kept, k)
+		}
+	}
+	c.KnownWorkspaces = kept
+}
+
+// KnownWorkspace returns the remembered entry for an id, if there is one.
+func (c *Config) KnownWorkspace(id string) (Known, bool) {
+	for _, k := range c.KnownWorkspaces {
+		if k.ID == id {
+			return k, true
+		}
+	}
+	return Known{}, false
 }

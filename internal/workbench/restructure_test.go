@@ -45,7 +45,13 @@ func TestProposalPrompt(t *testing.T) {
 
 		// The request, the state, and the instruction that ties them together.
 		for _, want := range []string{
-			"reorganise an outline",
+			"board of ideas",
+			// The shape the idea view draws, which is what the operations are
+			// for: a proposal written against a flat outline builds one.
+			"cluster head",
+			// When to start over and when not to. A model told it may replace
+			// the board and not told when will, on a request to tidy a branch.
+			"starts with replace",
 			"propose_restructure",
 			"exactly once",
 			"Name only the ids below",

@@ -190,7 +190,7 @@ export class Review {
     this.outcome = null;
     this.refused = null;
 
-    if (!this.reviewFirst) {
+    if (!this.reviewFirst && !replaces(proposal)) {
       // Through the same path Apply uses, deliberately. Going around it would
       // mean two ways of applying a proposal, and the second one would be the
       // one that drifts.
@@ -456,6 +456,48 @@ export class Review {
           ? null
           : "those two are not linked";
 
+      case "caption":
+        if (!known(op.node) || !known(op.other)) return gone;
+        return workspace.linksOf(op.node).some((l) => l.other === op.other)
+          ? null
+          : "those two are not linked";
+
+      case "set-icon":
+      case "set-detail":
+        return known(op.node) ? null : gone;
+
+      case "guide":
+        if (!known(op.node)) return gone;
+        if (!workspace.graph.guidelines.has(op.guideline)) return "that guideline does not exist";
+        return workspace.guidelinesOf(op.node).some((g) => g.id === op.guideline)
+          ? "that card is already under it"
+          : null;
+
+      case "unguide":
+        if (!known(op.node)) return gone;
+        return workspace.guidelinesOf(op.node).some((g) => g.id === op.guideline)
+          ? null
+          : "that card is not under it";
+
+      case "interest":
+        if (!known(op.node)) return gone;
+        if (!workspace.graph.parties.has(op.party)) return "nobody by that name is set up here";
+        return workspace.partiesOf(op.node).some((p) => p.id === op.party)
+          ? "they are already interested"
+          : null;
+
+      case "uninterest":
+        if (!known(op.node)) return gone;
+        return workspace.partiesOf(op.node).some((p) => p.id === op.party)
+          ? null
+          : "they are not down as interested";
+
+      case "replace":
+        // It names nothing: a replace acts on whatever is there -- including
+        // nothing, which is a board that was already empty and an archive line
+        // with no children under it.
+        return null;
+
       case "group":
         if (!known(op.node)) return gone;
         // A region it was not shown is a region it invented, and an invented
@@ -570,7 +612,65 @@ export function describe(op: ProposedOp, workspace: Workspace, proposal: Proposa
 
     case "set-status":
       return `Mark ${name(op.node)} as ${TASK_STATE_LABELS[op.status].toLowerCase()}`;
+
+    case "set-detail":
+      return op.text.trim() === ""
+        ? `Clear what ${name(op.node)} says at length`
+        : `Write ${op.text.trim().length} characters of detail on ${name(op.node)}`;
+
+    case "guide":
+      return `Put ${name(op.node)} under “${term(workspace.graph.guidelines, op.guideline)}”`;
+
+    case "unguide":
+      return `Take ${name(op.node)} out from under “${term(workspace.graph.guidelines, op.guideline)}”`;
+
+    case "interest":
+      return `Note that ${term(workspace.graph.parties, op.party)} is waiting on ${name(op.node)}`;
+
+    case "uninterest":
+      return `Note that ${term(workspace.graph.parties, op.party)} is no longer waiting on ${name(op.node)}`;
+
+    case "set-icon":
+      return op.icon === ""
+        ? `Take the glyph off ${name(op.node)}`
+        : `Put the ${op.icon} glyph on ${name(op.node)}`;
+
+    case "caption":
+      return op.text.trim() === ""
+        ? `Take the caption off the link between ${name(op.node)} and ${name(op.other)}`
+        : `Say “${clip(op.text, 40)}” on the link between ${name(op.node)} and ${name(op.other)}`;
+
+    case "replace": {
+      // The count is the warning, the way it is on a delete -- except that
+      // this one is reversible, and saying so is the difference between a row
+      // somebody reads and a row somebody panics at.
+      const roots = workspace.rows.filter((r) => r.depth === 0).length;
+      return roots === 0
+        ? `Start a new board — ${clip(op.reason, 80)}`
+        : `Set the whole board aside — ${roots} top-level ${roots === 1 ? "line" : "lines"} ` +
+          `move under one collapsed line, and Undo brings them back. ${clip(op.reason, 80)}`;
+    }
   }
+}
+
+/**
+ * True if a proposal starts the board again.
+ *
+ * Such a proposal always goes through review, whatever `reviewFirst` says. The
+ * apply-then-offer-Undo default is right for "add three lines"; it is not right
+ * for "here is a different board". This is the one change big enough that
+ * seeing it first is worth the click -- and it is exactly the one where the
+ * Undo behind it is a set of moves rather than one edit, so having read the row
+ * is what makes the way back obvious.
+ */
+function replaces(proposal: Proposal): boolean {
+  return proposal.ops.some((op) => op.kind === "replace");
+}
+
+/** A word out of one of the vocabularies, or a placeholder if it has gone. */
+function term(words: Map<string, string>, id: string): string {
+  const name = words.get(id);
+  return name === undefined || name.trim() === "" ? "a word that is gone" : name.trim();
 }
 
 function countDeep(node: { children: { children: unknown[] }[] }): number {

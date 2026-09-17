@@ -38,17 +38,30 @@
  */
 import {
   FIELD_COLLAPSED,
+  FIELD_DETAIL,
+  FIELD_ICON,
   FIELD_STATUS,
   FIELD_TEXT,
   FIELD_TYPE,
   FIELD_FROM,
   FIELD_REGION,
   FIELD_TO,
+  FIELD_X,
+  FIELD_Y,
   MODES,
   TYPE_EDGE,
+  TYPE_GUIDED,
+  TYPE_GUIDELINE,
+  TYPE_INTEREST,
+  TYPE_PARTY,
   TYPE_REGION,
   findInTree,
+  detailOf,
   isEdge,
+  isGuided,
+  isGuideline,
+  isInterest,
+  isParty,
   isRegion,
   isCollapsed,
   isTask,
@@ -58,6 +71,7 @@ import {
   sourceIdOf,
   statusOf,
   taskIdOf,
+  iconOf,
   textOf,
   type Mode,
   type Row,
@@ -99,6 +113,29 @@ export interface OutlineSnapshot {
    * ops the moment anything touches them again.
    */
   drafts: Record<string, string>;
+}
+
+/**
+ * One node joining two others: an edge, a guideline on a card, an interest in
+ * one.
+ *
+ * The shape rather than the meaning, which is why three different things share
+ * it. What each one means is its node type; what they all are is a node with
+ * two ends, and the indexing, the merge and the delete are the same for all of
+ * them.
+ */
+export interface Join {
+  id: string;
+  from: string;
+  to: string;
+}
+
+/** A word in one of the board's two vocabularies, with what it is attached to. */
+export interface Term {
+  id: string;
+  name: string;
+  /** How many cards carry it. What the reverse view sorts on. */
+  count: number;
 }
 
 export class Workspace {
@@ -552,6 +589,33 @@ export class Workspace {
     return this.#emit(this.#replica.move(id, parent, keyFor(atEnd(target.children))));
   }
 
+  /**
+   * Leaves cards where a hand put them.
+   *
+   * One op per card, which is what the protocol has: a field write is per
+   * node, and a drag of a branch is a drag of every card in it. They are
+   * emitted together so a merge sees one arrangement rather than a card at a
+   * time arriving into a board that is still rearranging itself.
+   *
+   * Coordinates are the map's own, and the map is the only caller: nothing
+   * else in the app knows where a card is, because until somebody drags one
+   * nothing anywhere does. See layout.ts for what they mean.
+   */
+  place(moves: readonly { id: string; x: number; y: number }[]): boolean {
+    if (moves.length === 0) return false;
+    this.#settleAll();
+    let any = false;
+    for (const move of moves) {
+      if (!Number.isFinite(move.x) || !Number.isFinite(move.y)) continue;
+      if (!findInTree(this.tree, move.id)) continue;
+      // Rounded: a board is not drawn to a tenth of a pixel, and a whole
+      // number is a shorter op and a cleaner thing to read in a log.
+      const fields = { [FIELD_X]: Math.round(move.x), [FIELD_Y]: Math.round(move.y) };
+      if (this.#emit(this.#replica.setFields(move.id, fields))) any = true;
+    }
+    return any;
+  }
+
   /** Puts a line at the top level of the outline, last. */
   moveToTop(id: string): boolean {
     const moving = findInTree(this.tree, id);
@@ -577,19 +641,36 @@ export class Workspace {
     const regionOf = new Map<string, string>();
     const text = new Map<string, string>();
     const alive = new Set<string>();
+    // The two vocabularies, and the joins that attach them to cards. Indexed
+    // in the same pass as everything else: a card asking "which guidelines am
+    // I under" on every repaint would otherwise walk the whole tree per card.
+    const guidelines = new Map<string, string>();
+    const parties = new Map<string, string>();
+    const guided: Join[] = [];
+    const interests: Join[] = [];
+
+    const join = (node: TreeNode): Join => ({
+      id: node.id,
+      from: String(node.fields[FIELD_FROM] ?? ""),
+      to: String(node.fields[FIELD_TO] ?? ""),
+    });
 
     const walk = (nodes: readonly TreeNode[]) => {
       for (const node of nodes) {
         alive.add(node.id);
         text.set(node.id, textOf(node));
         if (isEdge(node)) {
-          edges.push({
-            id: node.id,
-            from: String(node.fields[FIELD_FROM] ?? ""),
-            to: String(node.fields[FIELD_TO] ?? ""),
-          });
+          edges.push(join(node));
         } else if (isRegion(node)) {
           regions.set(node.id, textOf(node));
+        } else if (isGuideline(node)) {
+          guidelines.set(node.id, textOf(node));
+        } else if (isParty(node)) {
+          parties.set(node.id, textOf(node));
+        } else if (isGuided(node)) {
+          guided.push(join(node));
+        } else if (isInterest(node)) {
+          interests.push(join(node));
         } else {
           const region = node.fields[FIELD_REGION];
           if (typeof region === "string" && region !== "") regionOf.set(node.id, region);
@@ -598,7 +679,7 @@ export class Workspace {
       }
     };
     walk(this.tree);
-    return { edges, regions, regionOf, text, alive };
+    return { edges, regions, regionOf, text, alive, guidelines, parties, guided, interests };
   });
 
   /**
@@ -656,6 +737,79 @@ export class Workspace {
   /** Unlinking is deleting the edge, which already has an undo and a conflict. */
   unlink(edge: string): boolean {
     return this.#emit(this.#replica.remove(edge));
+  }
+
+  /**
+   * Writes why two lines are linked, onto the edge that links them.
+   *
+   * The edge has carried a text field since it became a node, and nothing has
+   * ever written one. It goes on the edge rather than on either end because
+   * that is what it is about: "these two, because" is not a fact about either
+   * line on its own.
+   */
+  setLinkText(edge: string, text: string): boolean {
+    const node = findInTree(this.tree, edge) ?? this.#detachedNode(edge);
+    if (!node) return false;
+    if (textOf(node) === text) return true;
+    return this.#emit(this.#replica.setFields(edge, { [FIELD_TEXT]: text }));
+  }
+
+  /**
+   * Puts the whole board aside, under one collapsed line, and leaves an empty
+   * one.
+   *
+   * What `replace` in a proposal does, and deliberately not a delete. A
+   * tombstone wins the merge in both directions and nothing in the protocol
+   * undoes one, so deleting the board would be the single change Undo could
+   * not take back -- and a wholesale replacement is the change most worth
+   * being able to take back. A move can be moved again.
+   *
+   * Collapsed, because what somebody wants to look at after this is the new
+   * board. The old one is one triangle away rather than gone.
+   *
+   * @returns the archive line's id, or "" if nothing was written.
+   */
+  archive(name: string): string {
+    this.#settleAll();
+    // Read before the archive line exists, or it would be moved under itself.
+    const roots = this.rows.filter((row) => row.depth === 0).map((row) => row.node.id);
+
+    const id = newId();
+    const made = this.#emit(
+      this.#replica.create(id, "", keyFor(atEnd(this.#siblingsOf(""))), {
+        [FIELD_TEXT]: name,
+        [FIELD_COLLAPSED]: true,
+      }),
+    );
+    if (!made) return "";
+
+    // In order, each appended after the last, so the old board keeps the order
+    // it was read in rather than coming back reversed the day somebody opens
+    // it.
+    for (const root of roots) this.moveUnder(root, id);
+    return id;
+  }
+
+  /** The glyph on a line, or "" for none. */
+  iconOf(id: string): string {
+    const node = findInTree(this.tree, id);
+    return node ? iconOf(node) : "";
+  }
+
+  /**
+   * Puts a glyph on a line, or takes it off.
+   *
+   * Taking it off writes the empty string rather than removing the field,
+   * because the protocol has no remove-field: every write is a value with a
+   * stamp, and a field dropped locally would simply come back the next time an
+   * older op for it arrived. `iconOf` reads "" and absent as the same thing,
+   * which is what makes that safe.
+   */
+  setIcon(id: string, icon: string): boolean {
+    const node = findInTree(this.tree, id);
+    if (!node) return false;
+    if (iconOf(node) === icon) return true;
+    return this.#emit(this.#replica.setFields(id, { [FIELD_ICON]: icon }));
   }
 
   /**
@@ -883,6 +1037,209 @@ export class Workspace {
   }
 
   /* ---------------------------------------------------------------------- */
+  /* What a card says at length                                             */
+  /* ---------------------------------------------------------------------- */
+
+  /** What a card says beyond its title, or "" when it says nothing more. */
+  detail(id: string): string {
+    return detailOf(findInTree(this.tree, id) ?? this.#detachedNode(id));
+  }
+
+  /**
+   * Writes the body of a card.
+   *
+   * Straight to an op rather than through the draft settle that `setText` uses.
+   * A title is typed under the caret on a map that redraws around it, which is
+   * what the 400ms settle is for; a detail is typed in a dialog that is not
+   * drawing anything, and one op per keystroke there would be one op per
+   * keystroke. The dialog writes on close and on blur instead -- see CardDialog.
+   */
+  setDetail(id: string, text: string): boolean {
+    const node = findInTree(this.tree, id);
+    if (!node) return false;
+    if (detailOf(node) === text) return true;
+    return this.#emit(this.#replica.setFields(id, { [FIELD_DETAIL]: text }));
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Guidelines: what this workspace is trying to be                        */
+  /* ---------------------------------------------------------------------- */
+
+  /*
+   * Guidelines and interested parties are two features, and the methods below
+   * are two sets. What they share is two private helpers, because "make a node
+   * of this type with this text" is not a design decision either of them owns
+   * -- it is the same three lines. Everything a caller touches is separate, so
+   * either can grow a field the other has no use for without the other
+   * noticing.
+   */
+
+  /** Every guideline in this workspace, named, with how many cards carry it. */
+  guidelines = $derived.by(() => this.#terms(this.graph.guidelines, this.graph.guided));
+
+  /** Every interested party, with how many cards they are waiting on. */
+  parties = $derived.by(() => this.#terms(this.graph.parties, this.graph.interests));
+
+  /** Adds a guideline to this workspace. Returns its id, or "" if it was refused. */
+  addGuideline(name: string): string {
+    return this.#addTerm(TYPE_GUIDELINE, name);
+  }
+
+  renameGuideline(id: string, name: string): boolean {
+    return this.graph.guidelines.has(id) ? this.#renameTerm(id, name) : false;
+  }
+
+  /**
+   * Removes a guideline, and every card's claim to it.
+   *
+   * The joins go too, and they go first. A join left pointing at a tombstone is
+   * a card that says it meets a guideline nobody can name, and it would sit in
+   * the document forever being skipped by every reader.
+   */
+  removeGuideline(id: string): boolean {
+    if (!this.graph.guidelines.has(id)) return false;
+    return this.#removeTerm(id, this.graph.guided);
+  }
+
+  /** The guidelines on one card, in the order the workspace lists them. */
+  guidelinesOf(card: string): { join: string; id: string; name: string }[] {
+    return this.#tagsOf(card, this.graph.guided, this.graph.guidelines);
+  }
+
+  /** Puts a card under a guideline. Null if it is already under it. */
+  guide(card: string, guideline: string): string | null {
+    if (!this.graph.guidelines.has(guideline)) return null;
+    return this.#tag(TYPE_GUIDED, card, guideline, this.graph.guided);
+  }
+
+  /** Takes a card out from under a guideline, by the join between them. */
+  unguide(join: string): boolean {
+    return this.#emit(this.#replica.remove(join));
+  }
+
+  /* ---------------------------------------------------------------------- */
+  /* Interested parties: who is waiting for what                            */
+  /* ---------------------------------------------------------------------- */
+
+  addParty(name: string): string {
+    return this.#addTerm(TYPE_PARTY, name);
+  }
+
+  renameParty(id: string, name: string): boolean {
+    return this.graph.parties.has(id) ? this.#renameTerm(id, name) : false;
+  }
+
+  removeParty(id: string): boolean {
+    if (!this.graph.parties.has(id)) return false;
+    return this.#removeTerm(id, this.graph.interests);
+  }
+
+  /** Who is interested in one card. */
+  partiesOf(card: string): { join: string; id: string; name: string }[] {
+    return this.#tagsOf(card, this.graph.interests, this.graph.parties);
+  }
+
+  /** Records that somebody is interested in a card. */
+  addInterest(card: string, party: string): string | null {
+    if (!this.graph.parties.has(party)) return null;
+    return this.#tag(TYPE_INTEREST, card, party, this.graph.interests);
+  }
+
+  removeInterest(join: string): boolean {
+    return this.#emit(this.#replica.remove(join));
+  }
+
+  /* ---------------------------------------------------------------------- */
+
+  /**
+   * The cards carrying a term, in the order they sit on the board.
+   *
+   * The reverse question, and the reason the vocabularies exist: "what have we
+   * got that improves scalability" and "what is Sales waiting on" are the two
+   * that decide what to do next, and neither can be asked of a card.
+   *
+   * Board order rather than tagging order: the answer is a list somebody reads
+   * against the map in front of them, and a list in the order the joins
+   * happened to be made is a list in no order at all.
+   */
+  cardsUnder(term: string): TreeNode[] {
+    const joins = this.graph.guidelines.has(term) ? this.graph.guided : this.graph.interests;
+    const cards = new Set(joins.filter((j) => j.to === term).map((j) => j.from));
+    return this.rows.filter((row) => cards.has(row.node.id)).map((row) => row.node);
+  }
+
+  #terms(names: Map<string, string>, joins: readonly Join[]): Term[] {
+    const counts = new Map<string, number>();
+    for (const join of joins) {
+      // A join to a term that has been deleted, or from a card that has, is
+      // not a count. It is a row waiting to be tidied, and counting it would
+      // make the reverse view promise cards it cannot then show.
+      if (!names.has(join.to) || !this.graph.alive.has(join.from)) continue;
+      counts.set(join.to, (counts.get(join.to) ?? 0) + 1);
+    }
+    return [...names]
+      .map(([id, name]) => ({ id, name, count: counts.get(id) ?? 0 }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  #tagsOf(
+    card: string,
+    joins: readonly Join[],
+    names: Map<string, string>,
+  ): { join: string; id: string; name: string }[] {
+    const out: { join: string; id: string; name: string }[] = [];
+    for (const join of joins) {
+      if (join.from !== card) continue;
+      const name = names.get(join.to);
+      if (name === undefined) continue;
+      out.push({ join: join.id, id: join.to, name });
+    }
+    return out.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  #addTerm(type: string, name: string): string {
+    const text = name.trim();
+    if (text === "") return "";
+    const id = newId();
+    const made = this.#emit(
+      this.#replica.create(id, "", keyFor(atEnd(this.#siblingsOf(""))), {
+        [FIELD_TYPE]: type,
+        [FIELD_TEXT]: text,
+      }),
+    );
+    return made ? id : "";
+  }
+
+  #renameTerm(id: string, name: string): boolean {
+    const text = name.trim();
+    if (text === "") return false;
+    return this.#emit(this.#replica.setFields(id, { [FIELD_TEXT]: text }));
+  }
+
+  #removeTerm(id: string, joins: readonly Join[]): boolean {
+    for (const join of joins) {
+      if (join.to === id) this.#emit(this.#replica.remove(join.id));
+    }
+    return this.#emit(this.#replica.remove(id));
+  }
+
+  #tag(type: string, from: string, to: string, joins: readonly Join[]): string | null {
+    if (!findInTree(this.tree, from)) return null;
+    // Twice is once, the way it is for a link: a second join between the same
+    // two says nothing the first one did not, and would be counted twice.
+    if (joins.some((j) => j.from === from && j.to === to)) return null;
+    const id = newId();
+    const made = this.#emit(
+      this.#replica.create(id, "", keyFor(atEnd(this.#siblingsOf(""))), {
+        [FIELD_TYPE]: type,
+        [FIELD_FROM]: from,
+        [FIELD_TO]: to,
+      }),
+    );
+    return made ? id : null;
+  }
+
+  /* ---------------------------------------------------------------------- */
   /* Applying what Claude proposed                                          */
   /* ---------------------------------------------------------------------- */
 
@@ -987,6 +1344,61 @@ export class Workspace {
         return this.unlink(edge.edge) ? edge.edge : null;
       }
 
+      case "set-detail": {
+        const node = real(op.node);
+        if (!findInTree(this.tree, node)) return null;
+        return this.setDetail(node, op.text) ? node : null;
+      }
+
+      case "guide": {
+        const node = real(op.node);
+        return this.guide(node, real(op.guideline)) === null ? null : node;
+      }
+
+      case "unguide": {
+        const node = real(op.node);
+        const guideline = real(op.guideline);
+        // Named by the two ends, because the two ends are what the model was
+        // shown. The join between them is looked up here, where the document
+        // is.
+        const tag = this.guidelinesOf(node).find((g) => g.id === guideline);
+        if (!tag) return null;
+        return this.unguide(tag.join) ? node : null;
+      }
+
+      case "interest": {
+        const node = real(op.node);
+        return this.addInterest(node, real(op.party)) === null ? null : node;
+      }
+
+      case "uninterest": {
+        const node = real(op.node);
+        const party = real(op.party);
+        const tag = this.partiesOf(node).find((p) => p.id === party);
+        if (!tag) return null;
+        return this.removeInterest(tag.join) ? node : null;
+      }
+
+      case "set-icon": {
+        const node = real(op.node);
+        if (!findInTree(this.tree, node)) return null;
+        return this.setIcon(node, op.icon) ? node : null;
+      }
+
+      case "caption": {
+        const node = real(op.node);
+        const other = real(op.other);
+        // Named by its two ends rather than by the edge id, because the ends
+        // are what the model was shown. The edge is looked up here, where the
+        // document is.
+        const edge = this.linksOf(node).find((l) => l.other === other);
+        if (!edge) return null;
+        return this.setLinkText(edge.edge, op.text) ? edge.edge : null;
+      }
+
+      case "replace":
+        return this.archive(archiveName()) || null;
+
       case "group": {
         const node = real(op.node);
         if (!findInTree(this.tree, node)) return null;
@@ -1088,6 +1500,16 @@ export class Workspace {
     this.#sending = true;
     try {
       while (this.#outbound.length > 0) {
+        // Whatever has piled up, in one call, however much it is. How much of
+        // that reaches the disk at a time is Go's business -- ApplyEdits plans
+        // the lot and then writes it a batch at a time, so there is no size
+        // this side has to know about.
+        //
+        // There was a constant here briefly, copied from Go's. It was the same
+        // number in two places, and the copy that drifts loses edits silently:
+        // an over-large call came back as an error, and the catch below reads
+        // every error as "it reached disk anyway", which for that one was not
+        // true.
         const batch = this.#outbound;
         this.#outbound = [];
         const merged = await this.send(batch);
@@ -1243,4 +1665,17 @@ function countFolded(tree: readonly TreeNode[]): number {
     n += countFolded(node.children);
   }
   return n;
+}
+
+/**
+ * What an archived board is called.
+ *
+ * The date, because that is the only thing anybody has to go on when they open
+ * one months later, and a name like "Old board" stops meaning anything the
+ * second time it is used. Local formatting: the name is read by the person who
+ * made it, and the document has no locale of its own.
+ */
+function archiveName(): string {
+  const day = new Date().toLocaleDateString(undefined, { day: "numeric", month: "long" });
+  return `Set aside ${day}`;
 }

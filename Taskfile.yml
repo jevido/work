@@ -230,6 +230,80 @@ tasks:
     cmds:
       - go test -race -count=1 ./...
 
+  verify:board:
+    summary: Photographs the board in WebKitGTK, dark and light
+    # verify:map answers where the boxes are; this answers what they look like.
+    # Paint is the half of a canvas a pure test cannot reach -- a shadow, a
+    # tilt, a piece of tape, text that fits its paper -- and the only honest way
+    # to check it is to look at one. Writes PNGs and leaves them; reading them
+    # is the point.
+    #
+    # Needs WebKitGTK and its Python bindings, the same as the other shot
+    # harnesses. Offscreen, so it steals no window.
+    dir: frontend
+    vars:
+      OUT: '{{.OUT | default "../.tmp-verify"}}'
+    env:
+      # The offscreen window has no GL context on most desktops, and WebKit
+      # aborts rather than falling back on its own.
+      WEBKIT_DISABLE_COMPOSITING_MODE: 1
+      LIBGL_ALWAYS_SOFTWARE: 1
+      GDK_BACKEND: x11
+    cmds:
+      - |
+        npx vite --config .verify/vite.config.ts >/dev/null 2>&1 &
+        vite=$!
+        trap "kill $vite 2>/dev/null" EXIT
+        for _ in $(seq 1 60); do
+          curl -sf http://127.0.0.1:9345/.verify/board.html >/dev/null && break
+          sleep 0.25
+        done
+        python3 .verify/webkit_shots.py http://127.0.0.1:9345/.verify/board.html {{.OUT}}
+      - 'echo "shots in {{.OUT}}"'
+
+  verify:cards:
+    summary: Photographs the card and vocabulary dialogs in WebKitGTK
+    # The same trick as verify:board, on the two panels rather than the canvas.
+    # They are mounted against a stub document -- what is being checked is
+    # whether a card carrying four guidelines, two captioned links and a
+    # paragraph still fits, and whether the same panel reads right on a card
+    # carrying none of it. Neither question needs an op log behind it.
+    dir: frontend
+    vars:
+      OUT: '{{.OUT | default "../.tmp-verify"}}'
+    env:
+      WEBKIT_DISABLE_COMPOSITING_MODE: 1
+      LIBGL_ALWAYS_SOFTWARE: 1
+      GDK_BACKEND: x11
+    cmds:
+      - |
+        npx vite --config .verify/vite.config.ts >/dev/null 2>&1 &
+        vite=$!
+        trap "kill $vite 2>/dev/null" EXIT
+        for _ in $(seq 1 60); do
+          curl -sf http://127.0.0.1:9345/.verify/cards.html >/dev/null && break
+          sleep 0.25
+        done
+        python3 .verify/webkit_shots.py http://127.0.0.1:9345/.verify/cards.html {{.OUT}}
+      - 'echo "shots in {{.OUT}}"'
+
+  verify:map:
+    summary: Checks the map's geometry with no canvas and no browser
+    # lib/mindmap/layout.ts is pure -- rows and a text measurement in,
+    # rectangles out -- so the questions worth asking of it are answered by
+    # calling it, not by looking at a screenshot. Same shape as verify:office
+    # below, and for the same reason: emitted as CommonJS into a folder of its
+    # own, because tsc writes bare specifiers node's ESM loader will not
+    # resolve.
+    dir: frontend
+    vars:
+      OUT: node_modules/.map-verify
+    cmds:
+      - rm -rf {{.OUT}}
+      - npx tsc .verify/map.ts --outDir {{.OUT}} --module commonjs --target es2022 --moduleResolution node --skipLibCheck
+      - printf '{"type":"commonjs"}' > {{.OUT}}/package.json
+      - node {{.OUT}}/.verify/map.js
+
   verify:office:
     summary: Drives the office's scripted sequences without a browser
     # The simulation is plain TypeScript with no DOM in it, so this compiles

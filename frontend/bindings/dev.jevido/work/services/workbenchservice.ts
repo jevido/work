@@ -329,6 +329,20 @@ export function SetReviewProposalsFirst(first: boolean): $CancellablePromise<boo
 }
 
 /**
+ * SetTabFolder points a tab at a folder by path, for somebody who would rather
+ * type or paste one than walk a picker.
+ * 
+ * The same call the picker ends in, with the same validation behind it: a path
+ * that does not exist, or names a file, is refused by Workbench.BindTab and the
+ * tab keeps the folder it had. A leading ~ is expanded here because a path
+ * typed by a person is a path typed the way people write them, and nothing
+ * further down knows what a home directory is.
+ */
+export function SetTabFolder(tabID: string, path: string): $CancellablePromise<string> {
+    return $Call.ByID(3115701509, tabID, path);
+}
+
+/**
  * StartNextTask runs the next task on the active tab's plan.
  * 
  * The order planning holds is the order work takes: this is what makes that
@@ -406,8 +420,12 @@ export function WorkspaceDocument(): $CancellablePromise<workbench$0.Document> {
 }
 
 /**
- * WorkspaceKeys returns the workspace's write key, and its read key if this
- * machine is the one that created it. This is what an invitation is made of.
+ * WorkspaceKeys returns both of the workspace's keys.
+ * 
+ * Both, always, and the same two every time: a machine that joined with a
+ * write key and so has no read key gets one minted and kept on the first ask,
+ * so opening this panel twice shows one pair rather than issuing a credential
+ * each time. See Workbench.EnsureKeys.
  */
 export function WorkspaceKeys(): $CancellablePromise<workbench$0.Keys> {
     return $Call.ByID(857101543);

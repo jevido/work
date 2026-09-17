@@ -1,6 +1,5 @@
 <script lang="ts">
   import { MindmapRenderer } from "@mindmap/renderer";
-  import { LAYOUTS, LAYOUT_LABELS, type LayoutKind } from "@mindmap/layout";
   import { mapRows } from "../lib/doc";
   import type { Viewer } from "../lib/viewer.svelte";
 
@@ -9,10 +8,9 @@
   let canvas = $state<HTMLCanvasElement | null>(null);
   let renderer: MindmapRenderer | null = null;
 
-  let shape = $state<LayoutKind>("tidy");
   let scale = $state(1);
 
-  const rows = $derived(mapRows(viewer.tree));
+  const rows = $derived(mapRows(viewer.contents));
 
   /**
    * The same map the desktop app draws, from a document this page cannot
@@ -27,23 +25,11 @@
   function scene() {
     return {
       rows,
-      linksOf: (id: string) =>
-        viewer.linksOf(id).map((link) => ({
-          // The viewer indexes links by the node they touch rather than by the
-          // edge node, so there is no edge id to dedupe on. A pair of ids in a
-          // fixed order is one: it is the same string from both ends, which is
-          // exactly what the renderer needs to draw one line instead of two.
-          edge: [id, link.other].sort().join("~"),
-          other: link.other,
-          text: link.text,
-          dangling: link.dangling,
-        })),
       regionOf: (id: string) => viewer.regionEntryOf(id),
       tasksOf: (id: string) => viewer.tasksOf(id),
       // Nothing is focused: there is no caret on this page, and a box drawn as
       // selected would be claiming somebody had put it there.
       focused: () => null,
-      shape: () => shape,
     };
   }
 
@@ -72,7 +58,6 @@
 
   $effect(() => {
     void rows;
-    void shape;
     renderer?.invalidate();
   });
 </script>
@@ -85,20 +70,6 @@
     any structure.
   -->
   <canvas bind:this={canvas} aria-hidden="true"></canvas>
-
-  <div class="tools">
-    <div class="shapes" role="group" aria-label="Map shape">
-      {#each LAYOUTS as kind (kind)}
-        <button
-          class:on={shape === kind}
-          aria-pressed={shape === kind}
-          onclick={() => (shape = kind)}
-        >
-          {LAYOUT_LABELS[kind]}
-        </button>
-      {/each}
-    </div>
-  </div>
 
   <div class="chips">
     <span class="chip">{rows.length} {rows.length === 1 ? "line" : "lines"}</span>
@@ -133,45 +104,6 @@
 
   canvas:active {
     cursor: grabbing;
-  }
-
-  .tools {
-    position: absolute;
-    top: 10px;
-    right: 10px;
-  }
-
-  .shapes {
-    display: flex;
-    gap: 1px;
-    padding: 1px;
-    border: 1px solid var(--line);
-    border-radius: 5px;
-    background: var(--line);
-  }
-
-  .shapes button {
-    padding: 3px 10px;
-    border: none;
-    background: var(--panel);
-    color: var(--muted);
-    font: inherit;
-    font-size: 11px;
-    cursor: pointer;
-  }
-
-  .shapes button:first-child {
-    border-radius: 3px 0 0 3px;
-  }
-
-  .shapes button:last-child {
-    border-radius: 0 3px 3px 0;
-  }
-
-  .shapes button.on {
-    background: var(--panel-2);
-    color: var(--text);
-    box-shadow: inset 0 -2px 0 var(--accent);
   }
 
   .chips {

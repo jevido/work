@@ -22,6 +22,13 @@ type stubGitHub struct {
 	conditional string
 }
 
+// served is the request count, read under the lock the handler writes it with.
+func (s *stubGitHub) served() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.requests
+}
+
 func (s *stubGitHub) handler(t *testing.T) http.Handler {
 	t.Helper()
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -193,4 +200,76 @@ func TestApplyUpdateRefusesDevBuild(t *testing.T) {
 	if !strings.Contains(err.Error(), "development build") {
 		t.Errorf("error = %v, want it to name the development build", err)
 	}
+}
+
+// The button's check answers whatever it finds, which is the whole difference
+// between it and the poll: silence is a fine answer to a background question
+// and no answer at all to somebody who pressed something.
+func TestCheckNowAnswersBothWays(t *testing.T) {
+	stub := &stubGitHub{release: Release{
+		TagName: "v0.2.0",
+		HTMLURL: "https://github.com/owner/name/releases/tag/v0.2.0",
+	}}
+	server := httptest.NewServer(stub.handler(t))
+	defer server.Close()
+
+	t.Run("newer says so and puts the popup up", func(t *testing.T) {
+		var events int
+		c := newTestChecker(t, server, "v0.1.0", func(string, any) { events++ })
+		found, err := c.CheckNow(context.Background())
+		if err != nil {
+			t.Fatalf("CheckNow: %v", err)
+		}
+		if !found.Newer || found.Version != "v0.2.0" || found.Current != "v0.1.0" {
+			t.Errorf("found = %+v, want v0.2.0 over v0.1.0", found)
+		}
+		if found.ReleaseURL == "" {
+			t.Error("no release url, so there is nothing to read before installing")
+		}
+		if events != 1 {
+			t.Errorf("emitted %d times, want 1", events)
+		}
+		// The poll must not then say the same thing again behind it.
+		if err := c.Check(context.Background()); err != nil {
+			t.Fatalf("Check: %v", err)
+		}
+		if events != 1 {
+			t.Errorf("emitted %d times after the poll, want 1", events)
+		}
+	})
+
+	t.Run("up to date is an answer, not silence", func(t *testing.T) {
+		var events int
+		c := newTestChecker(t, server, "v0.2.0", func(string, any) { events++ })
+		found, err := c.CheckNow(context.Background())
+		if err != nil {
+			t.Fatalf("CheckNow: %v", err)
+		}
+		if found.Newer {
+			t.Errorf("found = %+v, want nothing newer", found)
+		}
+		if found.Version != "v0.2.0" {
+			t.Errorf("version = %q, want the release it saw", found.Version)
+		}
+		if events != 0 {
+			t.Error("a popup for a version already running")
+		}
+	})
+
+	t.Run("a development build asks nobody", func(t *testing.T) {
+		before := stub.served()
+		c := newTestChecker(t, server, DevVersion, func(string, any) {
+			t.Error("a popup on a build that is probably ahead of the release")
+		})
+		found, err := c.CheckNow(context.Background())
+		if err != nil {
+			t.Fatalf("CheckNow: %v", err)
+		}
+		if !found.Dev || found.Newer {
+			t.Errorf("found = %+v, want a dev build with nothing on offer", found)
+		}
+		if stub.served() != before {
+			t.Error("GitHub was asked about a development build")
+		}
+	})
 }

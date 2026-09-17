@@ -16,6 +16,10 @@
 // @ts-ignore: Unused imports
 import { Call as $Call, CancellablePromise as $CancellablePromise } from "@wailsio/runtime";
 
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
+import * as update$0 from "../internal/update/models.js";
+
 /**
  * ApplyUpdate installs the newest release over the running binary and restarts
  * into it.
@@ -32,6 +36,19 @@ import { Call as $Call, CancellablePromise as $CancellablePromise } from "@wails
  */
 export function ApplyUpdate(): $CancellablePromise<void> {
     return $Call.ByID(1317830799);
+}
+
+/**
+ * CheckForUpdates asks GitHub now instead of waiting for the next poll, and
+ * answers with what it saw.
+ * 
+ * The answer comes back rather than only being emitted, because a person
+ * pressed a button: "you are on the newest one" is a result, and an event that
+ * fires only on good news leaves the button with nothing to say the rest of
+ * the time. The popup still appears on its own when the release is newer.
+ */
+export function CheckForUpdates(): $CancellablePromise<update$0.Found> {
+    return $Call.ByID(1568468389);
 }
 
 /**

@@ -152,7 +152,36 @@ func proposalPrompt(p *proposalRun, request string) string {
 		b.WriteString("You are being asked to change a plan: an ordered list of tasks, " +
 			"each one extracted from an idea in the outline underneath it.\n\n")
 	default:
-		b.WriteString("You are being asked to reorganise an outline of ideas.\n\n")
+		b.WriteString("You are being asked to work on a board of ideas.\n\n" +
+			"The board maps something -- usually a product or a system -- so that all of it " +
+			"can be seen at once. A subject in the middle, four to seven clusters around it " +
+			"for its capabilities, and the parts of each capability hanging off it. Depth is " +
+			"what carries the meaning: three or four levels is normal for a real system, and " +
+			"you keep going until a leaf is concrete -- a screen, a rule, a document, a job " +
+			"that runs, something a person does. Links join lines the tree cannot, captions " +
+			"say why, and glyphs make a head findable.\n\n" +
+			"A card names a part, in the words the domain already uses for it: " +
+			"\"Memberships\", \"Direct debit runs\", \"Match sheets\". Not a question, not " +
+			"an opinion, not a sentence. Questions and opinions go in your reply, where " +
+			"somebody can answer them -- a board full of \"why are we doing this\" is a board " +
+			"nobody can build from.\n\n" +
+			"If the request names a thing and asks for its ideas, features or shape, map it. " +
+			"Build it out of what that kind of system is made of, put what you assumed into " +
+			"the detail of the card it affects, and say in your reply which parts you were " +
+			"least sure about. Do not answer with questions instead of a board.\n\n" +
+			"A card is a title and a detail: the title is drawn on the board and read " +
+			"at a glance, the detail is what somebody sees when they open the card. What the " +
+			"part covers, what it has to handle, what you assumed -- all of that goes in the " +
+			"detail, not in a title that needs a comma and a because.\n\n" +
+			"Above the outline are the workspace's guidelines -- what it is trying to be -- " +
+			"and the people and groups waiting on something. Put cards under the guidelines " +
+			"they genuinely serve, and name somebody as interested only where you have been " +
+			"told they are. You cannot add to either list: say so if a card needs a word " +
+			"that is not there.\n\n" +
+			"Most requests change part of it: add notes, move them, group them, link them. " +
+			"A request that hands you raw unsorted ideas and asks for a board out of them is " +
+			"the one that starts with replace -- and everything on the board now is set aside " +
+			"rather than deleted, so the person can take it back.\n\n")
 	}
 
 	b.WriteString("Answer by calling " + propose.ToolName + " exactly once. " +

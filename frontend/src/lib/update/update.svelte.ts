@@ -74,6 +74,51 @@ export class AppUpdate {
     });
   }
 
+  /**
+   * What the last check somebody asked for came back with.
+   *
+   * Null until the button is pressed. The popup answers "there is a new one";
+   * this answers the other three outcomes -- up to date, a build that was
+   * never stamped, and a network that would not answer -- none of which is
+   * worth a popup and all of which are worth a sentence next to the button.
+   */
+  checked = $state<string | null>(null);
+
+  /** True while the check is in flight. */
+  checking = $state(false);
+
+  /**
+   * Asks GitHub now instead of waiting for the poll.
+   *
+   * The popup is the backend's job either way: a newer release emits
+   * update:available, which `listen` is already holding. What comes back here
+   * is only what to say when it does not.
+   */
+  async check(): Promise<void> {
+    if (this.checking) return;
+    this.checking = true;
+    this.checked = null;
+    try {
+      const found = await UpdateService.CheckForUpdates();
+      if (found.dev) {
+        this.checked = "This is a development build, so there is nothing to update it to.";
+      } else if (found.newer) {
+        // The popup is on its way from the event. Saying the version here as
+        // well means the menu is not blank behind it.
+        this.checked = `${found.version} is available.`;
+        // Shown even if it was put away earlier this session: asking for a
+        // check is asking to be shown the answer.
+        this.#declined = null;
+      } else {
+        this.checked = `Up to date — ${found.current} is the newest release.`;
+      }
+    } catch (err) {
+      this.checked = err instanceof Error ? err.message : String(err);
+    } finally {
+      this.checking = false;
+    }
+  }
+
   /** Puts the popup away for this session only. */
   dismiss(): void {
     this.#declined = this.version;

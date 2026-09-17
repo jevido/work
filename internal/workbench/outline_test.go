@@ -2,6 +2,7 @@ package workbench
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"dev.jevido/work/internal/agents"
@@ -180,17 +181,68 @@ func TestApplyEditsOrdersOneBatch(t *testing.T) {
 	}
 }
 
-// A batch big enough to be a denial of service is one fsync the caller waits
-// on, so the bound is on this side of the bridge.
-func TestApplyEditsBoundsABatch(t *testing.T) {
+// A call larger than one disk write is split, not refused.
+//
+// This used to assert the opposite: over editBatch edits came back as an
+// error, and every caller had to know the number and chunk against it.
+// Approving one restructuring of a board is hundreds of edits in a single
+// gesture, and the frontend chunking to a constant copied from this file was
+// the number being in two places -- where the copy that drifts silently drops
+// whatever the caller thought it had saved.
+func TestApplyEditsSplitsABigCallRatherThanRefusingIt(t *testing.T) {
 	w, tab := joinedWorkbench(t, newFakeOps())
 
-	edits := make([]Edit, maxEdits+1)
+	const count = editBatch*2 + 7
+	edits := make([]Edit, count)
 	for i := range edits {
-		edits[i] = Edit{Kind: ops.KindCreateNode, Fields: map[string]any{FieldText: "x"}}
+		edits[i] = Edit{
+			Kind:   ops.KindCreateNode,
+			Parent: tab,
+			Fields: map[string]any{FieldText: fmt.Sprintf("line %d", i)},
+		}
 	}
+
+	doc, err := w.ApplyEdits(tab, edits)
+	if err != nil {
+		t.Fatalf("a call of %d edits was refused: %v", count, err)
+	}
+
+	var lines int
+	for _, root := range doc.Tree {
+		if root.ID == tab {
+			lines = len(root.Children)
+		}
+	}
+	if lines != count {
+		t.Errorf("the tab has %d lines, want all %d", lines, count)
+	}
+}
+
+// One bad edit anywhere refuses the whole call, however large. Everything is
+// planned before anything is written, so a call is not half applied because
+// the mistake was at the end of it.
+func TestABadEditRefusesTheWholeCall(t *testing.T) {
+	w, tab := joinedWorkbench(t, newFakeOps())
+
+	edits := make([]Edit, editBatch+2)
+	for i := range edits {
+		edits[i] = Edit{
+			Kind:   ops.KindCreateNode,
+			Parent: tab,
+			Fields: map[string]any{FieldText: "fine"},
+		}
+	}
+	// A set-fields naming no node, past the first batch boundary.
+	edits[editBatch+1] = Edit{Kind: ops.KindSetFields, Fields: map[string]any{FieldText: "x"}}
+
 	if _, err := w.ApplyEdits(tab, edits); err == nil {
-		t.Fatalf("a batch of %d edits was accepted", len(edits))
+		t.Fatal("a call with a bad edit in it was accepted")
+	}
+	doc := w.WorkspaceDocument()
+	for _, root := range doc.Tree {
+		if root.ID == tab && len(root.Children) != 0 {
+			t.Errorf("the tab has %d lines, want none written", len(root.Children))
+		}
 	}
 }
 

@@ -3,9 +3,19 @@
   import { OutlineKeys, setOutline } from "../lib/workspace/outline.svelte";
   import type { Workspace } from "../lib/workspace/workspace.svelte";
   import MindmapCanvas from "./MindmapCanvas.svelte";
+  import VocabularyDialog, { type Which } from "./VocabularyDialog.svelte";
 
   /** The name being typed for a new region, or null when none is. */
   let grouping = $state<string | null>(null);
+
+  /**
+   * Which of the workspace's two vocabularies is open, or null.
+   *
+   * Here rather than in the dialog, because two different things open it: the
+   * buttons in this header, and a card that wants a word the workspace has not
+   * got yet.
+   */
+  let vocabulary = $state<Which | null>(null);
 
   /**
    * The last line the caret was in.
@@ -169,6 +179,14 @@
         Group branch
       </button>
     {/if}
+    <!--
+      Two buttons, not one. Guidelines and interested parties are two
+      questions -- is this worth doing, and who is waiting for it -- and one
+      button labelled "words" would be a button nobody presses because nobody
+      can tell from it what is behind it.
+    -->
+    <button class="ghost" onclick={() => (vocabulary = "guidelines")}>Guidelines</button>
+    <button class="ghost" onclick={() => (vocabulary = "parties")}>Interested</button>
     {#if workspace.foldedCount > 0}
       <button class="ghost" onclick={unfoldAll}>
         Unfold all ({workspace.foldedCount})
@@ -215,7 +233,16 @@
     box opens a real input over it and every key the list understood works in
     it -- the same handler, see MindmapCanvas.
   -->
-  <MindmapCanvas {workspace} focused={lastLine} />
+  <MindmapCanvas {workspace} focused={lastLine} onmanage={(which) => (vocabulary = which)} />
+
+  {#if vocabulary !== null}
+    <VocabularyDialog
+      {workspace}
+      bind:which={vocabulary}
+      onclose={() => (vocabulary = null)}
+      onreveal={(id) => keys.focus(id, "end")}
+    />
+  {/if}
 
   {#if workspace.rows.length === 0}
     <div class="empty">

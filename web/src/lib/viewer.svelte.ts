@@ -17,6 +17,7 @@
  * document answers 304 with no body, and nothing here re-renders.
  */
 import {
+  contentsOf,
   endsOf,
   isEdge,
   isRegion,
@@ -25,8 +26,10 @@ import {
   readDocument,
   regionIdOf,
   sourceIdOf,
+  tabsOf,
   textOf,
   type DocNode,
+  type TabEntry,
 } from "./doc";
 
 /** What the viewer is doing, in the words the status line uses. */
@@ -74,8 +77,31 @@ export class Viewer {
   /** The sequence the document on screen was merged through. */
   head = $state(0);
 
-  /** The outline: the tree without the tasks, which are the plan. */
-  outline = $derived<DocNode[]>(outlineNodes(this.tree));
+  /** The workspace's tabs, in the order the document has them. */
+  tabs = $derived<TabEntry[]>(tabsOf(this.tree));
+
+  /**
+   * Which tab is being read.
+   *
+   * The first one until somebody picks another, and the first one again if the
+   * one they picked is retired while they are looking at it -- a tab that is
+   * gone cannot be shown, and an empty page with a name at the top of it says
+   * less than the tab next to it does. `contentsOf` does that correction, so
+   * this is left as whatever was asked for.
+   */
+  tab = $state("");
+
+  /**
+   * What is on screen: one tab's document, which is what the desktop app has.
+   *
+   * The whole document is still fetched, still merged and still indexed -- the
+   * links, the regions and the detached lines are the workspace's rather than
+   * a tab's -- and this is the slice the two views draw.
+   */
+  contents = $derived<DocNode[]>(contentsOf(this.tree, this.tab));
+
+  /** The outline: the tab without the tasks, which are the plan. */
+  outline = $derived<DocNode[]>(outlineNodes(this.contents));
 
   /**
    * Links and regions, indexed once for the whole page.
@@ -170,7 +196,7 @@ export class Viewer {
   }
 
   /** The plan, already in position order -- the merge sorted it. */
-  tasks = $derived<DocNode[]>(planTasks(this.tree));
+  tasks = $derived<DocNode[]>(planTasks(this.contents));
 
   #key: string | null = null;
   #etag: string | null = null;

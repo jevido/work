@@ -32,6 +32,10 @@
  */
 import { MAX_ID_LEN } from "./ops";
 import { TASK_STATES, type TaskState } from "./model";
+// The document layer reaching into the drawing layer, deliberately: the set of
+// glyph names that mean anything is exactly the set this build can draw, and a
+// second list here would be a list that goes stale the first time one is added.
+import { isIconName } from "../mindmap/icons";
 
 /**
  * The longest line a proposal may write.
@@ -43,8 +47,26 @@ import { TASK_STATES, type TaskState } from "./model";
  */
 export const MAX_TEXT_LEN = 2000;
 
-/** The most ops one proposal may carry. */
-export const MAX_OPS = 200;
+/**
+ * The longest body a proposal may write onto a card.
+ *
+ * Larger than MAX_TEXT_LEN because it is a different thing: a title is a line,
+ * and this is the paragraph that did not fit on it. Still bounded, and for the
+ * same reason -- a review row nobody reads to the end is a row nobody has
+ * actually approved. Mirrored in internal/propose/propose.go.
+ */
+export const MAX_DETAIL_LEN = 8000;
+
+/**
+ * The most ops one proposal may carry.
+ *
+ * Five hundred rather than two hundred, because of `replace`: a board of thirty
+ * notes with its links, regions, glyphs and captions is a couple of hundred
+ * ops, and a limit that refuses a whole board is a limit that removes the
+ * feature. Mirrored in internal/propose/propose.go, which is where the model is
+ * told about it -- a limit it is not told is a refusal after the work is done.
+ */
+export const MAX_OPS = 500;
 
 /**
  * One proposed edit.
@@ -68,7 +90,37 @@ export type ProposedOp =
   | { kind: "set-status"; node: string; status: TaskState }
   | { kind: "link"; node: string; other: string }
   | { kind: "unlink"; node: string; other: string }
-  | { kind: "group"; node: string; region?: string; name?: string };
+  | { kind: "group"; node: string; region?: string; name?: string }
+  /** Put a glyph on a cluster head, or "" to take one off. */
+  | { kind: "set-icon"; node: string; icon: string }
+  /** Write why two lines are linked, onto the link between them. */
+  | { kind: "caption"; node: string; other: string; text: string }
+  /** Write the body of a card: what it is, at length. "" clears it. */
+  | { kind: "set-detail"; node: string; text: string }
+  /**
+   * Put a card under one of the workspace's guidelines, or take it out.
+   *
+   * By id, and only an id the workspace already holds. Claude does not get to
+   * add a guideline: what a workspace is trying to be is a decision somebody
+   * made, and a model that could invent one would quietly turn a vocabulary
+   * into a pile of near-synonyms. A card that wants a word nobody has set up is
+   * something to say in prose.
+   */
+  | { kind: "guide"; node: string; guideline: string }
+  | { kind: "unguide"; node: string; guideline: string }
+  /** Record that one of the named people or groups is waiting on a card. */
+  | { kind: "interest"; node: string; party: string }
+  | { kind: "uninterest"; node: string; party: string }
+  /**
+   * Start the board again.
+   *
+   * Everything on it now is moved under one collapsed line and left there. Not
+   * a delete, and that is the point: a tombstone wins the merge in both
+   * directions, so a wholesale delete would be the one proposal Undo could not
+   * take back -- and "Claude replaced everything" is the proposal most worth
+   * being able to reverse. See undo.ts, where its inverse is a set of moves.
+   */
+  | { kind: "replace"; reason: string };
 
 export interface Proposal {
   /** One line saying what the whole set is for. Claude's words, shown as-is. */
@@ -206,6 +258,44 @@ function readOp(value: unknown, at: number, refs: Set<string>): ProposedOp {
     case "unlink":
       return { kind, node: id(r.node, at, "node"), other: id(r.other, at, "other") };
 
+    case "set-detail":
+      return { kind, node: id(r.node, at, "node"), text: detail(r.text, at) };
+
+    case "guide":
+    case "unguide":
+      return { kind, node: id(r.node, at, "node"), guideline: id(r.guideline, at, "guideline") };
+
+    case "interest":
+    case "uninterest":
+      return { kind, node: id(r.node, at, "node"), party: id(r.party, at, "party") };
+
+    case "set-icon": {
+      const icon = r.icon;
+      if (typeof icon !== "string" || (icon !== "" && !isIconName(icon))) {
+        throw new ProposalError(
+          `op ${at}: icon is ${JSON.stringify(icon)}, which is not a glyph this build can draw`,
+        );
+      }
+      return { kind, node: id(r.node, at, "node"), icon };
+    }
+
+    case "caption":
+      return {
+        kind,
+        node: id(r.node, at, "node"),
+        other: id(r.other, at, "other"),
+        // An empty caption is a real answer: it is how one is taken off.
+        text: text(r.text, at),
+      };
+
+    case "replace": {
+      const reason = r.reason;
+      if (typeof reason !== "string" || reason.trim() === "") {
+        throw new ProposalError(`op ${at}: a replace says why, and this one does not`);
+      }
+      return { kind, reason: clip(reason.replace(/\s+/g, " ").trim(), 300) };
+    }
+
     case "group": {
       // One or the other: a region that exists, or a name for a new one. Both
       // at once is a proposal that has not decided what it means, and guessing
@@ -255,6 +345,22 @@ function text(value: unknown, at: number): string {
   }
   // Newlines are not an outline. A line is a line; a paragraph is several.
   return value.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * A card's body, which is the one string here that keeps its newlines.
+ *
+ * `text` above collapses whitespace because a line is a line. This is the other
+ * case: a paragraph is several, and flattening one would be the layer that
+ * refuses a tree also deciding how somebody's prose is laid out.
+ */
+function detail(value: unknown, at: number): string {
+  if (typeof value !== "string") throw new ProposalError(`op ${at}: text is missing`);
+  if (value.length > MAX_DETAIL_LEN) {
+    throw new ProposalError(`op ${at}: text is over the ${MAX_DETAIL_LEN} limit`);
+  }
+  // Trailing space and \r from a model that wrapped its own output.
+  return value.replace(/\r\n/g, "\n").trimEnd();
 }
 
 function clip(value: string, limit: number): string {

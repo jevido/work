@@ -2,11 +2,17 @@ package services
 
 import (
 	"context"
+	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 
 	"dev.jevido/work/internal/update"
 )
+
+// checkTimeout bounds one press of "check for updates". Longer than the
+// poller's own request timeout by enough to cover a redirect and a retry, and
+// short enough that a button does not sit spinning on a dead network.
+const checkTimeout = 30 * time.Second
 
 // UpdateService exposes self-update to the frontend.
 //
@@ -41,6 +47,19 @@ func (s *UpdateService) ServiceStartup(ctx context.Context, _ application.Servic
 // was not stamped by the release workflow.
 func (s *UpdateService) Version() string {
 	return s.checker.Version()
+}
+
+// CheckForUpdates asks GitHub now instead of waiting for the next poll, and
+// answers with what it saw.
+//
+// The answer comes back rather than only being emitted, because a person
+// pressed a button: "you are on the newest one" is a result, and an event that
+// fires only on good news leaves the button with nothing to say the rest of
+// the time. The popup still appears on its own when the release is newer.
+func (s *UpdateService) CheckForUpdates() (update.Found, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), checkTimeout)
+	defer cancel()
+	return s.checker.CheckNow(ctx)
 }
 
 // ApplyUpdate installs the newest release over the running binary and restarts

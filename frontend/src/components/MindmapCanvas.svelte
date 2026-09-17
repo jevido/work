@@ -1,8 +1,8 @@
 <script lang="ts">
+  import CardDialog from "./CardDialog.svelte";
   import { MindmapRenderer, type Drop } from "../lib/mindmap/renderer";
-  import { LAYOUTS, LAYOUT_LABELS, tier, type LayoutKind } from "../lib/mindmap/layout";
+  import { tier } from "../lib/mindmap/layout";
   import { getOutline } from "../lib/workspace/outline.svelte";
-  import { labelOf } from "../lib/workspace/model";
   import type { Workspace } from "../lib/workspace/workspace.svelte";
 
   let {
@@ -21,20 +21,25 @@
      */
     rootedAt = null,
     /**
-     * A picture rather than a workspace: no shape switch, no counts.
+     * A picture rather than a workspace: no line count, no editing.
      *
-     * The plan's map pane is one region drawn small beside a list. Its shape is
-     * not a decision anybody is making there -- they are checking what the plan
-     * came out of -- and three controls over a 400-pixel box is more chrome
-     * than drawing.
+     * The plan's map pane is one region drawn small beside a list. They are
+     * checking what the plan came out of, and chrome over a 400-pixel box is
+     * more chrome than drawing.
      */
     compact = false,
+    /**
+     * Opens the workspace's vocabularies, when a card wants a word that is not
+     * there yet. Absent in the plan's compact map, which edits nothing.
+     */
+    onmanage,
   }: {
     workspace: Workspace;
     focused?: string | null;
     shown?: boolean;
     rootedAt?: string | null;
     compact?: boolean;
+    onmanage?: (which: "guidelines" | "parties") => void;
   } = $props();
 
   let canvas = $state<HTMLCanvasElement | null>(null);
@@ -42,17 +47,20 @@
   let said = $state("");
 
   /**
-   * The map is where lines are written now.
+   * The map is where lines are written, and a card is where one is read.
    *
-   * There used to be an indented list of inputs beside it and the canvas was a
-   * second view of the same thing. The list is gone, so this is not a picture
-   * any more: clicking a box opens a real input over it and every key the
-   * outline understood works in it, because it is the outline's own handler --
-   * see OutlineKeys, which this hands the event straight to.
+   * There used to be an indented list of inputs beside the canvas; then the
+   * list went and a single input floated over whichever box had the caret. That
+   * input is gone too. It was the faster thing to type into and the wrong thing
+   * to read: a card is a title, a body, what it is for, who is waiting on it
+   * and what it links to, and none of that fits in a box drawn two hundred
+   * pixels wide with a sentence already in it.
    *
-   * One input, moved, rather than one per line. A map of four hundred boxes
-   * with four hundred textareas floating over it is four hundred elements to
-   * position on every pan, and only one of them can have the caret.
+   * So clicking a box opens CardDialog, and the dialog holds the outline's own
+   * keyboard on its title field -- Enter still makes a line, Tab still nests,
+   * and the dialog follows the caret onto whatever line those keys land on.
+   * Writing a board is still Enter, Tab, Enter; it just happens in a panel
+   * beside the map instead of on top of it.
    */
   // svelte-ignore state_referenced_locally
   // Read once, at init, and that is correct: a context can only be read while
@@ -62,23 +70,6 @@
 
   /** The line being edited, or null. */
   let editing = $state<string | null>(null);
-
-  /** Where its box is on screen, recomputed whenever the map moves under it. */
-  let at = $state<{ x: number; y: number; width: number; height: number } | null>(null);
-
-  /** True while the link picker is open on the line being edited. */
-  let linking = $state(false);
-  let filter = $state("");
-
-  /**
-   * Which shape the map is in.
-   *
-   * This side's, and deliberately not the document's. Two people looking at one
-   * workspace can want different views of it at the same moment, and a shape
-   * stored as a field would have one of them changing the other's screen. It is
-   * also not worth an op: nothing about it survives being wrong.
-   */
-  let shape = $state<LayoutKind>("tidy");
 
   /** How far in the map is, mirrored out of the renderer for the chip. */
   let scale = $state(1);
@@ -112,31 +103,6 @@
 
   const row = $derived(editing ? (rows.find((r) => r.node.id === editing) ?? null) : null);
 
-  /**
-   * Lines this one could be linked to: everything but itself, what it already
-   * links to, and its own branch. A link to a child says nothing the tree does
-   * not already say.
-   */
-  const candidates = $derived.by(() => {
-    if (!editing) return [];
-    const already = new Set(workspace.linksOf(editing).map((l) => l.other));
-    const under = new Set<string>();
-    const mine = workspace.rows.find((r) => r.node.id === editing);
-    if (mine) {
-      const walk = (node: { id: string; children: { id: string; children: unknown[] }[] }) => {
-        under.add(node.id);
-        for (const child of node.children) walk(child as never);
-      };
-      walk(mine.node as never);
-    }
-    const needle = filter.trim().toLowerCase();
-    return workspace.rows
-      .filter((r) => !under.has(r.node.id) && !already.has(r.node.id))
-      .filter((r) => needle === "" || labelOf(r.node, 200).toLowerCase().includes(needle))
-      .slice(0, 8);
-  });
-
-
   /*
     Everything drawn comes from the workspace the outline reads. A canvas with
     its own copy of the document would be a second model to keep in step, and it
@@ -145,38 +111,30 @@
   function scene() {
     return {
       rows,
-      linksOf: (id: string) => workspace.linksOf(id),
       regionOf: (id: string) => workspace.regionOf(id),
       tasksOf: (id: string) => workspace.tasksOf(id),
       focused: () => focused,
-      shape: () => shape,
     };
   }
 
   /**
-   * A drop is a move-node and nothing else.
+   * A drop leaves the cards where they were let go.
    *
-   * There are no coordinates to write. The position on a node is a sort key,
-   * not a place, so dragging is how somebody changes the tree rather than how
-   * they arrange a plane -- and the tree is what both views draw.
+   * It writes places and nothing else: the tree is untouched, so a card
+   * dragged across the board is still under whatever it was under, and the
+   * outline -- which is the same document -- reads exactly as it did. Changing
+   * what a line belongs to is Tab and Shift+Tab, where it says what it did.
+   *
+   * The renderer reports the whole branch, because dragging a card drags what
+   * hangs off it. See Drop.
    */
   function drop(where: Drop) {
-    const moved =
-      where.onto === "" ? workspace.moveToTop(where.node) : workspace.moveUnder(where.node, where.onto);
-    if (!moved) {
-      said = "That line cannot go there.";
-      return;
-    }
-    const name = workspace.text(where.node).trim() || "an empty line";
+    if (!workspace.place(where.moves)) return;
+    const name = workspace.text(where.moves[0].id).trim() || "an empty line";
     said =
-      where.onto === ""
-        ? `Moved ${name} to the top level.`
-        : `Moved ${name} under ${workspace.text(where.onto).trim() || "an empty line"}.`;
-  }
-
-  /** Moves the editor to wherever its box has ended up. */
-  function reposition() {
-    at = editing ? (renderer?.screenOf(editing) ?? null) : null;
+      where.moves.length > 1
+        ? `Moved ${name} and ${where.moves.length - 1} under it.`
+        : `Moved ${name}.`;
   }
 
   /**
@@ -188,18 +146,14 @@
   function edit(id: string | null) {
     if (id === editing) return;
     editing = id;
-    linking = false;
-    filter = "";
     if (id) renderer?.reveal(id);
-    reposition();
   }
 
   $effect(() => {
     if (!canvas) return;
-    const made = new MindmapRenderer(canvas, scene, drop, (view) => {
-      scale = view.scale;
-      reposition();
-    }, { onPick: edit });
+    const made = new MindmapRenderer(canvas, scene, drop, (view) => (scale = view.scale), {
+      onPick: edit,
+    });
     renderer = made;
     made.start();
     made.resize();
@@ -227,14 +181,8 @@
   $effect(() => {
     void workspace.revision;
     void focused;
-    void shape;
     void rows;
     renderer?.invalidate();
-    // The document moved, so the box being edited has too -- an indent shifts
-    // it a column across, a reorder a row down. Positioned after the repaint
-    // for the same reason the focus queue waits for one: the layout this reads
-    // is built during the paint.
-    requestAnimationFrame(reposition);
   });
 
   /**
@@ -256,39 +204,9 @@
     if (editing && !rows.some((r) => r.node.id === editing)) edit(null);
   });
 
-  /**
-   * Every key the outline had, on the box.
-   *
-   * Handed straight to OutlineKeys rather than reimplemented: this is the same
-   * document, the same operations and the same things worth announcing, and a
-   * second copy of that logic would be a second set of rules about what
-   * Backspace does to a branch.
-   */
-  function onEdit(event: KeyboardEvent) {
-    if (!row || !outline) return;
-    if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey) {
-      const key = event.key.toLowerCase();
-      if (key === "l") {
-        event.preventDefault();
-        linking = !linking;
-        return;
-      }
-    }
-    outline.keydown(event, row);
-  }
-
-  function link(other: string) {
-    if (!editing) return;
-    if (workspace.link(editing, other)) {
-      said = `Linked to ${workspace.text(other).trim() || "an empty line"}.`;
-    }
-    linking = false;
-    filter = "";
-  }
-
   function reset() {
     renderer?.reset();
-    said = "Back to the top left, at 100%.";
+    said = "Back to the whole map, at 100%.";
   }
 </script>
 
@@ -308,103 +226,24 @@
   -->
   <canvas bind:this={canvas} aria-hidden="true"></canvas>
 
-  {#if row && at && outline}
-    {@const style = tier(row.depth)}
+  {#if row && outline}
     <!--
-      The editor, over the box it belongs to.
+      The card, opened.
 
-      A real input, labelled, with the outline's own keydown behind it -- so
-      Enter still makes a line, Tab still nests, Alt+arrows still move and fold,
-      and a screen reader is told what each of them did. The canvas underneath
-      stays out of the accessibility tree; this is the part that is in it.
+      This replaced a one-line input floating over the box. The input was the
+      faster thing to type into and the wrong thing to read: a card is a title
+      and a body, what it is for, who is waiting on it and what it links to, and
+      none of that fits in a box drawn 200 pixels wide. Every outline key still
+      works, in the dialog's title field -- see CardDialog.onTitleKey -- so
+      writing a board is still Enter, Tab, Enter.
     -->
-    <div
-      class="editor"
-      style:left="{at.x}px"
-      style:top="{at.y}px"
-      style:width="{at.width}px"
-      style:height="{at.height}px"
-      style:border-radius="{style.radius}px"
-    >
-      <input
-        type="text"
-        value={workspace.text(row.node.id)}
-        aria-label="Line at level {row.depth + 1}"
-        spellcheck="false"
-        autocomplete="off"
-        placeholder="Write a line…"
-        style:font={style.font}
-        oninput={(event) => workspace.setText(row.node.id, event.currentTarget.value)}
-        onkeydown={(event) => onEdit(event)}
-        onfocus={() => workspace.enter(row.node.id)}
-        onblur={() => workspace.leave(row.node.id)}
-        {@attach (el: HTMLInputElement) => outline.register(row.node.id, el)}
-      />
-    </div>
-
-    <!--
-      What the line is attached to, beside it rather than on it. A box wide
-      enough to hold a sentence and its links and its region and three buttons
-      is a box nothing else fits next to.
-    -->
-    <div class="beside" style:left="{at.x + at.width + 8}px" style:top="{at.y}px">
-      <button onclick={() => outline.promote(row)}>
-        {workspace.taskFor(row.node.id) ? "On the plan" : "To plan"}
-      </button>
-      <button onclick={() => (linking = !linking)}>Link</button>
-      <button class="danger" onclick={() => outline.remove(row)}>Remove</button>
-    </div>
-
-    {#if linking}
-      <div class="picker" style:left="{at.x}px" style:top="{at.y + at.height + 8}px">
-        <label>
-          <span class="sr">Link this line to</span>
-          <input
-            bind:value={filter}
-            placeholder="link to…"
-            autocomplete="off"
-            spellcheck="false"
-            onkeydown={(event) => event.key === "Escape" && (linking = false)}
-            {@attach (el: HTMLInputElement) => el.focus()}
-          />
-        </label>
-        {#if candidates.length === 0}
-          <p class="none">Nothing to link to.</p>
-        {:else}
-          <ul>
-            {#each candidates as option (option.node.id)}
-              <li>
-                <button onclick={() => link(option.node.id)}>{labelOf(option.node, 60)}</button>
-              </li>
-            {/each}
-          </ul>
-        {/if}
-      </div>
-    {/if}
-  {/if}
-
-  <!--
-    Over the canvas rather than in it.
-
-    Everything here is a control or a readout, and the canvas is deliberately
-    out of the accessibility tree -- so drawing these into it would put the only
-    way to change the shape of the map somewhere no keyboard can reach. They are
-    real buttons, in the DOM, positioned over the drawing.
-  -->
-  {#if !compact}
-    <div class="tools">
-      <div class="shapes" role="group" aria-label="Map shape">
-        {#each LAYOUTS as kind (kind)}
-          <button
-            class:on={shape === kind}
-            aria-pressed={shape === kind}
-            onclick={() => (shape = kind)}
-          >
-            {LAYOUT_LABELS[kind]}
-          </button>
-        {/each}
-      </div>
-    </div>
+    <CardDialog
+      {workspace}
+      {row}
+      {outline}
+      onclose={() => edit(null)}
+      onmanage={(which) => onmanage?.(which)}
+    />
   {/if}
 
   <div class="chips">
@@ -448,156 +287,6 @@
 
   canvas:active {
     cursor: grabbing;
-  }
-
-  /* Over the box, and shaped like it. The fill is the accent's, because this
-     is the box the caret is in and the renderer draws that one in the accent
-     too -- the editor replacing it must not look like a different thing having
-     appeared on top. */
-  .editor {
-    position: absolute;
-    display: flex;
-    align-items: center;
-    padding: 0 2px;
-    border: 1.5px solid var(--accent);
-    background: #242a36;
-    box-shadow: 0 0 0 3px rgb(242 181 68 / 0.12);
-  }
-
-  .editor input {
-    width: 100%;
-    min-width: 0;
-    padding: 0 8px;
-    border: none;
-    background: none;
-    color: var(--text);
-    outline: none;
-  }
-
-  .editor input::placeholder {
-    color: var(--muted);
-  }
-
-  .beside {
-    position: absolute;
-    display: flex;
-    gap: 3px;
-    align-items: center;
-    height: 24px;
-  }
-
-  .beside button {
-    padding: 2px 8px;
-    border: 1px solid var(--line);
-    border-radius: 4px;
-    background: var(--panel-2);
-    color: var(--muted);
-    font-size: 11px;
-    white-space: nowrap;
-    cursor: pointer;
-  }
-
-  .beside button:hover {
-    color: var(--text);
-  }
-
-  .beside .danger:hover {
-    border-color: var(--err);
-    color: var(--err);
-  }
-
-  .picker {
-    position: absolute;
-    z-index: 2;
-    width: 260px;
-    padding: 8px;
-    border: 1px solid var(--line);
-    border-radius: 7px;
-    background: var(--panel-2);
-    box-shadow: 0 8px 24px rgb(0 0 0 / 0.4);
-  }
-
-  .picker input {
-    width: 100%;
-    padding: 4px 6px;
-    border: 1px solid var(--line);
-    border-radius: 4px;
-    background: var(--bg);
-    color: var(--text);
-    font: inherit;
-    font-size: 12px;
-  }
-
-  .picker ul {
-    margin: 6px 0 0;
-    padding: 0;
-    list-style: none;
-    max-height: 200px;
-    overflow-y: auto;
-  }
-
-  .picker li button {
-    display: block;
-    width: 100%;
-    padding: 4px 6px;
-    border: none;
-    border-radius: 4px;
-    background: none;
-    color: var(--text);
-    font: inherit;
-    font-size: 12px;
-    text-align: left;
-    cursor: pointer;
-  }
-
-  .picker li button:hover {
-    background: var(--panel);
-  }
-
-  .picker .none {
-    margin: 8px 0 0;
-    color: var(--muted);
-    font-size: 11px;
-  }
-
-  .tools {
-    position: absolute;
-    top: 10px;
-    right: 10px;
-    display: flex;
-    gap: 6px;
-  }
-
-  .shapes {
-    display: flex;
-    gap: 1px;
-    padding: 1px;
-    border: 1px solid var(--line);
-    border-radius: 5px;
-    background: var(--line);
-  }
-
-  .shapes button {
-    padding: 3px 10px;
-    border: none;
-    background: var(--panel);
-    color: var(--muted);
-    font-size: 11px;
-    cursor: pointer;
-  }
-
-  .shapes button:first-child {
-    border-radius: 3px 0 0 3px;
-  }
-
-  .shapes button:last-child {
-    border-radius: 0 3px 3px 0;
-  }
-
-  .shapes button.on {
-    background: var(--panel-2);
-    color: var(--text);
-    box-shadow: inset 0 -2px 0 var(--accent);
   }
 
   .chips {

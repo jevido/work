@@ -175,7 +175,7 @@
           <button
             class="choice"
             onclick={() => (dialog = "create")}
-            disabled={workspaces.busy || !workspaces.available}
+            disabled={workspaces.busy}
           >
             <span class="lead">On a server, so a team can share it</span>
             <span class="detail">
@@ -187,19 +187,13 @@
           <button
             class="choice"
             onclick={() => (dialog = "join")}
-            disabled={workspaces.busy || !workspaces.available}
+            disabled={workspaces.busy}
           >
             <span class="lead">Join one somebody sent me</span>
             <span class="detail">Paste the key or the link you were given.</span>
           </button>
         </li>
       </ul>
-
-      {#if !workspaces.available}
-        <p class="aside">
-          This build has no server transport, so only the first of these is available.
-        </p>
-      {/if}
 
       {#if workspaces.error}
         <p class="error" role="alert">{workspaces.error}</p>

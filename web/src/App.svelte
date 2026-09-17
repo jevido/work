@@ -152,6 +152,10 @@
     forget();
     saved = false;
     viewer.use(null);
+    // The address holds the key now -- see lib/key.ts -- so forgetting it
+    // while leaving it in the bar would be a button that undoes itself on the
+    // next reload.
+    history.replaceState(null, "", window.location.pathname + window.location.search);
   }
 
 </script>
@@ -220,6 +224,30 @@
 {:else}
   <main>
     <section id="outline" aria-labelledby="outline-heading">
+      <!--
+        The tabs, when there is more than one.
+
+        A workspace is several tabs and the desktop app has one of them on
+        screen; this page draws the same one thing. With a single tab there is
+        nothing to choose, and a strip of one is a control that answers a
+        question nobody asked.
+      -->
+      {#if viewer.tabs.length > 1}
+        <div class="tabs" role="tablist" aria-label="Tabs">
+          {#each viewer.tabs as tab (tab.id)}
+            {@const on = (viewer.tab || viewer.tabs[0].id) === tab.id}
+            <button
+              role="tab"
+              class:on
+              aria-selected={on}
+              onclick={() => (viewer.tab = tab.id)}
+            >
+              {tab.name}
+            </button>
+          {/each}
+        </div>
+      {/if}
+
       <div class="section-head">
         <h2 id="outline-heading">{shape === "map" ? "Map" : "Outline"}</h2>
         <!-- Real radios drawn as a segmented control: one tab stop, arrow keys
@@ -426,6 +454,40 @@
     }
   }
 
+  /* The tab strip, above the view switch: which document, then which view of
+     it. Scrolls rather than wraps -- a workspace with eight tabs must not push
+     the board down the page. */
+  .tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 10px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .tabs button {
+    flex: none;
+    padding: 4px 12px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--panel);
+    color: var(--muted);
+    font: inherit;
+    font-size: 13px;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+
+  .tabs button:hover {
+    color: var(--text);
+  }
+
+  .tabs button.on {
+    background: var(--panel-2);
+    color: var(--text);
+    box-shadow: inset 0 -2px 0 var(--accent);
+  }
+
   .section-head {
     display: flex;
     align-items: center;
@@ -483,9 +545,15 @@
     outline-offset: 1px;
   }
 
-  /* The map is a picture and wants room; the lines size themselves. */
+  /* The map is a picture and wants room; the lines size themselves.
+
+     Most of the window rather than a fixed box: this page is the board, the
+     way the desktop app's window is, and a board in a 420-pixel strip under a
+     heading reads as a thumbnail of one. Capped so it does not run past a tall
+     monitor, and vh rather than % because the section's parent is the document
+     flow and has no height of its own to take a share of. */
   #outline {
-    min-height: 420px;
+    min-height: min(76vh, 820px);
     display: flex;
     flex-direction: column;
   }

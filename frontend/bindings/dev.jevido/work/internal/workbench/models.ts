@@ -80,6 +80,41 @@ export interface AgentStatus {
     "modes"?: string[] | null;
 
     /**
+     * Advisory marks an agent who thinks with somebody and never does the
+     * work. They lead conversations, argue, organise and write things onto the
+     * board; they are never given a step, never edit a file and never run a
+     * command.
+     * 
+     * A property rather than a line in a system prompt, because a prompt is a
+     * request and this is a rule. "Do not write code" has always been in
+     * Jared's prompt and it was never a guarantee: the coordinator could still
+     * route him a step, at which point he was a specialist with the user's
+     * permission mode and the full tool list, being asked to implement
+     * something while his prompt told him not to. Whichever of the two won,
+     * the product had lied about one of them.
+     * 
+     * So it is enforced in the four places a run can reach an agent, each of
+     * which is a different way in rather than a belt on the same braces:
+     * 
+     *   - planSchema leaves them out of the enum of ids a routing turn may
+     *     name, so the model cannot produce a step for one.
+     *   - Plan.normalise drops a step naming one anyway, which covers a plan
+     *     that arrived from somewhere other than this build's schema.
+     *   - Workbench.streamStep hands them ReadOnlyTools rather than the
+     *     agent's own list, so the tools that change things are not there.
+     *   - Workbench.permissionFor pins them to one mode whatever the window is
+     *     set to, so the user's toggle can neither widen them nor drop them
+     *     into the CLI's plan-mode workflow, which is a way of working and not
+     *     a permission.
+     * 
+     * Not settable from disk, for the same reason Role and Modes are not: Scan
+     * attaches the built-in struct by folder name, so nobody can take the
+     * guardrail off an advisory agent by editing a file, and nobody can put
+     * one on a specialist by accident.
+     */
+    "advisory"?: boolean;
+
+    /**
      * Personality is a short description of how the agent behaves: the traits
      * that colour an answer without changing what it knows.
      */

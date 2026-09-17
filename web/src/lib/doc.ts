@@ -114,6 +114,10 @@ const FIELD_EXTRACTED_FROM = "extractedFrom";
 const FIELD_FROM = "from";
 const FIELD_TO = "to";
 const FIELD_REGION = "region";
+/** What the workbench's own roots carry: a tab has kind "tab" and a name. */
+const FIELD_KIND = "kind";
+const FIELD_NAME = "name";
+const KIND_TAB = "tab";
 
 /**
  * The four kinds of node one document holds.
@@ -158,6 +162,14 @@ export function isRegion(node: DocNode): boolean {
  * By what it is, not by what it is not. "Everything except a task" was right
  * when there were two types and became wrong the moment there were four --
  * silently, with an edge rendered as a line with no text in it.
+ *
+ * Note what this deliberately does *not* test: FieldKind. The workbench's own
+ * roots -- a tab, and a branch's record of its parent -- carry a kind and no
+ * type, so they read as ideas here. For a tab that is correct and load-bearing:
+ * the outline lives underneath one, and a filter that skipped tabs at the root
+ * would walk into nothing and draw an empty page. Anything else the workbench
+ * puts at the root has to carry a `type` this build does not recognise, which
+ * is the rule above and the one every other unknown node already follows.
  */
 export function isOutlineNode(node: DocNode): boolean {
   const type = node.fields[FIELD_TYPE];
@@ -238,6 +250,52 @@ export function labelOf(node: DocNode | null | undefined, limit = 60): string {
   const text = textOf(node).trim();
   if (text === "") return "Untitled line";
   return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Tabs                                                                       */
+/* -------------------------------------------------------------------------- */
+
+/** One tab of the workspace, as this page needs it: something to name and open. */
+export interface TabEntry {
+  id: string;
+  name: string;
+}
+
+/**
+ * The workspace's tabs, which are the roots of the document.
+ *
+ * A tab is a node like any other and carries `kind: "tab"` -- the outline of
+ * each one lives underneath it. That is why this page has to know about them
+ * at all: the desktop app draws one tab, and a viewer that drew the document
+ * whole would put a nameless box in the middle of the board with everybody's
+ * tabs clustered around it, which is a picture of the file rather than of the
+ * thing somebody was sent a link to.
+ */
+export function tabsOf(tree: readonly DocNode[]): TabEntry[] {
+  const out: TabEntry[] = [];
+  for (const node of tree) {
+    if (node.fields[FIELD_KIND] !== KIND_TAB) continue;
+    const name = node.fields[FIELD_NAME];
+    out.push({ id: node.id, name: typeof name === "string" && name !== "" ? name : "Untitled" });
+  }
+  return out;
+}
+
+/**
+ * What one tab holds, which is what the desktop app has on screen.
+ *
+ * A document with no tab at its root is answered whole. That is not a
+ * fallback for a broken document: a workspace written by a build older than
+ * tabs has its outline at the root, and so does one this page has not learned
+ * the shape of yet. Drawing it is better than drawing nothing.
+ */
+export function contentsOf(tree: readonly DocNode[], tab: string): DocNode[] {
+  const tabs = tabsOf(tree);
+  if (tabs.length === 0) return [...tree];
+  const wanted = tabs.some((t) => t.id === tab) ? tab : tabs[0].id;
+  const node = tree.find((n) => n.id === wanted);
+  return node ? [...node.children] : [];
 }
 
 /* -------------------------------------------------------------------------- */

@@ -83,16 +83,77 @@
     --map-twig: rgba(71, 85, 105, 0.32);
     /* Darker than the dark theme's blue: the same hue at the same lightness
        disappears on white. */
-    --map-link: rgba(37, 99, 235, 0.8);
-    --map-dangling: rgba(71, 85, 105, 0.4);
     --map-region: rgba(37, 99, 235, 0.06);
     --map-region-edge: rgba(37, 99, 235, 0.3);
     --map-focus-edge: #8a5f00;
     --map-focus-fill: #fdf3dc;
     --map-focus-glow: rgba(138, 95, 0, 0.14);
-    --map-drop-fill: rgba(37, 99, 235, 0.18);
     --map-muted: rgba(20, 23, 29, 0.6);
     --map-count: #5c6472;
+
+    /*
+     * The board, in daylight.
+     *
+     * Real paper colours here, where the desktop app has muted ones: a sticky
+     * note at full saturation glows on a dark surface and is exactly right on
+     * a light one. This is the half of the design the reference picture shows,
+     * and the phone somebody opens a shared link on is where it lands.
+     *
+     * Ink is near-black on every paper rather than a tint of the paper's own
+     * hue. Six tinted inks on six pastels is six contrast ratios to keep an
+     * eye on; one ink on six pastels is one, and it clears 4.5:1 on all of
+     * them.
+     */
+    --map-board: #fbfaf7;
+    --map-grid: rgba(71, 85, 105, 0.12);
+    --map-tape: rgba(20, 23, 29, 0.07);
+    --map-tape-edge: rgba(20, 23, 29, 0.13);
+    --map-subject-fill: #cfe2f7;
+    --map-subject-edge: #7ba7d6;
+    --map-subject-text: #14171d;
+
+    --map-cluster-0-head-fill: #fdedb8;
+    --map-cluster-0-head-edge: #d9bf62;
+    --map-cluster-0-head-text: #14171d;
+    --map-cluster-0-leaf-fill: #f4ecd9;
+    --map-cluster-0-leaf-edge: #ddd2b8;
+    --map-cluster-0-leaf-text: #2a2e36;
+
+    --map-cluster-1-head-fill: #cfe2f7;
+    --map-cluster-1-head-edge: #7ba7d6;
+    --map-cluster-1-head-text: #14171d;
+    --map-cluster-1-leaf-fill: #e6eef7;
+    --map-cluster-1-leaf-edge: #c2d2e4;
+    --map-cluster-1-leaf-text: #2a2e36;
+
+    --map-cluster-2-head-fill: #fbd5e0;
+    --map-cluster-2-head-edge: #dd9bb1;
+    --map-cluster-2-head-text: #14171d;
+    --map-cluster-2-leaf-fill: #f7e7ec;
+    --map-cluster-2-leaf-edge: #e3cbd3;
+    --map-cluster-2-leaf-text: #2a2e36;
+
+    --map-cluster-3-head-fill: #cfeeda;
+    --map-cluster-3-head-edge: #7fc199;
+    --map-cluster-3-head-text: #14171d;
+    --map-cluster-3-leaf-fill: #e4f2e9;
+    --map-cluster-3-leaf-edge: #c3ddce;
+    --map-cluster-3-leaf-text: #2a2e36;
+
+    --map-cluster-4-head-fill: #f7ddc9;
+    --map-cluster-4-head-edge: #d6a67f;
+    --map-cluster-4-head-text: #14171d;
+    --map-cluster-4-leaf-fill: #f3e8de;
+    --map-cluster-4-leaf-edge: #ddcbbb;
+    --map-cluster-4-leaf-text: #2a2e36;
+
+    --map-cluster-5-head-fill: #dfd7f5;
+    --map-cluster-5-head-edge: #a99cd6;
+    --map-cluster-5-head-text: #14171d;
+    --map-cluster-5-leaf-fill: #eae6f5;
+    --map-cluster-5-leaf-edge: #cdc6e0;
+    --map-cluster-5-leaf-text: #2a2e36;
+
 
     color-scheme: light;
   }

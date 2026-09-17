@@ -1,16 +1,16 @@
 /**
  * Where the lines of an outline sit when it is drawn as a map.
  *
- * Computed, not stored. The `position` on a node is a sort key -- a fractional
- * index minted between two siblings, see position.ts -- and a sort key orders
- * lines, it does not place them on a plane. Storing coordinates instead would
- * be a second thing to merge, and two people dragging one node would land it
- * somewhere neither of them chose.
+ * Computed for every card nobody has moved. The `position` on a node is a sort
+ * key -- a fractional index minted between two siblings, see position.ts -- and
+ * a sort key orders lines, it does not place them on a plane, so the plane is
+ * worked out here from the shape of the tree.
  *
- * So the map is a view of the tree: the tree decides where things are, and a
- * drag is how somebody changes the tree. What the canvas gives that the outline
- * cannot is seeing the shape all at once, and seeing the links that do not run
- * along it.
+ * A card somebody has dragged is the exception, and carries `x` and `y` of its
+ * own. That is stored state and it does have to be merged, which is the price
+ * of a board where moving something moves it: an arrangement that sprang back
+ * to the computed one the moment it was let go is not a board, it is a picture
+ * of a tree. Last write wins, the same as every other field.
  *
  * Pure, and separate from the renderer, because a layout that can only be
  * checked by looking at pixels is a layout nobody checks.
@@ -35,6 +35,28 @@ export interface MapRow {
   parentId: string;
 }
 
+/**
+ * The two fields a dragged card carries, read here rather than imported.
+ *
+ * Spelled twice on purpose: model.ts declares them for the document, and this
+ * file is the geometry the read-only web viewer shares, which has no document
+ * model and never will. Two declarations of two short strings is the cost of
+ * that split, and it is the same trade carry.ts makes for the wire's op kinds.
+ */
+const FIELD_X = "x";
+const FIELD_Y = "y";
+
+/** Where a card was put by hand, or null for one the layout still places. */
+function placedAt(node: { fields: Record<string, unknown> }): { x: number; y: number } | null {
+  const x = node.fields[FIELD_X];
+  const y = node.fields[FIELD_Y];
+  if (typeof x !== "number" || typeof y !== "number") return null;
+  // A non-finite coordinate is off the map with no way back to it, so it reads
+  // as no coordinate at all.
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  return { x, y };
+}
+
 /** One node, boxed, in map space. */
 export interface Box {
   id: string;
@@ -44,6 +66,34 @@ export interface Box {
   y: number;
   width: number;
   height: number;
+  /**
+   * Which top-level branch this is under -- the index of its root in `rows`.
+   *
+   * What the board colours by. Computed rather than stored, for the same reason
+   * everything else here is: the same tree gives the same index on every
+   * machine and in the viewer, so two people never see one note in two colours
+   * and there is no field to merge. -1 is the subject in the middle, which
+   * belongs to no branch.
+   */
+  cluster: number;
+  /** The text, already wrapped to the box width. Empty for an empty line. */
+  lines: string[];
+  /**
+   * The tilt a note is pinned at, in radians.
+   *
+   * Hashed from the id. Random would shimmer every frame, and stored would be
+   * a third thing to merge for the sake of a degree and a half.
+   */
+  angle: number;
+  /**
+   * The glyph on a cluster head, by name, or "" for none.
+   *
+   * Carried on the box rather than asked of the scene, because the room it
+   * takes is part of how tall the note is -- and a renderer that reserved that
+   * room out of a source the layout could not see would be the two of them
+   * disagreeing about the same note.
+   */
+  icon: string;
 }
 
 /** A line from a parent to one of its children. */
@@ -59,28 +109,17 @@ export interface Layout {
   branches: Branch[];
   width: number;
   height: number;
+  /**
+   * The point a reader should be looking at when the map opens.
+   *
+   * A board is built around a subject and belongs in the middle of the
+   * window, which is a different point from the corner the boxes start at --
+   * so it is answered here rather than guessed at by the renderer. The
+   * renderer centres this point and then clamps, so a map larger than the
+   * window still never shows blank paper past its own edge.
+   */
+  home: { x: number; y: number };
 }
-
-/**
- * The two shapes the same document can be drawn in.
- *
- * "tidy" is depth across and order down, which is the outline's own shape laid
- * on its side -- a map you can read top to bottom and still find the line you
- * were looking at in the other view. "radial" puts the root in the middle and
- * throws the branches outward, which says nothing about order and everything
- * about how many directions the thinking went in.
- *
- * Both are functions of the same tree. Neither stores anything, so switching is
- * a repaint and not an edit.
- */
-export type LayoutKind = "tidy" | "radial";
-
-export const LAYOUTS: readonly LayoutKind[] = ["tidy", "radial"];
-
-export const LAYOUT_LABELS: Record<LayoutKind, string> = {
-  tidy: "Tidy",
-  radial: "Radial",
-};
 
 /**
  * How a box is drawn at each depth.
@@ -144,131 +183,332 @@ export const SIBLING_GAP = 16;
 export const SUBTREE_GAP = 26;
 export const PADDING = 40;
 
-/** Where the branches radiate to, and how far apart they land. */
-const RADIAL_RING = 250;
-const RADIAL_STEP = 210;
-/** How wide a subtree's wedge is allowed to get, so deep branches do not cross. */
-const RADIAL_SPREAD = 0.62;
-
-/** Lays the rows out in the shape asked for. Both are functions of the tree. */
-export function layout(rows: readonly MapRow[], kind: LayoutKind = "tidy"): Layout {
-  return kind === "radial" ? radial(rows) : tidy(rows);
-}
+/**
+ * Where the cluster heads sit, and how a cluster grows away from them.
+ *
+ * The ring is wider than it is tall because screens are, and a circle of heads
+ * on a 16:9 window wastes the two ends of it.
+ */
+const BOARD_RING_X = 340;
+const BOARD_RING_Y = 240;
+/** The gap between one generation of a cluster and the next, and between notes. */
+const BOARD_STEP = 54;
+const BOARD_GAP = 14;
+/** How much clear board is left between two clusters. */
+const CLUSTER_GAP = 34;
+/** How many times overlapping clusters are pushed apart before we stop trying. */
+const RELAX_PASSES = 32;
+/**
+ * How wide the two notes that carry the board are.
+ *
+ * TIERS runs the other way -- 150 at the root, 210 four steps down -- which
+ * suits an indented tree, where depth 0 is a heading over a column of detail
+ * and the detail is what has words in it. On a board it is backwards: the
+ * subject is the sentence somebody reads first and the leaves are three words
+ * each, and the narrowest paper on the board holding the longest line is how
+ * the middle of the reference picture ends up as an ellipsis.
+ */
+const SUBJECT_WIDTH = 270;
+const HEAD_WIDTH = 200;
 
 /**
- * Depth across, order down, and every parent centred on its own children.
+ * How wide a string is, in the font it will be drawn in.
  *
- * The centring is the whole difference between a map and an indented list
- * drawn with boxes. A parent pinned to the top of its subtree makes the eye
- * walk down to find out what it covers; a parent level with the middle of its
- * children can be read as "these belong to that" without following a single
- * line.
- *
- * Two passes, which is what makes it possible at all: the first stacks the
- * leaves, because a leaf is the only node whose position does not depend on
- * anything below it, and the second lifts every parent to the middle of the
- * span its children ended up occupying. One pass cannot do it -- a parent's
- * place is a fact about its descendants, and they have not been placed yet.
+ * A callback rather than a measurement, because this file is pure and means to
+ * stay that way: the web viewer imports it, and a unit test of a layout has no
+ * canvas within reach. The renderer hands in a cached `ctx.measureText`;
+ * everything else gets `estimate`, which is close enough to decide where a line
+ * wraps and -- the part that matters -- gives the same answer twice.
  */
-function tidy(rows: readonly MapRow[]): Layout {
-  const boxes: Box[] = [];
-  const byId = new Map<string, Box>();
-  const branches: Branch[] = [];
-  if (rows.length === 0) {
-    return { boxes, byId, branches, width: PADDING * 2, height: PADDING * 2 };
-  }
+export type Measure = (text: string, font: string) => number;
 
-  // Columns first: a box's x depends only on its depth, and every box at a
-  // depth is the same width, so the column a depth sits in is the sum of the
-  // widths before it. Computed once rather than per box.
-  const deepest = rows.reduce((most, row) => Math.max(most, row.depth), 0);
-  const columns: number[] = [];
-  let x = PADDING;
-  for (let depth = 0; depth <= deepest; depth++) {
-    columns.push(x);
-    x += tier(depth).width + COLUMN_GAP;
-  }
+/** Average advance as a fraction of the font size, for a proportional sans. */
+const AVERAGE_ADVANCE = 0.52;
 
-  const children = new Map<string, MapRow[]>();
-  const roots: MapRow[] = [];
-  for (const row of rows) {
-    if (row.parentId === "") roots.push(row);
-    else {
-      const list = children.get(row.parentId);
-      if (list) list.push(row);
-      else children.set(row.parentId, [row]);
+/** The size out of a CSS font shorthand, or 13 if it does not say. */
+export function sizeOf(font: string): number {
+  const found = /(\d+(?:\.\d+)?)px/.exec(font);
+  return found ? Number.parseFloat(found[1]) : 13;
+}
+
+export const estimate: Measure = (text, font) => text.length * sizeOf(font) * AVERAGE_ADVANCE;
+
+/** How many lines a note holds before the rest is elided. */
+const MAX_LINES = 4;
+/**
+ * The room inside a note, and how its lines are spaced.
+ *
+ * Exported because the renderer draws inside the box this file sized, and two
+ * copies of these numbers is two of them being edited and one of them not --
+ * which shows up as text sitting a few pixels outside its own paper.
+ */
+export const TEXT_PAD_X = 12;
+export const TEXT_PAD_Y = 8;
+export const LINE_HEIGHT = 1.35;
+
+/**
+ * Breaks a line into the lines a note will actually show.
+ *
+ * Words, then characters when a single word is wider than the note -- a URL or
+ * a Java class name is one word and would otherwise run off the paper. The last
+ * line is elided rather than the note growing without limit: a note is
+ * something you can read at a glance, and the full text is one click away in
+ * the editor that opens on it.
+ */
+export function wrap(text: string, width: number, font: string, measure: Measure): string[] {
+  const room = width - TEXT_PAD_X * 2;
+  const words = text.split(/\s+/).filter((word) => word !== "");
+  if (words.length === 0) return [];
+
+  const lines: string[] = [];
+  let line = "";
+  for (const word of words) {
+    for (const piece of split(word, room, font, measure)) {
+      const next = line === "" ? piece : `${line} ${piece}`;
+      if (line !== "" && measure(next, font) > room) {
+        lines.push(line);
+        line = piece;
+      } else {
+        line = next;
+      }
     }
   }
+  if (line !== "") lines.push(line);
 
-  // `cursor` is the next free y for a leaf. It only ever moves downward, which
-  // is what keeps two subtrees from overlapping without any of them knowing
-  // about each other.
-  let cursor = PADDING;
+  if (lines.length <= MAX_LINES) return lines;
+  const kept = lines.slice(0, MAX_LINES);
+  kept[MAX_LINES - 1] = `${kept[MAX_LINES - 1].replace(/\s*\S*$/, "")}\u2026`;
+  return kept;
+}
 
-  for (const root of roots) {
-    place(root);
-    cursor += SUBTREE_GAP;
-  }
-
-  /** Places a row and everything under it, and answers with its centre. */
-  function place(row: MapRow): number {
-    const metrics = tier(row.depth);
-    const kids = children.get(row.node.id) ?? [];
-
-    let centre: number;
-    if (kids.length === 0) {
-      centre = cursor + metrics.height / 2;
-      cursor += metrics.height + SIBLING_GAP;
+/** One word, as the pieces that fit. Most words come back as themselves. */
+function split(word: string, room: number, font: string, measure: Measure): string[] {
+  if (measure(word, font) <= room) return [word];
+  const pieces: string[] = [];
+  let piece = "";
+  for (const char of word) {
+    if (piece !== "" && measure(piece + char, font) > room) {
+      pieces.push(piece);
+      piece = char;
     } else {
-      // The children first, then this. A parent drawn before its subtree would
-      // have to guess how tall the subtree was going to be.
-      const first = place(kids[0]);
-      let last = first;
-      for (let i = 1; i < kids.length; i++) last = place(kids[i]);
-      centre = (first + last) / 2;
+      piece += char;
     }
-
-    const box: Box = {
-      id: row.node.id,
-      text: textOf(row),
-      depth: row.depth,
-      x: columns[row.depth],
-      y: centre - metrics.height / 2,
-      width: metrics.width,
-      height: metrics.height,
-    };
-    boxes.push(box);
-    byId.set(box.id, box);
-    if (row.parentId !== "" && byId.has(row.parentId)) {
-      branches.push({ from: row.parentId, to: box.id });
-    }
-    return centre;
   }
+  if (piece !== "") pieces.push(piece);
+  return pieces;
+}
 
-  // A parent centred between widely separated children can end up above the
-  // first of them, and the extent has to cover that rather than clipping it.
-  return { boxes, byId, branches, ...extent(boxes) };
+/** A note's size once its text has been wrapped into it. */
+interface Shape {
+  width: number;
+  height: number;
+  lines: string[];
 }
 
 /**
- * The root in the middle, and the branches thrown outward from it.
+ * How big a note has to be to hold what is written on it.
  *
- * The same tree, saying a different thing about itself. Order is gone --
- * nothing about a ring says which of two branches came first -- and what is
- * left is how many directions there are and how far each one went. That is the
- * question a long outline stops being able to answer, because by then the
- * shape is taller than the screen.
- *
- * Each subtree keeps a wedge of angle to itself, and a child's wedge is a
- * fraction of its parent's. That is what stops deep branches from fanning into
- * each other: a branch cannot spread wider than the room its parent had.
+ * Width is the tier's and does not move -- a column of notes at one depth all
+ * the same width is most of what makes a map readable. Height is the tier's
+ * until the text needs more, which is what lets a sentence be a note rather
+ * than an ellipsis.
  */
-function radial(rows: readonly MapRow[]): Layout {
+function shape(row: MapRow, measure: Measure, width?: number): Shape {
+  const base = tier(row.depth);
+  const metrics = width === undefined ? base : { ...base, width };
+  const lines = wrap(textOf(row), metrics.width, metrics.font, measure);
+  const room = iconOf(row) === "" ? 0 : ICON_ROOM;
+  const text = Math.ceil(lines.length * sizeOf(metrics.font) * LINE_HEIGHT) + TEXT_PAD_Y * 2 + room;
+  return { width: metrics.width, height: Math.max(metrics.height + room, text), lines };
+}
+
+/** The field read here. Named, not imported: see MapRow for why. */
+const FIELD_ICON = "icon";
+
+function iconOf(row: MapRow): string {
+  const value = row.node.fields[FIELD_ICON];
+  return typeof value === "string" ? value : "";
+}
+
+/** The room a glyph takes above the text, when there is one. */
+export const ICON_ROOM = 26;
+
+/**
+ * The tilt a note is pinned at.
+ *
+ * FNV-1a over the id, because it is five lines and the same five lines
+ * everywhere. `>>> 0` before the modulo: `Math.imul` leaves a signed 32-bit
+ * value, and a negative one would use half the range and tilt half the notes
+ * the same way.
+ */
+const MAX_TILT = 0.026;
+
+function tiltOf(id: string): number {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < id.length; i++) {
+    hash ^= id.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (((hash >>> 0) % 2001) / 1000 - 1) * MAX_TILT;
+}
+
+function boxOf(row: MapRow, x: number, y: number, made: Shape, cluster: number): Box {
+  return {
+    id: row.node.id,
+    text: textOf(row),
+    depth: row.depth,
+    x,
+    y,
+    width: made.width,
+    height: made.height,
+    cluster,
+    lines: made.lines,
+    angle: tiltOf(row.node.id),
+    icon: iconOf(row),
+  };
+}
+
+/**
+ * Which branch each line belongs to.
+ *
+ * One pass, because `rows` is outline order and a parent is always in it before
+ * its children. `seed` is the depth a new branch starts at: the top level
+ * normally, one deeper when the board found a subject to put in the middle.
+ * Anything above the seed belongs to no branch and gets -1.
+ */
+/**
+ * The depth at which a new branch starts.
+ *
+ * One root with something under it is a subject: it belongs to no branch of its
+ * own, and the branches are its children. Anything else -- several roots, or a
+ * single root with nothing under it -- and the top level is the branches.
+ *
+ * Without it, a document with one root comes out in a single colour, because
+ * everything in it is under the one branch.
+ */
+function seedDepth(rows: readonly MapRow[]): number {
+  let roots = 0;
+  let only = "";
+  for (const row of rows) {
+    if (row.parentId !== "") continue;
+    roots++;
+    only = row.node.id;
+  }
+  if (roots !== 1) return 0;
+  return rows.some((row) => row.parentId === only) ? 1 : 0;
+}
+
+function clustersOf(rows: readonly MapRow[], seed: number): Map<string, number> {
+  const at = new Map<string, number>();
+  let next = 0;
+  for (const row of rows) {
+    if (row.depth < seed) at.set(row.node.id, -1);
+    else if (row.depth === seed) at.set(row.node.id, next++);
+    else at.set(row.node.id, at.get(row.parentId) ?? 0);
+  }
+  return at;
+}
+
+/**
+ * Lays the rows out as the board, then puts back the cards somebody moved.
+ *
+ * The arrangement is a function of the tree for every card nobody has touched,
+ * which is what makes a document that has never been dragged readable the
+ * first time it is opened. A card that *has* been dragged carries the place it
+ * was left on it -- see placedAt -- and that wins: the whole point of moving
+ * one by hand is that it is still there afterwards.
+ *
+ * The two live in one space. Placements are read in the same units the layout
+ * works in and everything is shifted into positive space together at the end,
+ * so a placed card and a computed one keep their positions relative to each
+ * other however the rest of the tree changes shape around them.
+ */
+export function layout(rows: readonly MapRow[], measure: Measure = estimate): Layout {
+  const map = clustered(rows, measure);
+  return place(rows, map);
+}
+
+/**
+ * Moves every card that has a place of its own to it, and renormalises.
+ *
+ * Renormalised because the layout hands back a map whose top left is at
+ * PADDING, and the renderer pans in that space: a card dragged above or to the
+ * left of everything else would otherwise sit at a negative coordinate, which
+ * is off the map rather than on the part of it nobody has scrolled to.
+ *
+ * `home` moves with everything else. It is a point in the same space, and a
+ * board that opened on where the middle used to be would be answering a
+ * question about a document that has since been rearranged.
+ */
+function place(rows: readonly MapRow[], map: Layout): Layout {
+  let moved = false;
+  for (const row of rows) {
+    const at = placedAt(row.node);
+    if (!at) continue;
+    const box = map.byId.get(row.node.id);
+    if (!box) continue;
+    box.x = at.x;
+    box.y = at.y;
+    moved = true;
+  }
+  if (!moved || map.boxes.length === 0) return map;
+
+  const bounds = extentOf(map.boxes);
+  const shiftX = PADDING - bounds.left;
+  const shiftY = PADDING - bounds.top;
+  for (const box of map.boxes) {
+    box.x += shiftX;
+    box.y += shiftY;
+  }
+  return {
+    ...map,
+    ...extent(map.boxes),
+    home: { x: map.home.x + shiftX, y: map.home.y + shiftY },
+  };
+}
+
+/** One branch per line that has a parent on the map, once they are all placed. */
+function link(rows: readonly MapRow[], byId: Map<string, Box>, branches: Branch[]): void {
+  for (const row of rows) {
+    if (row.parentId === "") continue;
+    if (byId.has(row.parentId) && byId.has(row.node.id)) {
+      branches.push({ from: row.parentId, to: row.node.id });
+    }
+  }
+}
+
+/**
+ * The board: a subject in the middle, clusters around it, notes fanning out.
+ *
+ * The one shape the map is drawn in. What it says that an indented tree does
+ * not is which handful of things this is about -- a tree of forty lines has
+ * one column of nine and no centre, and you have to read it to find out where
+ * the weight is.
+ *
+ * Three ideas hold it up:
+ *
+ *   A cluster grows *away* from the middle. A head on the left of the board
+ *   puts its notes further left, so nothing has to cross the centre to reach
+ *   the thing it belongs to. Within a cluster it is depth outward, order down,
+ *   every parent level with its own children.
+ *
+ *   Heads get a share of the circle proportional to their weight. An even
+ *   split is why a branch with nine descendants and one with two would come
+ *   out equally cramped.
+ *
+ *   Clusters are then pushed apart until they stop overlapping. A ring cannot
+ *   know in advance how tall a cluster will be once its text has wrapped, so
+ *   the ring is the guess and this is the correction.
+ *
+ * Positions are still nobody's decision: every number below is a function of
+ * the tree, so two people looking at one workspace see one board.
+ */
+function clustered(rows: readonly MapRow[], measure: Measure): Layout {
   const boxes: Box[] = [];
   const byId = new Map<string, Box>();
   const branches: Branch[] = [];
   if (rows.length === 0) {
-    return { boxes, byId, branches, width: PADDING * 2, height: PADDING * 2 };
+    return { boxes, byId, branches, width: PADDING * 2, height: PADDING * 2, home: { x: 0, y: 0 } };
   }
 
   const children = new Map<string, MapRow[]>();
@@ -282,59 +522,135 @@ function radial(rows: readonly MapRow[]): Layout {
     }
   }
 
-  // Several top-level lines and no single root is the ordinary case for an
-  // outline, so the centre is a point rather than a node: the top level rings
-  // it, exactly as one root's children would.
-  const centreX = 0;
-  const centreY = 0;
-  // Starting a quarter turn back puts the first branch at the top rather than
-  // at three o'clock, which is where a reader looks first.
-  spread(roots, -Math.PI / 2, Math.PI * 2, 0);
+  const trunk = roots;
+
+  /*
+   * One root with something under it is a subject, and the board is built
+   * around it. Several roots -- which is what an outline usually is -- ring a
+   * point instead: promoting the first of them to the middle would be choosing
+   * a subject nobody chose.
+   */
+  const seed = seedDepth(rows);
+  const middle = seed === 1 ? trunk[0] : null;
+  const heads = middle ? (children.get(middle.node.id) ?? []) : trunk;
+  const at = clustersOf(rows, seed);
+
+  /** A cluster, as the boxes it owns. Moved as one thing by the relaxation. */
+  interface Cluster {
+    boxes: Box[];
+    /** The subject does not move; everything else gets out of its way. */
+    fixed: boolean;
+  }
+  const clusters: Cluster[] = [];
+
+  /** How wide a note is on a board, which is not how wide it is in a tree. */
+  function widthOf(row: MapRow): number | undefined {
+    if (middle && row.node.id === middle.node.id) return SUBJECT_WIDTH;
+    return row.depth === (middle ? 1 : 0) ? HEAD_WIDTH : undefined;
+  }
+
+  if (middle) {
+    const made = shape(middle, measure, SUBJECT_WIDTH);
+    clusters.push({
+      boxes: [boxOf(middle, -made.width / 2, -made.height / 2, made, -1)],
+      fixed: true,
+    });
+  }
 
   /**
-   * Places a run of siblings across a wedge.
+   * One cluster, laid out in its own frame with the head centred on the origin.
    *
-   * @param from Where the wedge starts, and `width` how much of it there is.
-   *   A child gets its own slice of that, so the arithmetic is the same at
-   *   every depth and nothing has to know how deep it is.
+   * `dir` is which way it grows: +1 for a head on the right of the board, -1
+   * for one on the left.
    */
-  function spread(list: readonly MapRow[], from: number, width: number, depth: number) {
-    if (list.length === 0) return;
-    const slice = width / list.length;
-    for (let i = 0; i < list.length; i++) {
-      const row = list[i];
-      // The middle of this child's slice.
-      const angle = from + slice * (i + 0.5);
-      const metrics = tier(row.depth);
-      const radius = RADIAL_RING + RADIAL_STEP * depth;
-      const box: Box = {
-        id: row.node.id,
-        text: textOf(row),
-        depth: row.depth,
-        x: centreX + Math.cos(angle) * radius - metrics.width / 2,
-        y: centreY + Math.sin(angle) * radius - metrics.height / 2,
-        width: metrics.width,
-        height: metrics.height,
-      };
-      boxes.push(box);
-      byId.set(box.id, box);
-      if (row.parentId !== "" && byId.has(row.parentId)) {
-        branches.push({ from: row.parentId, to: box.id });
+  function grow(head: MapRow, dir: 1 | -1): Box[] {
+    const made: Box[] = [];
+    let cursor = 0;
+
+    /** How far out the nth generation of this cluster sits, from the head. */
+    function column(step: number): number {
+      let x = HEAD_WIDTH + BOARD_STEP;
+      for (let i = 1; i < step; i++) x += tier(head.depth + i).width + BOARD_STEP;
+      return step === 0 ? 0 : x;
+    }
+
+    function place(row: MapRow): number {
+      const box = shape(row, measure, widthOf(row));
+      const kids = children.get(row.node.id) ?? [];
+
+      let centre: number;
+      if (kids.length === 0) {
+        centre = cursor + box.height / 2;
+        cursor += box.height + BOARD_GAP;
+      } else {
+        const first = place(kids[0]);
+        let last = first;
+        for (let i = 1; i < kids.length; i++) last = place(kids[i]);
+        centre = (first + last) / 2;
       }
 
-      const kids = children.get(row.node.id) ?? [];
-      if (kids.length > 0) {
-        // Narrower than the slice this child got, and centred on it. Equal
-        // would let a subtree's outermost leaves sit exactly on the boundary
-        // its neighbour's do.
-        const wedge = slice * RADIAL_SPREAD;
-        spread(kids, angle - wedge / 2, wedge, depth + 1);
-      }
+      const step = row.depth - head.depth;
+      const x = dir === 1 ? column(step) : -column(step) - box.width;
+      made.push(boxOf(row, x, centre - box.height / 2, box, at.get(row.node.id) ?? 0));
+      return centre;
+    }
+
+    place(head);
+
+    // The head is placed last -- its own position is a fact about its children
+    // -- so it is the last thing pushed, and everything else is moved to it.
+    const anchor = made[made.length - 1];
+    const dx = -(anchor.x + anchor.width / 2);
+    const dy = -(anchor.y + anchor.height / 2);
+    for (const box of made) {
+      box.x += dx;
+      box.y += dy;
+    }
+    return made;
+  }
+
+  /** A head's share of the circle: itself and everything under it. */
+  function weigh(row: MapRow): number {
+    let total = 1;
+    for (const kid of children.get(row.node.id) ?? []) total += weigh(kid);
+    return total;
+  }
+
+  const weights = heads.map(weigh);
+  const total = weights.reduce((sum, weight) => sum + weight, 0) || 1;
+  // A quarter turn back, so the first cluster is at the top rather than at
+  // three o'clock -- which is where a reader looks first.
+  let from = -Math.PI / 2;
+  for (let i = 0; i < heads.length; i++) {
+    const slice = (weights[i] / total) * Math.PI * 2;
+    const angle = from + slice / 2;
+    from += slice;
+    const cx = Math.cos(angle) * BOARD_RING_X;
+    const cy = Math.sin(angle) * BOARD_RING_Y;
+    const grown = grow(heads[i], cx < 0 ? -1 : 1);
+    for (const box of grown) {
+      box.x += cx;
+      box.y += cy;
+    }
+    clusters.push({ boxes: grown, fixed: false });
+  }
+
+  relax(clusters);
+
+  for (const cluster of clusters) {
+    for (const box of cluster.boxes) {
+      boxes.push(box);
+      byId.set(box.id, box);
     }
   }
 
-  // Map space has no negative half, so the whole thing is slid into view. The
-  // renderer pans in map space and would otherwise start outside the document.
+  // Built from the rows rather than as the boxes are made: `grow` places a
+  // cluster before the next one exists, and the branch from the subject to a
+  // head crosses two of them.
+  link(rows, byId, branches);
+
+  // Map space has no negative half, and the board is built around an origin in
+  // the middle of it, so the whole thing is slid into view.
   const bounds = extentOf(boxes);
   const shiftX = PADDING - bounds.left;
   const shiftY = PADDING - bounds.top;
@@ -343,7 +659,60 @@ function radial(rows: readonly MapRow[]): Layout {
     box.y += shiftY;
   }
 
-  return { boxes, byId, branches, ...extent(boxes) };
+  // The board was built around the origin, so that is where its subject sits
+  // -- or, with several roots and no subject, the point they ring.
+  return { boxes, byId, branches, ...extent(boxes), home: { x: shiftX, y: shiftY } };
+}
+
+/**
+ * Pushes overlapping clusters apart, along whichever axis is the shorter move.
+ *
+ * Separating two clusters the short way keeps the ring a ring: resolving a
+ * 20-pixel vertical overlap by sliding one of them 400 pixels sideways is a
+ * correct answer to the wrong question. Bounded rather than run to convergence,
+ * because a board crowded enough not to converge still has to be drawn, and a
+ * layout that can loop is a layout that can hang a frame.
+ */
+function relax(clusters: { boxes: Box[]; fixed: boolean }[]): void {
+  for (let pass = 0; pass < RELAX_PASSES; pass++) {
+    let moved = false;
+    for (let i = 0; i < clusters.length; i++) {
+      for (let j = i + 1; j < clusters.length; j++) {
+        const a = clusters[i];
+        const b = clusters[j];
+        if (a.fixed && b.fixed) continue;
+        const one = extentOf(a.boxes);
+        const two = extentOf(b.boxes);
+        const overX = Math.min(one.right, two.right) - Math.max(one.left, two.left) + CLUSTER_GAP;
+        const overY = Math.min(one.bottom, two.bottom) - Math.max(one.top, two.top) + CLUSTER_GAP;
+        if (overX <= 0 || overY <= 0) continue;
+
+        moved = true;
+        const push = Math.min(overX, overY) / 2 + 0.5;
+        // A fixed cluster does not take its half, so the other takes both.
+        const mine = a.fixed ? 0 : b.fixed ? push * 2 : push;
+        const theirs = b.fixed ? 0 : a.fixed ? push * 2 : push;
+        if (overX < overY) {
+          const away = one.left + one.right <= two.left + two.right ? -1 : 1;
+          shift(a.boxes, away * mine, 0);
+          shift(b.boxes, -away * theirs, 0);
+        } else {
+          const away = one.top + one.bottom <= two.top + two.bottom ? -1 : 1;
+          shift(a.boxes, 0, away * mine);
+          shift(b.boxes, 0, -away * theirs);
+        }
+      }
+    }
+    if (!moved) return;
+  }
+}
+
+function shift(boxes: Box[], dx: number, dy: number): void {
+  if (dx === 0 && dy === 0) return;
+  for (const box of boxes) {
+    box.x += dx;
+    box.y += dy;
+  }
 }
 
 /** Which box a point in map space is in, if any. Topmost last drawn wins. */

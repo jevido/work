@@ -65,9 +65,6 @@ export class Workspaces {
     this.list.find((w) => w.id === this.activeId) ?? this.list[0] ?? null,
   );
 
-  /** Whether this build can talk to a workspace server at all. */
-  available = $state(false);
-
   /** The open workspace, or null. */
   view = $state<WorkspaceView | null>(null);
 
@@ -249,14 +246,6 @@ export class Workspaces {
 
   async #firstPaint(): Promise<void> {
     try {
-      this.available = await Workbench.Workspaces();
-    } catch {
-      // An older backend, or one built without a transport. The workspace
-      // controls stay hidden rather than offering buttons whose only outcome
-      // is an error.
-      this.available = false;
-    }
-    try {
       this.#adopt(await Workbench.Workspace());
     } catch {
       this.#adopt(null);
@@ -371,6 +360,20 @@ export class Workspaces {
     return typeof path === "string" && path !== "";
   }
 
+  /**
+   * The same, for a path somebody typed or pasted.
+   *
+   * Go validates it -- a folder that is not there is refused and the tab keeps
+   * what it had -- so this reports whether it took rather than guessing at the
+   * path itself. A false leaves `error` set, which is what the field reads to
+   * put itself back.
+   */
+  async setFolder(id: string, path: string): Promise<boolean> {
+    if (path.trim() === "") return false;
+    const bound = await this.#run(() => Workbench.SetTabFolder(id, path.trim()));
+    return typeof bound === "string" && bound !== "";
+  }
+
   /** Opens a new tab in the joined workspace. */
   async newTab(name: string): Promise<boolean> {
     const made = await this.#run(() => Workbench.NewTab(name.trim() || "Untitled"));
@@ -445,7 +448,14 @@ export class Workspaces {
    */
   keys = $state<{ writeKey: string; readKey: string } | null>(null);
 
-  /** Reads the keys this machine has. Empty strings for the ones it has not. */
+  /**
+   * Reads this workspace's keys: both of them, and the same two every time.
+   *
+   * A machine that joined with a write key has no read key -- the server keeps
+   * only hashes -- and Go mints one here on the first ask and writes it down.
+   * So this is a look that fills the panel in, not a look that issues a
+   * credential each time it is opened. See Workbench.EnsureKeys.
+   */
   async loadKeys(): Promise<void> {
     const got = await this.#run(() => Workbench.WorkspaceKeys());
     this.keys = got ? { writeKey: got.writeKey ?? "", readKey: got.readKey ?? "" } : null;
@@ -558,6 +568,24 @@ export class Workspaces {
   /** Pushes and pulls now instead of waiting for the poll. The offline retry. */
   retry(): void {
     void this.#run(() => Workbench.SyncNow());
+  }
+
+  /**
+   * The same call, asked for on purpose.
+   *
+   * Sync polls every three seconds, so this is never the only way anybody
+   * else's work arrives -- but three seconds is long enough to stare at, and
+   * "did that person's change reach me" is a question a poll cannot answer on
+   * demand. Named apart from `retry` because the two are pressed for opposite
+   * reasons: one is the way out of an error, this is impatience.
+   */
+  async refresh(): Promise<void> {
+    await this.#run(() => Workbench.SyncNow());
+    // The document is fetched rather than pushed -- see WorkspaceDocument --
+    // so a pull that brought something in changes nothing on screen until it
+    // is asked for. The poll's own cursor does this; a manual refresh that
+    // waited for the next one would look like it had done nothing.
+    await this.#refreshDocument();
   }
 
   /**

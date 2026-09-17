@@ -57,6 +57,31 @@ const (
 	// see FieldRegion for why.
 	TypeRegion = "region"
 
+	// TypeGuideline is something this workspace is trying to be: "improves
+	// performance", "improves onboarding". Per workspace, because what counts
+	// as progress is not the same on two projects.
+	//
+	// TypeParty is somebody waiting on a card: a person, a team, a customer.
+	// It is content and not attribution -- a line of text somebody wrote, the
+	// same as any other -- and nothing about it records who wrote it. A
+	// workspace where nobody can be named can still say out loud that Sales is
+	// waiting on something.
+	TypeGuideline = "guideline"
+	TypeParty     = "party"
+
+	// TypeGuided joins a card to a guideline, and TypeInterest joins a card to
+	// a party. FieldFrom is the card, FieldTo is the word.
+	//
+	// A node each rather than a field on the card, and the difference is the
+	// same one FieldRegion turns on -- except the other way up. A card is in
+	// one region, so a field is right for that. A card can meet four guidelines
+	// and have three parties waiting on it, and a *set* in a field is one
+	// last-write-wins slot: two people adding two different guidelines to one
+	// card at the same moment would keep one and lose the other, silently. Two
+	// nodes do not collide at all.
+	TypeGuided   = "guided"
+	TypeInterest = "interest"
+
 	// FieldText is the line itself.
 	FieldText = "text"
 	// FieldFrom and FieldTo are the two ends of a [TypeEdge] node.
@@ -76,6 +101,23 @@ const (
 	// field-level merge exists for -- two people writing two different nodes
 	// do not collide at all.
 	FieldRegion = "region"
+
+	// FieldIcon is the glyph on a cluster head, by name.
+	//
+	// A name from a closed set the frontend knows how to draw, not a
+	// character: an emoji is a font lookup, and the font that answers it
+	// differs per machine, so one workspace would look like two. A name this
+	// release has never heard of is a glyph it leaves off, and the line itself
+	// is untouched -- the same additive rule FieldDiscovery follows.
+	FieldIcon = "icon"
+
+	// FieldDetail is what a card says when there is room to say it.
+	//
+	// The board draws FieldText and nothing else: a note is read at a glance,
+	// and a paragraph in a box is a paragraph nobody reads. This is the rest,
+	// shown when a card is opened, and newlines survive in it -- which they
+	// deliberately do not in FieldText.
+	FieldDetail = "detail"
 
 	// FieldCollapsed is whether an outline node's children are folded away.
 	// It is in the document rather than a per-viewer preference because a
@@ -108,14 +150,20 @@ const (
 	FieldDiscoveredIn = "discoveredIn"
 )
 
-// maxEdits bounds one ApplyEdits call.
+// editBatch is how many ops reach the disk under one fsync.
 //
-// The webview is untrusted input like any other client, and every edit in a
-// batch reaches the disk under one fsync -- so an unbounded batch is an
-// unbounded write with the caller waiting on it. A hundred is more than any
-// interaction produces: typing settles into one op, and the largest real
-// batch is a paste, which is one create per line.
-const maxEdits = 256
+// Not a limit on what a caller may ask for. It used to be: a call over it was
+// refused whole, on the reasoning that an unbounded batch is an unbounded
+// write with the caller waiting on it. The reasoning was right and the refusal
+// was the wrong answer to it -- the size of one disk write is this side's
+// business, and making it the caller's meant every caller had to know the
+// number and chunk against it. Approving one restructuring of a board is
+// hundreds of edits in one gesture, and there is no honest number a *caller*
+// could pick.
+//
+// So the write is bounded and the call is not: ApplyEdits validates everything
+// it was given, then applies it a batch at a time.
+const editBatch = 256
 
 // Edit is one change to the outline, as the frontend describes it.
 //
@@ -172,9 +220,6 @@ func (w *Workbench) ApplyEdits(tabID string, edits []Edit) (Document, error) {
 	if len(edits) == 0 {
 		return w.WorkspaceDocument(), nil
 	}
-	if len(edits) > maxEdits {
-		return Document{}, fmt.Errorf("workbench: %d edits, over the %d a batch may carry", len(edits), maxEdits)
-	}
 
 	s := w.sync.Load()
 	if s == nil {
@@ -192,12 +237,29 @@ func (w *Workbench) ApplyEdits(tabID string, edits []Edit) (Document, error) {
 		return Document{}, fmt.Errorf("workbench: unknown tab %q", tabID)
 	}
 
-	batch, err := editOps(s, tabID, edits)
+	// Everything is planned before anything is written, so one bad edit at the
+	// end refuses the call rather than leaving the first half of it applied.
+	// That is what the old size limit got right, and it is kept.
+	planned, err := editOps(s, tabID, edits)
 	if err != nil {
 		return Document{}, err
 	}
-	if err := s.apply(batch); err != nil {
-		return Document{}, err
+
+	// Then written a batch at a time. Each one is durable before the next
+	// starts, which is the property the fsync is there for.
+	//
+	// A failure part way through leaves the batches before it applied. That is
+	// a real change from refusing the whole call, and it is the better of the
+	// two: these ops are already validated, so the ways left to fail are the
+	// disk and the queue -- and on a full disk, keeping the first two hundred
+	// edits somebody made is worth more than discarding them to be tidy. The
+	// error says what happened; the document that comes back is what is true.
+	for start := 0; start < len(planned); start += editBatch {
+		end := min(start+editBatch, len(planned))
+		if err := s.apply(planned[start:end]); err != nil {
+			return Document{}, fmt.Errorf("workbench: applying edits %d-%d of %d: %w",
+				start, end, len(planned), err)
+		}
 	}
 
 	// Tasks may have appeared or been retired, so the board is reconciled

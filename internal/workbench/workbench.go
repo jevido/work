@@ -603,6 +603,15 @@ func (w *Workbench) executeRouted(ctx context.Context, r *run, lead agents.Agent
 // than prose. Its text is deliberately not streamed to the console: the parsed
 // plan is emitted instead, which is the part worth reading.
 func (w *Workbench) plan(ctx context.Context, r *run, lead agents.Agent) (Plan, error) {
+	// Nobody to route to, so there is nothing to decide. This is the default
+	// team -- a coordinator and an adviser, and an adviser is never given a
+	// step -- so it is the ordinary case rather than a broken one, and paying
+	// for a Claude turn to be told "self" would be paying for an answer that
+	// was already known.
+	if len(specialistIDs(w.registry)) == 0 {
+		return Plan{Mode: ModeSelf, Reason: "There is nobody to delegate to, so this is mine."}, nil
+	}
+
 	schema, err := planSchema(w.registry)
 	if err != nil {
 		return Plan{}, err
@@ -931,6 +940,14 @@ func (w *Workbench) streamStep(
 		PermissionMode:     w.permissionFor(agent),
 		Resume:             resume,
 	}
+	if agent.Advisory {
+		// The tools, as well as the permission mode. Two different failures:
+		// a permission mode is a thing the CLI enforces and could change the
+		// meaning of between releases, and a tool list is a thing that is
+		// simply not there. An adviser asked to edit a file should find no
+		// tool for it rather than find one and be refused.
+		request.AllowedTools = agents.ReadOnlyTools
+	}
 	if p := r.proposal; p != nil {
 		// One tool, and it is the one that cannot touch anything: a run asked
 		// to reorganise a branch has no business opening the repository, and
@@ -1124,6 +1141,22 @@ func (w *Workbench) UsePermissionMode(mode claude.PermissionMode) {
 // narrower than the workbench; nothing on disk sets it yet, which is why the
 // toggle is the answer for everybody in practice.
 func (w *Workbench) permissionFor(a agents.Agent) string {
+	// An adviser runs at acceptEdits with nothing to edit, whatever the window
+	// is set to. What keeps him from changing anything is the tool list --
+	// streamStep hands him ReadOnlyTools, or the one propose tool on a board
+	// run -- and that is a tool that is not there rather than a tool that is
+	// refused.
+	//
+	// This used to be PermissionRead, and PermissionRead is the CLI's plan
+	// mode: not "the write tools are off" but a whole workflow, in which the
+	// model is expected to produce a plan, write it to ~/.claude/plans and
+	// call ExitPlanMode for approval. ExitPlanMode is not in an adviser's tool
+	// list, so a conversation about a board ended with a plan file on disk and
+	// a request to turn plan mode off -- from the one agent whose entire job
+	// is to write onto the board instead.
+	if a.Advisory {
+		return string(claude.PermissionEdit)
+	}
 	if a.PermissionMode != "" {
 		return a.PermissionMode
 	}
@@ -1240,7 +1273,8 @@ func (w *Workbench) loadAgents(root string) ([]AgentStatus, error) {
 
 // systemPrompt is what an agent is told about themselves for one turn: Work's
 // own definition of the role, the PERSONALITY.md in their folder as it reads
-// right now, and -- for the coordinator -- who else works here.
+// right now, the skills in that folder, and -- for the coordinator -- who else
+// works here.
 //
 // The file is read here rather than held in the registry so that editing it in
 // an editor takes effect on the very next task. A file that cannot be read is
@@ -1252,12 +1286,20 @@ func (w *Workbench) loadAgents(root string) ([]AgentStatus, error) {
 // carry it, so a question about the team asked anywhere else was answered from
 // nothing at all.
 func (w *Workbench) systemPrompt(a agents.Agent) string {
-	parts := make([]string, 0, 3)
+	parts := make([]string, 0, 4)
 	if a.SystemPrompt != "" {
 		parts = append(parts, a.SystemPrompt)
 	}
 	if personality, err := agents.ReadPersonality(a.Dir); err == nil && personality != "" {
 		parts = append(parts, personality)
+	}
+	// The skills folder, which until now was read for the profile panel and
+	// nowhere else -- a skill you could write, see listed, and watch do
+	// nothing. After the personality, because a skill is what somebody knows
+	// how to do and the personality is how they do it; the second should not be
+	// read through the first.
+	if block := skillsBlock(a.Dir); block != "" {
+		parts = append(parts, block)
 	}
 	// The coordinator, and anyone who leads a conversation. Both are asked
 	// "who works here" -- the coordinator because he routes, a mode owner
@@ -1267,6 +1309,26 @@ func (w *Workbench) systemPrompt(a agents.Agent) string {
 		parts = append(parts, rosterBlock(w.registry))
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+// skillsBlock is an agent's skills/ folder, headed so the model can tell where
+// one ends and the next begins.
+//
+// Verbatim, with no summarising: a skill is instructions somebody wrote for
+// this agent, and the one thing worse than not sending it is sending a version
+// of it. Bounded by agents.MaxSkillsBytes, which is checked between skills so
+// the cut never falls inside one.
+func skillsBlock(dir string) string {
+	skills := agents.ReadSkillTexts(dir)
+	if len(skills) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("What you know how to do. Each of these is a skill written for you; follow it when the work is the work it describes.")
+	for _, skill := range skills {
+		fmt.Fprintf(&b, "\n\n--- skill: %s ---\n%s", skill.Name, skill.Body)
+	}
+	return b.String()
 }
 
 // Conversation names one transcript: a tab, and a mode within it.

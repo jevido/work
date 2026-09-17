@@ -56,7 +56,8 @@
    * button that gets you one mints a new one. The old ones keep working.
    */
   $effect(() => {
-    if (purpose === "keys") void workspaces.loadKeys();
+    if (purpose !== "keys") return;
+    void workspaces.loadKeys();
   });
 
   const keys = $derived(workspaces.keys);
@@ -206,8 +207,8 @@
       <p class="note">
         Anyone with this can read the map and the plan in a browser, and change nothing.
         {#if !keys?.readKey}
-          This machine has no read key — it joined with a write key, and the server keeps
-          only hashes, so there is no old one to show. Make one.
+          This machine has no read key yet and could not reach the server to get one.
+          It will fill in the next time this panel opens with a connection.
         {/if}
       </p>
       <div class="row">
@@ -219,8 +220,21 @@
         >
           {copied === "read" ? "Copied" : "Copy"}
         </button>
-        <button type="button" class="ghost" disabled={workspaces.busy} onclick={() => workspaces.mint("read")}>
-          {keys?.readKey ? "Make a fresh one" : "Make a read key"}
+        <!--
+          A second read key, not a replacement, and the label says so. This
+          used to read "Make a fresh one", which on a panel that also had an
+          empty field made it look as though looking at your keys issued a new
+          one every time. It does not: the field above is filled in once and
+          stays, and this is here for somebody who wants a separate link to
+          hand out.
+        -->
+        <button
+          type="button"
+          class="ghost"
+          disabled={workspaces.busy}
+          onclick={() => workspaces.mint("read")}
+        >
+          Make another read key
         </button>
       </div>
 
@@ -366,6 +380,12 @@
       </footer>
     {/if}
   </form>
+
+  <!--
+    Inside the dialog element rather than beside it: this one is modal, and a
+    panel rendered outside it would be painted under its backdrop. The top
+    layer covers everything in here.
+  -->
 </dialog>
 
 <style>

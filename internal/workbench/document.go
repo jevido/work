@@ -415,3 +415,20 @@ func cardsFromDocument(doc Document, tab string) []board.Card {
 	}
 	return out
 }
+
+// fieldBool reads a boolean field, treating anything that is not one as false.
+//
+// The same shape as fieldString and for the same reason: a field written by a
+// newer release, or by a client that put a string where a boolean belongs, is
+// a field this one does not act on rather than one it guesses about.
+func fieldBool(node ops.Node, name string) bool {
+	raw, ok := node.Fields[name]
+	if !ok {
+		return false
+	}
+	var b bool
+	if err := json.Unmarshal(raw, &b); err != nil {
+		return false
+	}
+	return b
+}

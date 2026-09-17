@@ -19,6 +19,7 @@
   import SyncBadge from "./components/SyncBadge.svelte";
   import UpdateDialog from "./components/UpdateDialog.svelte";
   import WorkspaceDialog, { type Purpose } from "./components/WorkspaceDialog.svelte";
+  import FolderField from "./components/FolderField.svelte";
   import WorkspaceTabs from "./components/WorkspaceTabs.svelte";
   import { Roster } from "./lib/agents/roster.svelte";
   import { TaskBoard } from "./lib/board/board.svelte";
@@ -27,7 +28,7 @@
   import { Config } from "./lib/config/config.svelte";
   import { Permissions } from "./lib/permissions/permissions.svelte";
   import { AppUpdate } from "./lib/update/update.svelte";
-  import { MODES, MODE_HINTS, labelOf } from "./lib/workspace/model";
+  import { MODES, labelOf } from "./lib/workspace/model";
   import { Review } from "./lib/workspace/review.svelte";
   import { Workspaces } from "./lib/workspace/workspaces.svelte";
 
@@ -322,13 +323,6 @@
   // rather than being handed a copy of it at startup.
   $effect(() => conversations.setAgents(roster.identities));
 
-  /** The last two segments of a path, which is as much as a strip has room for. */
-  function tail(path: string): string {
-    const parts = path.split(/[\\/]/).filter(Boolean);
-    if (parts.length <= 2) return path;
-    return `…/${parts.slice(-2).join("/")}`;
-  }
-
   function openDialog(purpose: Purpose, from?: EventTarget | null) {
     dialogOpener = from instanceof HTMLElement ? from : (document.activeElement as HTMLElement);
     workspaces.error = null;
@@ -438,7 +432,8 @@
               <ModeToggle bind:mode={active.mode} group={active.id} />
             {/key}
             <!--
-              Which folder all of this is about.
+              Which folder all of this is about, and the way to point it
+              somewhere else.
 
               The outline, the plan and the office are three views of one
               project, and until now nothing on screen said which project. What
@@ -446,15 +441,30 @@
               title on every option -- and it was the same three sentences on
               every launch, which is a thing you read once.
 
-              The tail rather than the whole path: the interesting end of a
-              project folder is the last segment or two, and a long absolute
-              path pushes the sync badge off the strip. The whole of it is on
-              the title, for when the tail is ambiguous.
+              Always the field, bound or not: a tab with no folder is exactly
+              the tab somebody most wants to give one, and an empty field that
+              says so is a better answer than a hint about what Idea mode is.
             -->
-            {#if active.dir}
-              <p class="where" title={active.dir}>{tail(active.dir)}</p>
-            {:else}
-              <p class="what">{MODE_HINTS[active.mode]}</p>
+            <FolderField {workspaces} id={active.id} dir={active.dir} />
+            <!--
+              Everyone else's work, now rather than within three seconds.
+
+              Next to the badge and not part of it: the badge is a readout, and
+              one control that both reports where sync stands and offers to
+              change it is what its own comment argues against. Only on a
+              workspace with a server -- there is nothing to fetch for one that
+              lives on this machine, and a button whose whole effect is nothing
+              is worse than no button.
+            -->
+            {#if workspaces.cloud}
+              <button
+                class="refresh"
+                onclick={() => workspaces.refresh()}
+                disabled={workspaces.state === "syncing"}
+                title="Fetch what everybody else has changed"
+              >
+                {workspaces.state === "syncing" ? "Refreshing…" : "Refresh"}
+              </button>
             {/if}
             <SyncBadge {workspaces} onfix={(purpose) => openDialog(purpose)} />
           </div>
@@ -644,7 +654,7 @@
         >
           {#snippet controls()}
             <PermissionMenu {permissions} />
-            <SettingsMenu {config} review={proposals} {workspaces} />
+            <SettingsMenu {config} review={proposals} {workspaces} {update} />
           {/snippet}
           {#snippet applied()}
             <ProposalApplied review={proposals} workspace={active} />
@@ -752,23 +762,29 @@
     background: var(--panel);
   }
 
-  .what {
-    margin: 0;
-    margin-right: auto;
+
+
+  /* The same quiet button the folder field's Browse is, and next to it in the
+     same strip. */
+  .refresh {
+    flex: none;
+    padding: 2px 8px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--panel);
     color: var(--muted);
+    font: inherit;
     font-size: 11px;
+    cursor: pointer;
   }
 
-  /* Monospace, because it is a path: the eye reads a path by its separators,
-     and a proportional font moves them around under the same folder names. */
-  .where {
-    margin: 0 auto 0 0;
-    overflow: hidden;
-    color: var(--muted);
-    font-family: ui-monospace, monospace;
-    font-size: 11px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+  .refresh:hover:not(:disabled) {
+    color: var(--text);
+  }
+
+  .refresh:disabled {
+    cursor: default;
+    opacity: 0.6;
   }
 
   /*

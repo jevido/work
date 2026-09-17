@@ -127,46 +127,70 @@ func (w *Workbench) CreateLocalWorkspace(name string) (*WorkspaceView, error) {
 	if err != nil {
 		return nil, err
 	}
-	tabID, err := mintID()
+	tab, err := w.firstTab(name)
 	if err != nil {
 		return nil, err
 	}
+	tabID := tab.ID
 
 	ws := &config.Workspace{
-		ID:    "local_" + id,
-		Name:  name,
-		Actor: actor,
-		Tabs: []config.Tab{{
-			ID:   tabID,
-			Name: name,
-			// The folder Work was started in, which is the one the app has
-			// always run agents in with no workspace at all. Binding it here
-			// rather than asking keeps setup to the one question it already
-			// asks; the tab can be pointed somewhere else at any time.
-			Dir: w.baseDir,
-		}},
-		ActiveTab: tabID,
+		ID:        "local_" + id,
+		Name:      name,
+		Actor:     actor,
+		Tabs:      []config.Tab{tab},
+		ActiveTab: tab.ID,
 	}
 	if err := w.adopt(ws, true); err != nil {
 		return nil, err
 	}
 
-	// The tab goes into the document too, so that a workspace later shared
-	// with a server carries it rather than arriving empty. adopt has already
-	// installed the Sync, so this is the same path NewTab takes.
-	if s := w.sync.Load(); s != nil {
-		if batch, err := tabOps(s, tabID, name, false); err == nil {
-			// A tab that fails to reach the document is not worth failing the
-			// whole workspace for: it is in the config, it is on screen, and
-			// it works. The local document is rebuilt from the journal, so
-			// the cost of losing this is a tab missing from a share that has
-			// not happened yet.
-			_ = s.apply(batch)
-		}
-	}
-
+	w.writeFirstTab(tabID, name)
 	w.publishWorkspace()
 	return w.Workspace(), nil
+}
+
+// firstTab is the tab a newly made workspace opens with.
+//
+// Every workspace gets one, however it was made. A workspace with no tabs is
+// joined, syncing and completely blank: there is nowhere to type, nothing
+// across the top, and the window is the one it shows when nothing is joined at
+// all -- so "created" and "not created" look identical. CreateWorkspace used
+// to do exactly that, and the only reason it was not noticed sooner is that
+// the local path, which setup uses, had this and the shared one did not.
+//
+// Bound to the folder Work was started in, which is the folder the app has
+// always run agents in with no workspace at all. That keeps making a workspace
+// to one question. A colleague who joins later gets this tab from the document
+// unbound, and binds it to their own checkout, which is right: a tab's folder
+// is one person's and is never sent anywhere.
+func (w *Workbench) firstTab(name string) (config.Tab, error) {
+	id, err := mintID()
+	if err != nil {
+		return config.Tab{}, err
+	}
+	return config.Tab{ID: id, Name: name, Dir: w.baseDir}, nil
+}
+
+// writeFirstTab puts a newly made workspace's tab into its document.
+//
+// Separate from the config entry above because they fail differently. The
+// config entry is the tab: without it there is no tab. This is the copy that
+// travels, so that a workspace shared with a server carries its tab rather
+// than arriving empty -- and a failure here is worth swallowing, because the
+// tab is in the config, it is on screen, and it works. The document is rebuilt
+// from the journal, so what is lost is a tab missing from a share that has not
+// happened yet.
+//
+// adopt has already installed the Sync by the time this is called, so it is
+// the same path NewTab takes.
+func (w *Workbench) writeFirstTab(id, name string) {
+	s := w.sync.Load()
+	if s == nil {
+		return
+	}
+	if batch, err := tabOps(s, id, name, false); err == nil {
+		_ = s.apply(batch)
+	}
 }
 
 // CreateWorkspace makes a workspace on a server and joins it.
@@ -207,6 +231,14 @@ func (w *Workbench) CreateWorkspace(ctx context.Context, serverURL, signupToken,
 	if err != nil {
 		return nil, err
 	}
+	// The same first tab a local workspace gets. Without it a freshly created
+	// workspace is joined and blank -- no tabs across the top, and the window
+	// showing the state it shows when nothing is joined -- which reads as the
+	// create having failed.
+	tab, err := w.firstTab(cmp.Or(created.Workspace.Name, name))
+	if err != nil {
+		return nil, err
+	}
 	ws := &config.Workspace{
 		ServerURL: serverURL,
 		ID:        created.Workspace.ID,
@@ -214,6 +246,8 @@ func (w *Workbench) CreateWorkspace(ctx context.Context, serverURL, signupToken,
 		WriteKey:  created.WriteKey,
 		ReadKey:   created.ReadKey,
 		Actor:     actor,
+		Tabs:      []config.Tab{tab},
+		ActiveTab: tab.ID,
 		// Held, and only for workspaces made from here on. Flipping the
 		// default for every existing one would mean an update landing and
 		// nothing reaching anybody's colleagues for a week, with one word in a
@@ -225,6 +259,8 @@ func (w *Workbench) CreateWorkspace(ctx context.Context, serverURL, signupToken,
 	if err := w.adopt(ws, true); err != nil {
 		return nil, err
 	}
+	w.writeFirstTab(tab.ID, tab.Name)
+	w.publishWorkspace()
 	return w.Workspace(), nil
 }
 
@@ -390,6 +426,50 @@ func (w *Workbench) Keys() (Keys, error) {
 		return Keys{}, errors.New("workbench: no workspace joined")
 	}
 	return Keys{WriteKey: w.ws.WriteKey, ReadKey: w.ws.ReadKey}, nil
+}
+
+// EnsureKeys returns the workspace's keys, minting the read key if this
+// machine has not got one.
+//
+// What "show me the keys" should have meant all along. A machine that joined
+// with a write key has no read key -- the server keeps only hashes, so there
+// is no old one to show -- and the panel used to say so and offer a button.
+// That reads as though looking at the keys is a thing that changes them, and
+// the button said "make a fresh one" even when one already existed, which
+// reads as though every look issues a new key.
+//
+// It does not. Minting takes nothing away: every key already in use keeps
+// working, and a read key, once minted, is written to the config -- so this
+// mints at most once per machine and answers with the same pair forever after.
+//
+// A failure to mint is not an error here. The write key is the one this machine
+// syncs with and is worth showing on its own, and a panel that refuses to open
+// because the network is down would be worse than one that opens with a field
+// it cannot fill.
+func (w *Workbench) EnsureKeys(ctx context.Context) (Keys, error) {
+	keys, err := w.Keys()
+	if err != nil {
+		return Keys{}, err
+	}
+	if keys.ReadKey != "" || w.ops == nil {
+		return keys, nil
+	}
+
+	w.wsMu.Lock()
+	shared := w.ws != nil && w.ws.ServerURL != ""
+	w.wsMu.Unlock()
+	if !shared {
+		// A workspace that lives only on this machine has no server to ask and
+		// no keys to hand out. Not an error: it is most workspaces.
+		return keys, nil
+	}
+
+	read, err := w.MintKey(ctx, "read")
+	if err != nil {
+		return keys, nil
+	}
+	keys.ReadKey = read
+	return keys, nil
 }
 
 // MintKey asks the server for another key for the joined workspace.
@@ -861,7 +941,26 @@ func (w *Workbench) persist() error {
 	}
 	w.wsMu.Unlock()
 
-	return config.Update(func(c *config.Config) { c.Workspace = snapshot })
+	return config.Update(func(c *config.Config) {
+		c.Workspace = snapshot
+		// The keys, kept beyond the workspace they belong to.
+		//
+		// A key exists in exactly one place once the server has handed it out
+		// -- the server keeps hashes and cannot show it again -- so a machine
+		// that leaves a workspace and holds its key only in the entry it just
+		// overwrote has lost it. They are not secret: they are handed out on
+		// purpose, a few at a time, and this is the file that is already 0600
+		// for the one that is in use.
+		if snapshot != nil && snapshot.ServerURL != "" {
+			c.Remember(config.Known{
+				ID:        snapshot.ID,
+				Name:      snapshot.Name,
+				ServerURL: snapshot.ServerURL,
+				WriteKey:  snapshot.WriteKey,
+				ReadKey:   snapshot.ReadKey,
+			})
+		}
+	})
 }
 
 // publishWorkspace tells the frontend what the workspace looks like now.

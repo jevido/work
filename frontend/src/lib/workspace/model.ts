@@ -28,16 +28,53 @@ import { FIELD_EXTRACTED_FROM, FIELD_TASK_ID, type Node, type TreeNode } from ".
 export const FIELD_TYPE = "type";
 
 /**
- * The four kinds of node one document holds.
+ * The kinds of node one document holds.
  *
- * An edge and a region are nodes, not new op kinds: create-node and delete-node
+ * All of them are nodes rather than new op kinds: create-node and delete-node
  * already merge, queue offline and report a conflict, and a node with a type a
  * client does not recognise is a node it does not draw. See TypeEdge in Go.
+ *
+ * The last four are the board's two vocabularies and the two joins that attach
+ * them to cards. A join is a node for the same reason an edge is: a card can
+ * carry several guidelines and several interested parties, and a *set* cannot
+ * live in a field. A field is one last-write-wins slot, so two people adding
+ * two different guidelines to one card at the same moment would keep one and
+ * lose the other with nothing to show for it. A node each, and they do not
+ * collide at all.
+ *
+ * Guidelines and interested parties are kept as two vocabularies rather than
+ * one with a flavour field. They answer different questions -- "is this worth
+ * doing" and "who is waiting for it" -- and a single list would make the
+ * settings panel a list of two kinds of thing where each is short.
  */
 export const TYPE_IDEA = "idea";
 export const TYPE_TASK = "task";
 export const TYPE_EDGE = "edge";
 export const TYPE_REGION = "region";
+
+/**
+ * A thing this workspace is trying to be: "improves performance".
+ *
+ * Per workspace, because what counts as progress is not the same on two
+ * projects, and a built-in list would be a list somebody has to work around on
+ * the first project it does not fit.
+ */
+export const TYPE_GUIDELINE = "guideline";
+/** A card meets a guideline. `from` is the card, `to` is the guideline. */
+export const TYPE_GUIDED = "guided";
+
+/**
+ * Somebody who wants a card: a person, a team, a customer.
+ *
+ * Content, not attribution. This is a line of text somebody wrote on a card,
+ * exactly like every other line, and it records nothing about who wrote it --
+ * the op envelope carries a replica, not an author, and it gains no field for
+ * one here. A workspace where nobody can be named can still say out loud that
+ * Sales is waiting on something.
+ */
+export const TYPE_PARTY = "party";
+/** A party wants a card. `from` is the card, `to` is the party. */
+export const TYPE_INTEREST = "interest";
 
 /** The two ends of an edge, and the region a node is in. */
 export const FIELD_FROM = "from";
@@ -46,6 +83,44 @@ export const FIELD_REGION = "region";
 export const FIELD_TEXT = "text";
 export const FIELD_COLLAPSED = "collapsed";
 export const FIELD_STATUS = "status";
+
+/**
+ * The glyph on a cluster head, by name -- see lib/mindmap/icons.ts.
+ *
+ * A name, not a character. The names are a closed set this build knows how to
+ * draw, so a value from a newer release is a glyph this one leaves off rather
+ * than a box with a question mark in it, and the line itself is untouched
+ * either way. Last-write-wins is the right merge: it is one person's choice
+ * about one line, not a set two people add to.
+ */
+export const FIELD_ICON = "icon";
+
+/**
+ * What a card says when there is room to say it.
+ *
+ * The board draws `text` and nothing else -- a note is read at a glance, and a
+ * paragraph in a box is a paragraph nobody reads. This is the rest of it, shown
+ * when a card is opened. Newlines survive here, which they deliberately do not
+ * in `text`: a line is a line, and this is where a paragraph goes.
+ */
+export const FIELD_DETAIL = "detail";
+
+/**
+ * Where somebody put a card, if they put it anywhere.
+ *
+ * The board's layout is a function of the tree and produces a readable
+ * arrangement of a document nobody has touched. These two are the exception
+ * and they are the whole of dragging: a card that has been moved by hand stays
+ * where the hand left it, and every card that has not is still placed by the
+ * layout around it.
+ *
+ * Map space, which is the space the layout works in: the same units the
+ * computed positions are in, so the two can sit side by side on one board.
+ * Both or neither -- a card with one of them is treated as unplaced, because
+ * half a coordinate is not a place.
+ */
+export const FIELD_X = "x";
+export const FIELD_Y = "y";
 
 export { FIELD_EXTRACTED_FROM, FIELD_TASK_ID };
 
@@ -93,6 +168,26 @@ export function isTask(node: Node): boolean {
 
 export function isCollapsed(node: Node): boolean {
   return node.fields[FIELD_COLLAPSED] === true;
+}
+
+/**
+ * Where a card was put by hand, or null for one the layout still places.
+ *
+ * Non-finite numbers read as absent: a NaN that reached a field would put a
+ * card nowhere at all, and nowhere is off the map with no way back to it.
+ */
+export function placedAt(node: Node): { x: number; y: number } | null {
+  const x = node.fields[FIELD_X];
+  const y = node.fields[FIELD_Y];
+  if (typeof x !== "number" || typeof y !== "number") return null;
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  return { x, y };
+}
+
+/** The icon name on a line, or "" for none. */
+export function iconOf(node: Node): string {
+  const value = node.fields[FIELD_ICON];
+  return typeof value === "string" ? value : "";
 }
 
 export function statusOf(node: Node): TaskState {
@@ -246,4 +341,28 @@ export function isEdge(node: Node): boolean {
 /** Whether a node is a named set of nodes. */
 export function isRegion(node: Node): boolean {
   return node.fields[FIELD_TYPE] === TYPE_REGION;
+}
+
+export function isGuideline(node: Node): boolean {
+  return node.fields[FIELD_TYPE] === TYPE_GUIDELINE;
+}
+
+export function isParty(node: Node): boolean {
+  return node.fields[FIELD_TYPE] === TYPE_PARTY;
+}
+
+/** Whether a node joins a card to a guideline. */
+export function isGuided(node: Node): boolean {
+  return node.fields[FIELD_TYPE] === TYPE_GUIDED;
+}
+
+/** Whether a node joins a card to an interested party. */
+export function isInterest(node: Node): boolean {
+  return node.fields[FIELD_TYPE] === TYPE_INTEREST;
+}
+
+/** What a card says at length, or "" when it says nothing more than its title. */
+export function detailOf(node: Node | null | undefined): string {
+  const value = node?.fields[FIELD_DETAIL];
+  return typeof value === "string" ? value : "";
 }

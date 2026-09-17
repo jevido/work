@@ -204,18 +204,130 @@ func TestExecuteRoutedWithNoSpecialists(t *testing.T) {
 // And the roster setup does produce can route, which is a different property:
 // the routing schema enumerates the non-coordinators, and until Jared existed
 // a fresh root had none of them.
-func TestAFreshRootCanRoute(t *testing.T) {
+func TestAFreshRootHasNobodyToDelegateTo(t *testing.T) {
 	w := newTestWorkbench(t)
 	if _, err := w.UseConfigRoot(t.TempDir()); err != nil {
 		t.Fatalf("UseConfigRoot: %v", err)
 	}
 
-	if _, err := planSchema(w.registry); err != nil {
-		t.Fatalf("planSchema on a fresh root: %v", err)
+	// The default team is a coordinator and an adviser, and an adviser is
+	// never given a step -- so there is nobody to route to, and that is an
+	// ordinary state of the app rather than a broken one. This used to assert
+	// the opposite, back when Jared was a specialist Anton could hand work to.
+	if got := specialistIDs(w.registry); len(got) != 0 {
+		t.Errorf("specialistIDs = %v, want none", got)
 	}
-	if got := specialistIDs(w.registry); len(got) != 1 || got[0] != "jared" {
-		t.Errorf("specialistIDs = %v, want [jared]", got)
+	if _, err := planSchema(w.registry); err == nil {
+		t.Error("planSchema built a schema with an empty enum of agent ids")
 	}
+
+	// And the run does not fail on it: the routing turn is skipped and the
+	// task is the coordinator's. A team of two that could not answer anything
+	// would be a fresh install that does not work.
+	plan, err := w.plan(t.Context(), &run{}, mustAgent(t, w, "anton"))
+	if err != nil {
+		t.Fatalf("plan with nobody to delegate to: %v", err)
+	}
+	if plan.Mode != ModeSelf || len(plan.Steps) != 0 {
+		t.Errorf("plan = %+v, want self with no steps", plan)
+	}
+}
+
+// An adviser is not reachable by any of the four ways a run gets to an agent.
+// See agents.Agent.Advisory, which lists them; this is the test for all four.
+func TestAnAdviserIsNeverGivenWork(t *testing.T) {
+	w := newTestWorkbench(t)
+	if _, err := w.UseConfigRoot(t.TempDir()); err != nil {
+		t.Fatalf("UseConfigRoot: %v", err)
+	}
+	jared := mustAgent(t, w, "jared")
+	if !jared.Advisory {
+		t.Fatal("jared is not marked advisory, so none of the rest of this means anything")
+	}
+
+	t.Run("a routing turn cannot name him", func(t *testing.T) {
+		for _, id := range specialistIDs(w.registry) {
+			if id == "jared" {
+				t.Error("jared is in the enum a routing turn chooses from")
+			}
+		}
+	})
+
+	t.Run("a plan naming him anyway loses the step", func(t *testing.T) {
+		plan := Plan{
+			Mode: ModeTeam,
+			Steps: []PlanStep{
+				{AgentID: "jared", Task: "implement the renderer", Files: []string{"a.go"}},
+			},
+		}
+		plan.normalise(w.registry, func(string) bool { return true })
+		if len(plan.Steps) != 0 {
+			t.Errorf("steps = %+v, want the advisory step dropped", plan.Steps)
+		}
+		// Nothing left to do, so the task is the coordinator's rather than a
+		// team run with an empty team.
+		if plan.Mode != ModeSelf {
+			t.Errorf("mode = %q, want %q", plan.Mode, ModeSelf)
+		}
+	})
+
+	t.Run("a board update cannot hand him a card", func(t *testing.T) {
+		plan := Plan{
+			Updates: []BoardUpdate{{TaskID: "T1", AgentID: "jared", Title: "still worth applying"}},
+		}
+		plan.normalise(w.registry, func(string) bool { return true })
+		if len(plan.Updates) != 1 {
+			t.Fatalf("updates = %+v, want the update kept", plan.Updates)
+		}
+		if plan.Updates[0].AgentID != "" {
+			t.Errorf("agentId = %q, want it cleared", plan.Updates[0].AgentID)
+		}
+		if plan.Updates[0].Title == "" {
+			t.Error("the title went with it; only the assignment should have been cleared")
+		}
+	})
+
+	// Pinned rather than read-only: the tool list is what stops him changing
+	// anything, and PermissionRead is the CLI's plan mode -- a workflow that
+	// ends in a plan file and a request to approve it, which is not what a
+	// conversation about a board is for.
+	t.Run("his turns run in one mode whatever the window says", func(t *testing.T) {
+		for _, mode := range []claude.PermissionMode{
+			claude.PermissionRead, claude.PermissionEdit, claude.PermissionAll,
+		} {
+			if _, err := w.SetPermissionMode(string(mode)); err != nil {
+				t.Fatalf("SetPermissionMode(%q): %v", mode, err)
+			}
+			if got := w.permissionFor(jared); got != string(claude.PermissionEdit) {
+				t.Errorf("permissionFor with the window on %q = %q, want %q",
+					mode, got, claude.PermissionEdit)
+			}
+			// The guardrail is his, not everybody's: a specialist still gets
+			// the mode the user chose.
+			if got := w.permissionFor(mustAgent(t, w, "anton")); got != string(mode) {
+				t.Errorf("permissionFor(anton) with the window on %q = %q", mode, got)
+			}
+		}
+	})
+
+	t.Run("he is listed for the coordinator, and marked", func(t *testing.T) {
+		got := rosterBlock(w.registry)
+		if !strings.Contains(got, "jared") {
+			t.Error("the roster leaves him out, so Anton would deny he exists")
+		}
+		if !strings.Contains(got, "never takes a step") {
+			t.Errorf("the roster does not say he takes no work:\n%s", got)
+		}
+	})
+}
+
+func mustAgent(t *testing.T, w *Workbench, id string) agents.Agent {
+	t.Helper()
+	a, ok := w.registry.Get(id)
+	if !ok {
+		t.Fatalf("no agent %q", id)
+	}
+	return a
 }
 
 // Idea and planning are led by the agent who owns them; work is the

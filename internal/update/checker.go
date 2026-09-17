@@ -186,6 +186,75 @@ func (c *Checker) Check(ctx context.Context) error {
 	return nil
 }
 
+// Found is what one check saw, for a caller that asked rather than waited.
+//
+// The background poll says nothing when there is nothing to say -- silence is
+// the right answer to "no new release" six hours after the last one. Somebody
+// who pressed a button is owed a sentence either way, so this reports the
+// version it saw and whether it beats the running one, and the caller decides
+// what to put on screen.
+type Found struct {
+	// Version is the newest release's tag, empty when nothing was asked
+	// because this is a development build.
+	Version string `json:"version"`
+	// ReleaseURL is that release's page, for "see what changed".
+	ReleaseURL string `json:"releaseUrl"`
+	// Newer says whether Version beats the running one, which is the only
+	// question the button was really asking.
+	Newer bool `json:"newer"`
+	// Current is the running version, so the answer can name both.
+	Current string `json:"current"`
+	// Dev marks a build that was never stamped by the release workflow.
+	// Nothing was asked of GitHub: a local build is usually ahead of the
+	// newest release, and offering to "update" it to something older is
+	// worse than saying so.
+	Dev bool `json:"dev"`
+}
+
+// CheckNow asks GitHub once and answers, whatever it finds.
+//
+// Check is the poll's: it emits on newer and returns nothing, at most once per
+// version per run. This is the button's, and the difference is who is waiting.
+// It re-answers as often as it is pressed -- somebody pressing it twice has a
+// reason, usually that the first answer was a network error -- and it says
+// "you are on the newest" out loud, which the poll never needs to.
+//
+// It emits update:available as well when the release is newer, so the popup
+// that would have appeared on its own appears now instead.
+func (c *Checker) CheckNow(ctx context.Context) (Found, error) {
+	current := c.version
+	if IsDevBuild(current) {
+		return Found{Current: current, Dev: true}, nil
+	}
+
+	rel, err := c.latestRelease(ctx)
+	if err != nil {
+		return Found{Current: current}, err
+	}
+	found := Found{
+		Version:    rel.TagName,
+		ReleaseURL: rel.HTMLURL,
+		Current:    current,
+		Newer:      !rel.Draft && !rel.Prerelease && IsNewer(rel.TagName, current),
+	}
+	if !found.Newer {
+		return found, nil
+	}
+
+	// Remembered the same way the poll remembers it, so a check that has just
+	// put the popup up does not have the poll put a second one up behind it.
+	c.mu.Lock()
+	c.emitted = rel.TagName
+	c.mu.Unlock()
+	if c.emit != nil {
+		c.emit(EventUpdateAvailable, AvailableEvent{
+			Version:    found.Version,
+			ReleaseURL: found.ReleaseURL,
+		})
+	}
+	return found, nil
+}
+
 // latestRelease returns the newest release, from cache when GitHub says the
 // cache is still good.
 func (c *Checker) latestRelease(ctx context.Context) (*Release, error) {

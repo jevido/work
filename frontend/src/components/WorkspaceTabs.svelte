@@ -204,16 +204,16 @@
          workspace on a server when you wanted a tab is the same click with two
          meanings. -->
     <button onclick={onnew}>{workspaces.joined ? "New tab" : "New workspace"}</button>
-    <!-- The way onto a server, kept on screen rather than behind having left
-         the workspace you are in. A workspace that lives on this machine is
-         the ordinary starting state now, so "how do I share this" is the
-         ordinary next question, and it used to have no answer anywhere. Hidden
-         when there is no transport to use, or when this workspace is already
-         on a server. -->
-    {#if workspaces.available && !workspaces.cloud}
-      <button onclick={oncreate}>On a server…</button>
-      <button onclick={onjoin}>Join</button>
-    {:else if workspaces.cloud}
+    <!-- The way onto a server, always on screen. A workspace that lives on
+         this machine is the ordinary starting state now, so "how do I share
+         this" is the ordinary next question, and it used to have no answer
+         anywhere. Nothing hides these: the default server is always there to
+         offer, a machine already on one can still make another workspace, and
+         a server that cannot be reached says so in the dialog -- which is a
+         better place to find that out than a button that was never drawn. -->
+    <button onclick={oncreate}>On a server…</button>
+    <button onclick={onjoin}>Join</button>
+    {#if workspaces.cloud}
       <!-- The keys, from the strip as well as from the badge. Inviting somebody
            is a thing you do at the level of the workspace, which is what this
            bar is, and it is not a sync status. -->

@@ -3,12 +3,14 @@
   import * as Workbench from "../../bindings/dev.jevido/work/services/workbenchservice.js";
   import type { Config } from "../lib/config/config.svelte";
   import type { Workspaces } from "../lib/workspace/workspaces.svelte";
+  import type { AppUpdate } from "../lib/update/update.svelte";
 
   let {
     config,
     review,
     workspaces,
-  }: { config: Config; review: Review; workspaces: Workspaces } = $props();
+    update,
+  }: { config: Config; review: Review; workspaces: Workspaces; update: AppUpdate } = $props();
 
   /**
    * Whether this workspace waits to be told before sending.
@@ -169,6 +171,21 @@
         <p class="hint err" role="alert">{config.error}</p>
       {:else if config.note}
         <p class="hint" role="status">{config.note}</p>
+      {/if}
+
+      <!-- Asking on purpose, as opposed to being told.
+
+           Work checks by itself every six hours and says nothing when there is
+           nothing to say, which is right for a poll and no use at all to
+           somebody who has just read that a release exists and wants to know
+           whether this window has it. The answer is a line under the button,
+           because three of the four outcomes -- up to date, a development
+           build, a network that would not answer -- do not deserve a popup. -->
+      <button role="menuitem" onclick={() => update.check()} disabled={update.checking}>
+        {update.checking ? "Checking…" : "Check for updates"}
+      </button>
+      {#if update.checked}
+        <p class="hint" role="status">{update.checked}</p>
       {/if}
     </div>
   {/if}

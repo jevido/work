@@ -8,6 +8,7 @@ package agents
 // and this is what it reads.
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -141,4 +142,94 @@ func personalityBody(text string) string {
 		return ""
 	}
 	return strings.TrimSpace(after)
+}
+
+// MaxSkillBytes bounds one skill, and MaxSkillsBytes the lot of them.
+//
+// Both, because they fail differently. One runaway file is a mistake in one
+// skill; twenty reasonable ones is a folder that grew a skill at a time until
+// every task an agent runs carries a small book. The caps are of the same order
+// as MaxPersonalityBytes and for the same reason: this text is paid for on
+// every single dispatch.
+const (
+	MaxSkillBytes  = 16 << 10
+	MaxSkillsBytes = 48 << 10
+)
+
+// SkillFileName is the document inside a skill folder, following the layout
+// Claude Code uses -- which is also what a symlink into a shared skills folder
+// lands on.
+const SkillFileName = "SKILL.md"
+
+// Skill is one thing an agent knows how to do, as the text of it.
+type Skill struct {
+	// Name is the folder or file it came from, minus any extension.
+	Name string
+	// Body is the document, trimmed and truncated to MaxSkillBytes.
+	Body string
+}
+
+// ReadSkillTexts reads the skills in an agent's folder, in the order ReadSkills
+// lists them.
+//
+// This is the half that was missing. skills/ has been read for the profile
+// panel since it existed, and store.go said so out loud: "nothing puts them in
+// front of Claude yet". So a skill was a thing you could write, see listed, and
+// watch have no effect whatsoever -- which is worse than not having the folder,
+// because it looks like it works.
+//
+// Read on every dispatch, like the personality file, so editing a skill changes
+// the next task rather than the next restart. A skill with an empty body is
+// dropped: a folder somebody made and has not written yet should cost nothing.
+func ReadSkillTexts(dir string) []Skill {
+	names := ReadSkills(dir)
+	if len(names) == 0 {
+		return nil
+	}
+
+	skillsDir := filepath.Join(dir, SkillsDirName)
+	out := make([]Skill, 0, len(names))
+	total := 0
+	for _, name := range names {
+		body, ok := readSkill(skillsDir, name)
+		if !ok || body == "" {
+			continue
+		}
+		// The budget is checked before appending rather than after, so the cut
+		// falls between skills instead of in the middle of one. Half a skill is
+		// instructions that stop mid-sentence, which is worse than one skill
+		// fewer.
+		if total+len(body) > MaxSkillsBytes {
+			break
+		}
+		total += len(body)
+		out = append(out, Skill{Name: name, Body: body})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// readSkill reads one entry, whichever of the two shapes it is.
+func readSkill(skillsDir, name string) (string, bool) {
+	// The folder form first, because ReadSkills strips the extension off the
+	// file form -- so "the-board" may be either the folder or the-board.md, and
+	// only one of the two stats will succeed.
+	for _, candidate := range []string{
+		filepath.Join(skillsDir, name, SkillFileName),
+		filepath.Join(skillsDir, name+".md"),
+	} {
+		f, err := os.Open(candidate)
+		if err != nil {
+			continue
+		}
+		data, err := io.ReadAll(io.LimitReader(f, MaxSkillBytes))
+		f.Close()
+		if err != nil {
+			continue
+		}
+		return strings.TrimSpace(string(data)), true
+	}
+	return "", false
 }

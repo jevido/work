@@ -20,21 +20,76 @@ export interface TierPaint {
   text: string;
 }
 
+/**
+ * A paper colour, as a head and as the notes hanging off it.
+ *
+ * Two shades of one hue rather than two hues: what the pale version says is
+ * "this belongs to that", and it can only say it if it is obviously the same
+ * colour with the life taken out of it.
+ */
+export interface ClusterPaint {
+  head: TierPaint;
+  leaf: TierPaint;
+}
+
 export interface Palette {
   tiers: TierPaint[];
+  /** The board itself, and the dots on it. */
+  board: string;
+  grid: string;
+  /** The strip across the corner of a cluster head. */
+  tape: string;
+  tapeEdge: string;
+  /** The one note in the middle, when the board found a subject to put there. */
+  subject: TierPaint;
+  /** The paper, one entry per cluster, taken in order and wrapped around. */
+  clusters: ClusterPaint[];
   branch: string;
   twig: string;
-  link: string;
-  dangling: string;
   region: string;
   regionEdge: string;
   focusEdge: string;
   focusFill: string;
   focusGlow: string;
-  dropFill: string;
   muted: string;
   count: string;
 }
+
+/**
+ * Six papers, in the order clusters take them.
+ *
+ * Muted rather than the pastels a paper board would use: these are notes lying
+ * on a dark surface, and a sticky note at full saturation on #101319 glows.
+ * The order is the one that keeps neighbours apart -- warm, cool, warm, cool --
+ * because clusters are laid out around a ring and two greens next to each other
+ * read as one cluster that happens to be split.
+ */
+const PAPERS: ClusterPaint[] = [
+  {
+    head: { fill: "#3a3016", edge: "#6b5a22", text: "#f0e2bd" },
+    leaf: { fill: "#25231a", edge: "#3e3a28", text: "#d8d2be" },
+  },
+  {
+    head: { fill: "#1b2b3e", edge: "#2f5378", text: "#cfe3f7" },
+    leaf: { fill: "#1a2029", edge: "#2a3646", text: "#cbd8e6" },
+  },
+  {
+    head: { fill: "#3a1f28", edge: "#6d3a49", text: "#f3d3dd" },
+    leaf: { fill: "#251c20", edge: "#3f2f36", text: "#e0cdd4" },
+  },
+  {
+    head: { fill: "#1e3328", edge: "#356047", text: "#cfeddd" },
+    leaf: { fill: "#1b241f", edge: "#2c3d33", text: "#c9dcd2" },
+  },
+  {
+    head: { fill: "#3a2620", edge: "#6b4636", text: "#f2d8cc" },
+    leaf: { fill: "#241e1b", edge: "#3c322c", text: "#e0d0c8" },
+  },
+  {
+    head: { fill: "#2c2540", edge: "#4f4377", text: "#ded5f5" },
+    leaf: { fill: "#201d29", edge: "#35304a", text: "#d4cee2" },
+  },
+];
 
 /** The dark values, which are the ones the design draws and the app ships. */
 export const DARK: Palette = {
@@ -44,16 +99,19 @@ export const DARK: Palette = {
     { fill: "#1e2430", edge: "#2e3542", text: "#e6e9ef" },
     { fill: "#171c26", edge: "#272d38", text: "#b9c0cd" },
   ],
+  board: "#101319",
+  grid: "rgba(148, 163, 184, 0.10)",
+  tape: "rgba(230, 233, 239, 0.13)",
+  tapeEdge: "rgba(230, 233, 239, 0.20)",
+  subject: { fill: "#1d2740", edge: "#3b5f96", text: "#e8effa" },
+  clusters: PAPERS,
   branch: "rgba(148, 163, 184, 0.55)",
   twig: "rgba(148, 163, 184, 0.38)",
-  link: "rgba(96, 165, 250, 0.85)",
-  dangling: "rgba(148, 163, 184, 0.4)",
   region: "rgba(96, 165, 250, 0.07)",
   regionEdge: "rgba(96, 165, 250, 0.35)",
   focusEdge: "#f2b544",
   focusFill: "#242a36",
   focusGlow: "rgba(242, 181, 68, 0.12)",
-  dropFill: "rgba(96, 165, 250, 0.25)",
   muted: "rgba(230, 233, 239, 0.6)",
   count: "#8b93a3",
 };
@@ -74,23 +132,54 @@ export function readPalette(el: Element): Palette {
     const value = css.getPropertyValue(name).trim();
     return value === "" ? fallback : value;
   };
+  const paper = (name: string, at: number, fallback: TierPaint): TierPaint => ({
+    fill: read(`--map-cluster-${at}-${name}-fill`, fallback.fill),
+    edge: read(`--map-cluster-${at}-${name}-edge`, fallback.edge),
+    text: read(`--map-cluster-${at}-${name}-text`, fallback.text),
+  });
   return {
     tiers: DARK.tiers.map((tier, depth) => ({
       fill: read(`--map-fill-${depth}`, tier.fill),
       edge: read(`--map-edge-${depth}`, tier.edge),
       text: read(`--map-text-${depth}`, tier.text),
     })),
+    board: read("--map-board", DARK.board),
+    grid: read("--map-grid", DARK.grid),
+    tape: read("--map-tape", DARK.tape),
+    tapeEdge: read("--map-tape-edge", DARK.tapeEdge),
+    subject: {
+      fill: read("--map-subject-fill", DARK.subject.fill),
+      edge: read("--map-subject-edge", DARK.subject.edge),
+      text: read("--map-subject-text", DARK.subject.text),
+    },
+    clusters: DARK.clusters.map((cluster, at) => ({
+      head: paper("head", at, cluster.head),
+      leaf: paper("leaf", at, cluster.leaf),
+    })),
     branch: read("--map-branch", DARK.branch),
     twig: read("--map-twig", DARK.twig),
-    link: read("--map-link", DARK.link),
-    dangling: read("--map-dangling", DARK.dangling),
     region: read("--map-region", DARK.region),
     regionEdge: read("--map-region-edge", DARK.regionEdge),
     focusEdge: read("--map-focus-edge", DARK.focusEdge),
     focusFill: read("--map-focus-fill", DARK.focusFill),
     focusGlow: read("--map-focus-glow", DARK.focusGlow),
-    dropFill: read("--map-drop-fill", DARK.dropFill),
     muted: read("--map-muted", DARK.muted),
     count: read("--map-count", DARK.count),
   };
+}
+
+/**
+ * The paper a box is drawn on.
+ *
+ * Wrapped rather than clamped: a board with nine clusters and six papers hands
+ * the seventh the first paper again, which is what a real board does when it
+ * runs out of pads. Clamping would give every cluster past the sixth the same
+ * colour, which is worse -- it says "these four are one thing" about four
+ * things that are not.
+ */
+export function paperOf(palette: Palette, cluster: number, head: boolean): TierPaint {
+  if (cluster < 0) return palette.subject;
+  const papers = palette.clusters;
+  const paper = papers[((cluster % papers.length) + papers.length) % papers.length];
+  return head ? paper.head : paper.leaf;
 }

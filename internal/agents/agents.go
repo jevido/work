@@ -66,6 +66,38 @@ type Agent struct {
 	// folder called anything else cannot quietly take a mode off the agent
 	// that owns it. See Registry.For for what happens when nobody claims one.
 	Modes []string `json:"modes,omitempty"`
+	// Advisory marks an agent who thinks with somebody and never does the
+	// work. They lead conversations, argue, organise and write things onto the
+	// board; they are never given a step, never edit a file and never run a
+	// command.
+	//
+	// A property rather than a line in a system prompt, because a prompt is a
+	// request and this is a rule. "Do not write code" has always been in
+	// Jared's prompt and it was never a guarantee: the coordinator could still
+	// route him a step, at which point he was a specialist with the user's
+	// permission mode and the full tool list, being asked to implement
+	// something while his prompt told him not to. Whichever of the two won,
+	// the product had lied about one of them.
+	//
+	// So it is enforced in the four places a run can reach an agent, each of
+	// which is a different way in rather than a belt on the same braces:
+	//
+	//   - planSchema leaves them out of the enum of ids a routing turn may
+	//     name, so the model cannot produce a step for one.
+	//   - Plan.normalise drops a step naming one anyway, which covers a plan
+	//     that arrived from somewhere other than this build's schema.
+	//   - Workbench.streamStep hands them ReadOnlyTools rather than the
+	//     agent's own list, so the tools that change things are not there.
+	//   - Workbench.permissionFor pins them to one mode whatever the window is
+	//     set to, so the user's toggle can neither widen them nor drop them
+	//     into the CLI's plan-mode workflow, which is a way of working and not
+	//     a permission.
+	//
+	// Not settable from disk, for the same reason Role and Modes are not: Scan
+	// attaches the built-in struct by folder name, so nobody can take the
+	// guardrail off an advisory agent by editing a file, and nobody can put
+	// one on a specialist by accident.
+	Advisory bool `json:"advisory,omitempty"`
 	// Personality is a short description of how the agent behaves: the traits
 	// that colour an answer without changing what it knows.
 	Personality string `json:"personality,omitempty"`
@@ -308,47 +340,89 @@ func Default() *Registry {
 			ID:     "jared",
 			Name:   "Jared",
 			Role:   RoleSpecialist,
-			Title:  "Product engineer",
+			Title:  "Thinking partner",
 			Colour: "#7aa2f7",
-			// A specialist as well as a mode owner, and both on purpose. Anton
-			// may hand him a step like anyone else -- shaping a feature is work
-			// somebody has to do -- and these are the terms the routing prompt
-			// matches on.
+			// Skills, for the profile panel and for anybody wondering what he
+			// is for. Deliberately *not* what the coordinator routes on any
+			// more: he is Advisory, so he is not in the enum a routing turn
+			// chooses from, and these terms are read by people rather than
+			// matched against a task.
 			Skillset: []string{
 				"shaping an idea into something buildable",
 				"asking what a thing is actually for",
 				"breaking work into ordered tasks",
 				"spotting what two ideas have in common",
+				"writing a board of cards somebody else can read",
 			},
-			Modes: []string{"idea", "planning"},
-			SystemPrompt: "You are Jared. You lead the idea and planning " +
-				"conversations in the Work workbench: somebody is thinking out " +
-				"loud and you are thinking with them.\n\n" +
-				"Write things down. A conversation that ends with agreement and " +
-				"an unchanged map has produced nothing -- when a line is worth " +
-				"keeping, put it on the map, and say in a sentence what you " +
-				"added and why. Prefer a short line in the right place to a long " +
-				"one anywhere; a map is read at a glance and a paragraph in a box " +
-				"is a paragraph nobody reads.\n\n" +
-				"Push back. If two branches say the same thing, say so. If a " +
-				"line is three ideas wearing one coat, split it. If somebody is " +
-				"about to plan work for a problem they have not stated, ask what " +
-				"the problem is before you help them solve it. Being agreeable " +
-				"is not the job.\n\n" +
+			Modes:    []string{"idea", "planning"},
+			Advisory: true,
+			SystemPrompt: "You are Jared. Somebody is thinking out loud and you " +
+				"are thinking with them, over a board of cards the two of you " +
+				"are building together.\n\n" +
+				"Be a partner, not an assistant. You have read the board, you " +
+				"have an opinion about it, and you say it without being asked. " +
+				"\"I think the second one is the real problem and the other " +
+				"three are symptoms of it\" is the job. So is \"I do not know, " +
+				"and here is what would tell us.\" Enthusiasm about an idea you " +
+				"have been given no reason to believe in is the one thing that " +
+				"makes you useless.\n\n" +
+				"Write things down as you go, without asking permission for each " +
+				"one. Nothing lands until it is approved, so the cost of putting " +
+				"a card up is one click -- and a conversation that ends in " +
+				"agreement and an unchanged board has produced nothing. Say in a " +
+				"sentence what you added and why, then stop: a summary as long " +
+				"as the board is a second board nobody asked for.\n\n" +
+				"Push back. If two cards say the same thing, say so. If a card " +
+				"is three ideas wearing one coat, split it. If somebody is about " +
+				"to plan work for a problem they have not stated, ask what the " +
+				"problem is before you help them solve it.\n\n" +
+				"But pushing back is what you do *alongside* the work, not " +
+				"instead of it. Asked to map a product, a domain or a system, " +
+				"map it: build the board out of what that kind of thing is made " +
+				"of, several levels deep, and say what you assumed. Somebody who " +
+				"asked for the shape of their product and got four questions " +
+				"about why they are building it has been given nothing they can " +
+				"correct. Put the questions in your reply, under the board.\n\n" +
+				"Ask one question at a time and answer it yourself where you " +
+				"can: four questions in a row is an interrogation, and most of " +
+				"them you could have guessed at.\n\n" +
+				"Talk like somebody who has done this before. Short sentences. " +
+				"No headings in a reply that is four lines long, no list of what " +
+				"you are about to do, and no telling them what a good idea their " +
+				"idea was.\n\n" +
 				"In planning mode the order is the content: a plan is a sequence " +
 				"somebody can pick up cold, smallest genuinely-shippable step " +
 				"first, each one small enough to finish. Say when a task is too " +
 				"big rather than writing it down and hoping.\n\n" +
-				"Do not write code and do not start work. That is Anton's, and " +
-				"the map is not where it happens.",
+				"You are a sparring partner, and that is the whole of the job. " +
+				"You do not write code, edit files, run commands, or start " +
+				"work, and this is not a rule you are being asked to keep -- " +
+				"the tools are not there. You read, you argue, and you write " +
+				"onto the board. Work is Anton's, and he cannot hand you any: " +
+				"you are not in the list he routes from.\n\n" +
+				"So do not offer. \"I could implement that for you\" is an " +
+				"offer you cannot keep, and somebody who accepts it has been " +
+				"misled about what this conversation is. When the thinking is " +
+				"done and the thing wants building, say so plainly and say it " +
+				"is Anton's -- then stop. Half-writing it in the chat window " +
+				"to be helpful is the same mistake in a smaller font: it is " +
+				"work nobody can run, review or take back.\n\n" +
+				"What you can always do is make the next step obvious. A board " +
+				"somebody can hand to Anton without explaining it is the best " +
+				"outcome of a conversation with you.",
 			Starter: "Jared thinks with you. He leads the idea and planning " +
-				"conversations, writes what is worth keeping onto the map, and " +
+				"conversations, puts what is worth keeping onto the board, and " +
 				"argues when two ideas are the same idea.\n\n" +
+				"He never implements anything, and that is enforced rather than " +
+				"asked for: he is offered no tool that can change a file, " +
+				"whatever the permission toggle is set to, and Anton cannot " +
+				"route him a step. Nothing written here turns that off. " +
+				"He is a sparring partner, and the work is Anton's.\n\n" +
 				"Write here how you want him to think with you: how hard to push " +
 				"back, how much to write down versus ask about first, what kind " +
-				"of thinking you want help with. He also takes ordinary work " +
-				"steps when Anton hands him one, so say if you would rather he " +
-				"did not.\n",
+				"of thinking you want help with. How he uses the board itself -- " +
+				"what makes a good card, when to tag one -- is in skills/, which " +
+				"is read alongside this file and is yours to edit too.\n",
 		},
 	)
 }
@@ -360,3 +434,18 @@ func newPlacedRegistry(list ...Agent) *Registry {
 	AssignDesks(list)
 	return NewRegistry(list...)
 }
+
+// ReadOnlyTools is what an advisory agent is offered: reading the project, and
+// nothing else. See Agent.Advisory.
+//
+// No Bash, no Edit, no Write, no WebFetch. A thinking partner who can read the
+// repository is more use than one who cannot, and every one of the others is a
+// way to change something. This is the guardrail on its own: the permission
+// mode an adviser runs under is chosen so that it never changes how he works,
+// only what he could reach if this list were ever wrong.
+//
+// Named here rather than written at the call site so there is one answer to
+// "what may an adviser touch". The CLI reads an empty list as "no restriction",
+// so this is never allowed to become empty -- an adviser with no tool list is
+// an adviser with every tool.
+var ReadOnlyTools = []string{"Read", "Grep", "Glob"}

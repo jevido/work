@@ -183,6 +183,9 @@ func TestSchemaMatchesTheParser(t *testing.T) {
 		"set-text": false, "insert": false, "move": false,
 		"delete": false, "promote": false, "set-status": false,
 		"link": false, "unlink": false, "group": false,
+		"set-icon": false, "caption": false, "replace": false,
+		"set-detail": false, "guide": false, "unguide": false,
+		"interest": false, "uninterest": false,
 	}
 	for _, branch := range schema.Properties.Ops.Items.OneOf {
 		raw, has := branch.Properties["kind"]

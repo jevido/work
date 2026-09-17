@@ -76,6 +76,15 @@ func (p *Plan) normalise(reg Registry, known func(taskID string) bool) {
 		if !ok || agent.Role == agents.RoleCoordinator {
 			continue
 		}
+		// An adviser is not in the schema's enum, so a plan naming one did not
+		// come from this build -- a resumed session, a hand-written plan, a
+		// newer model ignoring the enum. Dropped rather than reassigned: who
+		// should have had it is a judgement, and quietly handing somebody
+		// else's work to a specialist who was not chosen for it is worse than
+		// a step that is visibly missing.
+		if agent.Advisory {
+			continue
+		}
 		taskID := strings.TrimSpace(step.TaskID)
 		// A card Anton invented does not exist, so drop the reference and let
 		// the step open a fresh card instead of silently writing nowhere.
@@ -107,7 +116,11 @@ func (p *Plan) normalise(reg Registry, known func(taskID string) bool) {
 			continue
 		}
 		if u.AgentID != "" {
-			if _, ok := reg.Get(u.AgentID); !ok {
+			// Reassigning a card is giving somebody the work on it, which is
+			// the same act as a step and gets the same answer. Cleared rather
+			// than dropping the whole update: the status and the title in it
+			// are still worth applying.
+			if a, ok := reg.Get(u.AgentID); !ok || a.Advisory {
 				u.AgentID = ""
 			}
 		}
@@ -139,6 +152,13 @@ type Registry interface {
 // planSchema builds the JSON schema Anton's planning turn must satisfy. The
 // agent IDs are an enum drawn from the registry, so the model cannot name a
 // specialist that does not exist.
+//
+// The empty case is an error rather than a schema with an empty enum, and the
+// caller is expected to have checked: see Workbench.plan, which does not ask
+// for a schema it has nothing to put in. A team of a coordinator and an
+// adviser is the *default* team, so "nobody to delegate to" is an ordinary
+// state of the app and not a failure -- it means Anton answers the task
+// himself, which is what he would have decided anyway.
 func planSchema(reg Registry) (string, error) {
 	ids := specialistIDs(reg)
 	if len(ids) == 0 {
@@ -236,6 +256,17 @@ func rosterBlock(reg Registry) string {
 	n := 0
 	for _, a := range reg.All() {
 		if a.Role == agents.RoleCoordinator {
+			continue
+		}
+		// Advisers are listed and marked, not hidden. Anton is asked who works
+		// here on every kind of turn, and an answer that leaves somebody out
+		// is a wrong answer about the team the user is looking at -- the
+		// office draws them at a desk. What he must not do is give them work,
+		// and he cannot: they are not in the enum he routes with.
+		if a.Advisory {
+			fmt.Fprintf(&b, "- %s (id: %s) — %s. Advises and organises; never takes a step, and cannot be given one.\n",
+				a.Name, a.ID, a.Blurb())
+			n++
 			continue
 		}
 		fmt.Fprintf(&b, "- %s (id: %s) — %s\n", a.Name, a.ID, a.Blurb())
@@ -392,7 +423,11 @@ func specialistIDs(reg Registry) []string {
 	all := reg.All()
 	ids := make([]string, 0, len(all))
 	for _, a := range all {
-		if a.Role == agents.RoleCoordinator {
+		// The coordinator does not delegate to himself, and an adviser is not
+		// delegated to at all. Leaving an adviser out of the enum is the
+		// strongest of the four guardrails in agents.Agent.Advisory: it is not
+		// a rule the model is asked to follow, it is an id it cannot produce.
+		if a.Role == agents.RoleCoordinator || a.Advisory {
 			continue
 		}
 		ids = append(ids, a.ID)

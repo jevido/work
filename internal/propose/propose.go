@@ -51,10 +51,25 @@ const FullToolName = "mcp__" + ServerName + "__" + ToolName
 // it can respect, and one it is not told is a refusal after the work is done.
 const (
 	// MaxOps is the most ops one proposal may carry.
-	MaxOps = 200
+	//
+	// Five hundred rather than the two hundred this started at, because of
+	// "replace": laying out a board of thirty notes with its links, its
+	// regions, its glyphs and its captions is a couple of hundred operations,
+	// and a limit that refuses a whole board is a limit that deletes the
+	// feature. The cap is still here for the reason it always was -- a review
+	// list nobody can read through is not a review -- and the review panel
+	// pages rather than scrolling forever.
+	MaxOps = 500
 	// MaxTextLen is the longest line a proposal may write. A review limit,
 	// not a protocol one: a row nobody can read is a row nobody can approve.
 	MaxTextLen = 2000
+	// MaxDetailLen is the longest body a proposal may write onto a card.
+	//
+	// Larger than MaxTextLen because it is a different thing: a title is a
+	// line and a detail is the paragraph that did not fit on it. Still bounded,
+	// and for the same reason -- a review row nobody reads to the end is a row
+	// nobody has actually approved.
+	MaxDetailLen = 8000
 	// MaxIDLen matches the op envelope's cap on identifiers.
 	MaxIDLen = 128
 )
@@ -247,6 +262,8 @@ const toolDescription = `Propose a restructuring of the current outline or plan 
 
 Answer with operations over the nodes you were shown, never with a rewritten outline: a proposal is reviewed and approved one row at a time, and a whole-outline rewrite can be neither.
 
+The idea view draws this document as a board: a subject in the middle, a handful of clusters around it, notes hanging off each of them, and links between lines the tree cannot connect. Depth is what makes something a cluster head: a root line is a head, its children are the notes on it. Keep boards shallow and wide — four to seven heads reads as thinking, fifteen reads as a list.
+
 Rules:
 - Name only ids that appear in the state you were given. An id you did not see does not exist, and a proposal naming one is refused whole.
 - Say nothing about position. Where a line sits is decided by the app when the change is applied. Use "after" to name the sibling something goes below, or null for first. Never send a position, index, order, children or tree — a proposal carrying any of those is refused whole.
@@ -262,7 +279,15 @@ Operations:
 - set-status: mark a task todo, doing or done.
 - link: draw a link between two lines that are not parent and child. This is how the map says two ideas relate when the tree cannot, because neither is under the other.
 - unlink: remove a link between two lines.
-- group: gather a line into a region, which is a named set. Give "region" the id of a region that exists, or "name" to make a new one. A line is in one region at a time.`
+- group: gather a line into a region, which is a named set. Give "region" the id of a region that exists, or "name" to make a new one. A line is in one region at a time.
+- set-icon: put a glyph on a cluster head, to make it findable at a glance. Only on root lines, and only where it says something: a glyph on every line is the same as none. Send "" to take one off.
+- caption: write why two lines are linked, onto the link itself. A few words, not a sentence — it is drawn along the line.
+- set-detail: write the body of a card -- what it is, at length. The board draws only the title; this is what a person sees when they open the card. Newlines are allowed here and nowhere else. Send "" to clear it.
+- guide: put a card under one of the workspace's guidelines, by the id listed above the outline. Only ids that are listed: you cannot invent a guideline, and a card that needs a word nobody has set up is worth saying so in your answer instead.
+- unguide: take a card out from under a guideline.
+- interest: record that one of the people or groups listed above is waiting on a card.
+- uninterest: record that they are not.
+- replace: start the board again. Everything on it now is moved under one collapsed line named after today and left there, so nothing is lost and the person can take it back. Use it when somebody dumps a set of raw ideas and asks for a board out of them; do not use it to tidy a branch, reorganise part of a board, or add to one — those are the operations above. Send it first, before the inserts that build the new board.`
 
 // inputSchema mirrors ProposedOp in frontend/src/lib/workspace/proposal.ts. The
 // two are checked against each other by a test in that file's own suite and by
@@ -281,7 +306,7 @@ const inputSchema = `{
     "ops": {
       "type": "array",
       "minItems": 1,
-      "maxItems": 200,
+      "maxItems": 500,
       "description": "The operations, in the order they should be applied.",
       "items": {
         "oneOf": [
@@ -375,6 +400,86 @@ const inputSchema = `{
               "node": {"type": "string", "maxLength": 128},
               "region": {"type": "string", "maxLength": 128, "description": "A region that already exists, to add this line to."},
               "name": {"type": "string", "maxLength": 2000, "description": "A name for a new region, when there is no region to name."}
+            }
+          },
+          {
+            "type": "object",
+            "required": ["kind", "node", "icon"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {"const": "set-icon"},
+              "node": {"type": "string", "maxLength": 128},
+              "icon": {"enum": ["", "people", "heart", "trophy", "signpost", "warning", "check", "bulb", "flag", "question", "timing"], "description": "The glyph, by name. \"\" takes one off."}
+            }
+          },
+          {
+            "type": "object",
+            "required": ["kind", "node", "other", "text"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {"const": "caption"},
+              "node": {"type": "string", "maxLength": 128},
+              "other": {"type": "string", "maxLength": 128, "description": "The line at the other end of the link being captioned."},
+              "text": {"type": "string", "maxLength": 2000, "description": "A few words. It is drawn along the line."}
+            }
+          },
+          {
+            "type": "object",
+            "required": ["kind", "node", "text"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {"const": "set-detail"},
+              "node": {"type": "string", "maxLength": 128},
+              "text": {"type": "string", "maxLength": 8000, "description": "The body of the card. Newlines allowed. \"\" clears it."}
+            }
+          },
+          {
+            "type": "object",
+            "required": ["kind", "node", "guideline"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {"const": "guide"},
+              "node": {"type": "string", "maxLength": 128},
+              "guideline": {"type": "string", "maxLength": 128, "description": "A guideline id from the list above the outline. Not a name, and not one you made up."}
+            }
+          },
+          {
+            "type": "object",
+            "required": ["kind", "node", "guideline"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {"const": "unguide"},
+              "node": {"type": "string", "maxLength": 128},
+              "guideline": {"type": "string", "maxLength": 128}
+            }
+          },
+          {
+            "type": "object",
+            "required": ["kind", "node", "party"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {"const": "interest"},
+              "node": {"type": "string", "maxLength": 128},
+              "party": {"type": "string", "maxLength": 128, "description": "A party id from the list above the outline."}
+            }
+          },
+          {
+            "type": "object",
+            "required": ["kind", "node", "party"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {"const": "uninterest"},
+              "node": {"type": "string", "maxLength": 128},
+              "party": {"type": "string", "maxLength": 128}
+            }
+          },
+          {
+            "type": "object",
+            "required": ["kind", "reason"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {"const": "replace"},
+              "reason": {"type": "string", "maxLength": 2000, "description": "One line: why the board is being started again. The person reads this before approving it."}
             }
           }
         ]

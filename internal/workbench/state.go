@@ -2,6 +2,7 @@ package workbench
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"dev.jevido/work/internal/ops"
@@ -67,9 +68,54 @@ func StateBlock(doc Document, tab, mode string) string {
 	if mode == ModePlanning {
 		return planBlock(doc, *root, tab, g)
 	}
-	return "The outline as it stands. The id is on the left; it is what an operation names.\n" +
-		"A `<->` is a link to another line; a `[in ...]` is the region it is in.\n\n" +
+	return vocabularies(g) +
+		"The outline as it stands. The id is on the left; it is what an operation names.\n" +
+		"A `<->` is a link to another line, and what follows `because` is its caption.\n" +
+		"A `[in ...]` is the region a line is in; `{glyph}` is the glyph on a cluster head.\n" +
+		"A `+` is a guideline the card is under and an `@` is somebody interested in it,\n" +
+		"both by the ids listed above. An indented `|` is the card's own detail.\n\n" +
 		outlineBodyWith(*root, g)
+}
+
+// vocabularies is the two lists a card can be tagged with, before the tree.
+//
+// Before rather than inline, and by id rather than by name on each card: a
+// workspace has a handful of these and a hundred cards, so naming them once
+// costs a handful of lines where repeating them costs a hundred. The ids are
+// what an operation names, which is the same rule every other id in the block
+// follows.
+//
+// Empty vocabularies are said to be empty rather than left out. A model that
+// sees no guidelines section cannot tell "there are none" from "you were not
+// shown them", and the useful answer to the first is to say so rather than to
+// invent one.
+func vocabularies(g *graph) string {
+	if g == nil {
+		return ""
+	}
+	var b strings.Builder
+	write := func(title string, words map[string]string) {
+		b.WriteString(title + "\n")
+		if len(words) == 0 {
+			b.WriteString("(none set up. You cannot add one -- say so if a card needs a word that is not here.)\n\n")
+			return
+		}
+		ids := make([]string, 0, len(words))
+		for id := range words {
+			ids = append(ids, id)
+		}
+		// By name, so two runs of this on one document read the same way. Map
+		// order in Go is deliberately not stable, and a state block that
+		// reshuffles between turns is one the model cannot refer back to.
+		sort.Slice(ids, func(i, j int) bool { return words[ids[i]] < words[ids[j]] })
+		for _, id := range ids {
+			fmt.Fprintf(&b, "  %s  %s\n", id, oneLine(words[id]))
+		}
+		b.WriteString("\n")
+	}
+	write("Guidelines this workspace is trying to meet. A card carries any number.", g.guidelines)
+	write("People and groups waiting on something here. A card can name any number.", g.parties)
+	return b.String()
 }
 
 // outlineBlock is the tree, indented, ids first.
@@ -108,6 +154,13 @@ func outlineBodyWith(root ops.TreeNode, g *graph) string {
 		if task := fieldString(n.Node, ops.FieldTaskID); task != "" {
 			fmt.Fprintf(b, "  -> already a task, %s", task)
 		}
+		// The board's own vocabulary. A model that cannot see a glyph proposes
+		// one that is already there, and a rebuild that cannot see the
+		// captions on the board it is replacing silently drops every one of
+		// them.
+		if icon := fieldString(n.Node, FieldIcon); icon != "" {
+			fmt.Fprintf(b, "  {%s}", oneLine(icon))
+		}
 		if g != nil {
 			if region := g.regionOf[n.ID]; region != "" && g.alive[region] {
 				fmt.Fprintf(b, "  [in %s, %s]", region, oneLine(g.text[region]))
@@ -121,9 +174,25 @@ func outlineBodyWith(root ops.TreeNode, g *graph) string {
 					continue
 				}
 				fmt.Fprintf(b, "  <-> %s", link.Other)
+				if link.Text != "" {
+					fmt.Fprintf(b, " because %s", oneLine(link.Text))
+				}
 			}
 		}
 		b.WriteString("\n")
+
+		// The words on the card, and then what it says at length. Both on
+		// lines of their own: a card with four guidelines, two interested
+		// parties and a paragraph would otherwise be one line nobody can read
+		// the beginning of.
+		if g != nil {
+			if words := append(append([]string{}, mark("+", g.guidedBy[n.ID])...), mark("@", g.wantedBy[n.ID])...); len(words) > 0 {
+				fmt.Fprintf(b, "%s  %s\n", strings.Repeat("  ", depth+1), strings.Join(words, " "))
+			}
+		}
+		if detail := oneLine(fieldString(n.Node, FieldDetail)); detail != "" {
+			fmt.Fprintf(b, "%s  | %s\n", strings.Repeat("  ", depth+1), detail)
+		}
 	})
 
 	if root.Children == nil {
@@ -252,4 +321,13 @@ func oneLine(s string) string {
 		return s[:stateTextLen] + "…"
 	}
 	return s
+}
+
+// mark prefixes each id with the sigil that says which vocabulary it is from.
+func mark(sigil string, ids []string) []string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, sigil+id)
+	}
+	return out
 }
