@@ -107,7 +107,6 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 const FIELD_TYPE = "type";
 const FIELD_TEXT = "text";
 const FIELD_COLLAPSED = "collapsed";
-const FIELD_STATUS = "status";
 /** Reserved by the protocol: the two ends of an extraction. */
 const FIELD_EXTRACTED_FROM = "extractedFrom";
 /** The two ends of a link, and the region a node is in. */
@@ -130,14 +129,6 @@ const KIND_TAB = "tab";
 const TYPE_TASK = "task";
 const TYPE_EDGE = "edge";
 const TYPE_REGION = "region";
-
-export type TaskState = "todo" | "doing" | "done";
-
-export const TASK_STATE_LABELS: Record<TaskState, string> = {
-  todo: "To do",
-  doing: "In progress",
-  done: "Done",
-};
 
 export function textOf(node: DocNode | null | undefined): string {
   const value = node?.fields[FIELD_TEXT];
@@ -194,11 +185,6 @@ export function endsOf(node: DocNode): { from: string; to: string } {
 
 export function isCollapsed(node: DocNode): boolean {
   return node.fields[FIELD_COLLAPSED] === true;
-}
-
-export function statusOf(node: DocNode): TaskState {
-  const value = node.fields[FIELD_STATUS];
-  return value === "doing" || value === "done" ? value : "todo";
 }
 
 /**
@@ -318,18 +304,3 @@ export function planTasks(tree: readonly DocNode[]): DocNode[] {
   return tree.filter(isTask);
 }
 
-export function countDescendants(node: DocNode): number {
-  let n = 0;
-  for (const child of node.children) n += 1 + countDescendants(child);
-  return n;
-}
-
-/** Finds a node anywhere in the tree. */
-export function findInTree(tree: readonly DocNode[], id: string): DocNode | null {
-  for (const node of tree) {
-    if (node.id === id) return node;
-    const hit = findInTree(node.children, id);
-    if (hit) return hit;
-  }
-  return null;
-}

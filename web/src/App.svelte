@@ -1,37 +1,10 @@
 <script lang="ts">
-  import {
-    TASK_STATE_LABELS,
-    findInTree,
-    labelOf,
-    sourceIdOf,
-    statusOf,
-    textOf,
-  } from "./lib/doc";
+  import { labelOf, textOf, type DocNode } from "./lib/doc";
   import MapView from "./components/MapView.svelte";
-  import OutlineBranch from "./components/OutlineBranch.svelte";
   import { forget, recall, remember, takeKey } from "./lib/key";
-  import { ViewState, setView } from "./lib/view.svelte";
   import { Viewer } from "./lib/viewer.svelte";
 
   const viewer = new Viewer();
-  const view = new ViewState();
-  // Where a row goes for the parts of the map that are not the tree. Assigned
-  // rather than passed, because OutlineBranch recurses into itself and a prop
-  // would have to be threaded through every level for the sake of the rows that
-  // happen to have a link on them.
-  view.relations = viewer;
-  setView(view);
-
-  /**
-   * Which view of the outline is on screen: the map, or the lines.
-   *
-   * The map first, because that is what this page is worth sending somebody.
-   * A read-only list of an outline is a document; a read-only *map* of one is
-   * the shape of somebody's thinking, which is the thing that does not fit in
-   * a message. The lines are one click away and are what a screen reader gets
-   * either way -- the canvas is aria-hidden, so switching is about looking.
-   */
-  let shape = $state<"map" | "outline">("map");
 
   /** What somebody typed into the "paste a link" field. */
   let pasted = $state("");
@@ -135,19 +108,6 @@
     }
   }
 
-  /**
-   * Follows a task back to the line it came from.
-   *
-   * Switches to the lines first. The jump opens whatever is folded in the way
-   * and scrolls the line into view, and neither of those means anything while
-   * the map is on screen -- the map has no folds and nothing to scroll, so
-   * from the reader's side the button would do nothing at all.
-   */
-  function follow(id: string) {
-    shape = "outline";
-    view.jumpTo(viewer.tree, id);
-  }
-
   function forgetKey() {
     forget();
     saved = false;
@@ -160,7 +120,7 @@
 
 </script>
 
-<a class="skip" href="#outline">Skip to the outline</a>
+<a class="skip" href="#board">Skip to the board</a>
 
 <header>
   <div class="titles">
@@ -223,7 +183,7 @@
   </main>
 {:else}
   <main>
-    <section id="outline" aria-labelledby="outline-heading">
+    <section id="board" aria-labelledby="board-heading">
       <!--
         The tabs, when there is more than one.
 
@@ -248,47 +208,33 @@
         </div>
       {/if}
 
-      <div class="section-head">
-        <h2 id="outline-heading">{shape === "map" ? "Map" : "Outline"}</h2>
-        <!-- Real radios drawn as a segmented control: one tab stop, arrow keys
-             between the two, and announced as one of two rather than as two
-             unrelated buttons. -->
-        <fieldset class="views">
-          <legend class="sr">View</legend>
-          <label class:on={shape === "map"}>
-            <input
-              type="radio"
-              name="viewer-shape"
-              checked={shape === "map"}
-              onchange={() => (shape = "map")}
-            />
-            <span>Map</span>
-          </label>
-          <label class:on={shape === "outline"}>
-            <input
-              type="radio"
-              name="viewer-shape"
-              checked={shape === "outline"}
-              onchange={() => (shape = "outline")}
-            />
-            <span>Lines</span>
-          </label>
-        </fieldset>
-      </div>
+      <h2 id="board-heading" class="sr">Board</h2>
 
       {#if viewer.outline.length === 0}
         <p class="empty">
-          {viewer.status === "loading" ? "Loading the outline…" : "The outline is empty."}
+          {viewer.status === "loading" ? "Loading the board…" : "This board is empty."}
         </p>
-      {:else if shape === "map"}
-        <MapView {viewer} />
       {:else}
-        <OutlineBranch nodes={viewer.outline} />
+        <MapView {viewer} />
       {/if}
+
+      <!--
+        The same lines, for a reader who cannot see a canvas.
+
+        The board is a canvas and a canvas is a picture: `aria-hidden`, because
+        a screen reader handed one gets an element with a name and no content.
+        The page used to answer that with a lines view anybody could switch to;
+        it does not have one any more, so the text lives here instead --
+        present in the accessibility tree, absent from the page, and with
+        nothing focusable in it so a keyboard never lands somewhere invisible.
+      -->
+      <div class="sr">
+        {@render lines(viewer.outline)}
+      </div>
 
       {#if viewer.detached.length > 0}
         <section class="detached" aria-labelledby="detached-heading">
-          <h3 id="detached-heading">Not in the outline</h3>
+          <h3 id="detached-heading">Not on the board</h3>
           <p>
             The line these were under was deleted. They are still part of the workspace.
           </p>
@@ -300,45 +246,24 @@
         </section>
       {/if}
     </section>
-
-    <section aria-labelledby="plan-heading">
-      <h2 id="plan-heading">Plan</h2>
-      {#if viewer.tasks.length === 0}
-        <p class="empty">
-          {viewer.status === "loading" ? "Loading the plan…" : "Nothing on the plan."}
-        </p>
-      {:else}
-        <!-- An ordered list, because the order is the content. -->
-        <ol>
-          {#each viewer.tasks as task (task.id)}
-            {@const status = statusOf(task)}
-            {@const sourceId = sourceIdOf(task)}
-            {@const source = sourceId ? findInTree(viewer.tree, sourceId) : null}
-            <li data-status={status}>
-              <div class="task">
-                <!-- The state as a word, not only as a colour. This is the one
-                     thing a plan is read for. -->
-                <span class="state">{TASK_STATE_LABELS[status]}</span>
-                <span class="title">{textOf(task).trim() || "(untitled task)"}</span>
-              </div>
-              {#if source}
-                <!--
-                  Follows the link into the outline: opens whatever is folded
-                  in the way, scrolls to the line and marks it. All of that is
-                  this browser's, and none of it reaches the server.
-                -->
-                <button class="source" onclick={() => follow(source.id)}>
-                  from <span class="from">{textOf(source).trim() || "an empty line"}</span>
-                </button>
-              {:else if sourceId}
-                <p class="source gone">from a line that has since been deleted</p>
-              {/if}
-            </li>
-          {/each}
-        </ol>
-      {/if}
-    </section>
   </main>
+
+  <!--
+    A nested list, which is what the board is underneath the paper: the tree,
+    in order, with the nesting carried by the markup rather than by a picture.
+  -->
+  {#snippet lines(nodes: readonly DocNode[])}
+    <ul>
+      {#each nodes as node (node.id)}
+        <li>
+          {textOf(node).trim() || "(an empty line)"}
+          {#if node.children.length > 0}
+            {@render lines(node.children)}
+          {/if}
+        </li>
+      {/each}
+    </ul>
+  {/snippet}
 
   <footer>
     <p>
@@ -434,24 +359,35 @@
     background: var(--err);
   }
 
-  main {
-    display: grid;
-    /* Two columns when there is room, and one when there is not. The plan
-       goes under the outline rather than beside it on a phone, which is also
-       the order they are written in -- so the reading order and the visual
-       order stay the same one. */
-    grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
-    gap: 8px 32px;
-    max-width: 1100px;
-    margin: 0 auto;
-    padding: 16px;
+  /*
+   * In the accessibility tree, off the page.
+   *
+   * Not display:none and not visibility:hidden -- both take an element out of
+   * the accessibility tree as well, which is the half that has to stay. The
+   * board is a canvas and a canvas has no text in it; this is where the text
+   * is, for a reader who is not looking at a picture.
+   */
+  .sr {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
   }
 
-  @media (max-width: 780px) {
-    main {
-      grid-template-columns: minmax(0, 1fr);
-      gap: 24px;
-    }
+  /* One column, because there is one thing on the page. It used to be two --
+     the outline beside the plan -- and both of those are gone: this page is
+     the board now, and a board wants the width. */
+  main {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 16px;
   }
 
   /* The tab strip, above the view switch: which document, then which view of
@@ -488,71 +424,13 @@
     box-shadow: inset 0 -2px 0 var(--accent);
   }
 
-  .section-head {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 8px;
-  }
+  /* The board is the page and wants the room to be one.
 
-  .section-head h2 {
-    margin: 0;
-  }
-
-  .views {
-    display: flex;
-    gap: 1px;
-    margin: 0 0 0 auto;
-    padding: 1px;
-    border: 1px solid var(--line);
-    border-radius: 5px;
-    background: var(--line);
-  }
-
-  .views label {
-    padding: 3px 10px;
-    background: var(--panel);
-    color: var(--muted);
-    font-size: 11px;
-    cursor: pointer;
-  }
-
-  .views label:first-of-type {
-    border-radius: 3px 0 0 3px;
-  }
-
-  .views label:last-of-type {
-    border-radius: 0 3px 3px 0;
-  }
-
-  .views label.on {
-    background: var(--panel-2);
-    color: var(--text);
-    box-shadow: inset 0 -2px 0 var(--accent);
-  }
-
-  /* Off screen rather than display:none: the label is what is drawn, and an
-     input that is not rendered is an input the keyboard cannot reach. */
-  .views input {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    opacity: 0;
-  }
-
-  .views label:has(:focus-visible) {
-    outline: 2px solid var(--accent);
-    outline-offset: 1px;
-  }
-
-  /* The map is a picture and wants room; the lines size themselves.
-
-     Most of the window rather than a fixed box: this page is the board, the
-     way the desktop app's window is, and a board in a 420-pixel strip under a
-     heading reads as a thumbnail of one. Capped so it does not run past a tall
+     Most of the window rather than a fixed box: a board in a 420-pixel strip
+     reads as a thumbnail of one. Capped so it does not run past a tall
      monitor, and vh rather than % because the section's parent is the document
      flow and has no height of its own to take a share of. */
-  #outline {
+  #board {
     min-height: min(76vh, 820px);
     display: flex;
     flex-direction: column;
@@ -633,95 +511,6 @@
   .empty {
     margin: 0;
     color: var(--muted);
-  }
-
-  ol {
-    margin: 0;
-    padding: 0;
-    list-style: none;
-    counter-reset: task;
-  }
-
-  ol li {
-    counter-increment: task;
-    position: relative;
-    padding: 8px 0 8px 26px;
-    border-bottom: 1px solid var(--line);
-  }
-
-  ol li::before {
-    content: counter(task);
-    position: absolute;
-    left: 0;
-    top: 9px;
-    width: 20px;
-    text-align: right;
-    color: var(--muted);
-    font-size: 12px;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .task {
-    display: flex;
-    align-items: baseline;
-    gap: 8px;
-    overflow-wrap: anywhere;
-  }
-
-  .state {
-    flex: none;
-    padding: 0 7px;
-    border: 1px solid var(--line);
-    border-radius: 999px;
-    color: var(--muted);
-    font-size: 11px;
-    line-height: 17px;
-    white-space: nowrap;
-  }
-
-  li[data-status="doing"] .state {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-
-  li[data-status="done"] .state {
-    border-color: var(--ok);
-    color: var(--ok);
-  }
-
-  li[data-status="done"] .title {
-    color: var(--muted);
-    text-decoration: line-through;
-  }
-
-  .source {
-    display: block;
-    max-width: 100%;
-    margin: 4px 0 0;
-    padding: 2px 0;
-    border: none;
-    background: none;
-    color: var(--muted);
-    font-size: 12px;
-    text-align: left;
-    cursor: pointer;
-    overflow-wrap: anywhere;
-  }
-
-  /* Underlined because it goes somewhere -- colour alone would be the only
-     thing separating a link from the sentence above it. */
-  button.source .from {
-    text-decoration: underline dotted;
-    text-underline-offset: 2px;
-  }
-
-  button.source:hover {
-    color: var(--text);
-  }
-
-  .source.gone {
-    cursor: default;
-    font-style: italic;
   }
 
   .detached {
