@@ -25,7 +25,10 @@ services:
       # claims a domain and wires the proxy and its certificate,
       # SERVICE_PASSWORD_* generates a secret once and keeps it for the life of
       # the resource. That is what keeps every credential out of this file.
-      - SERVICE_FQDN_CHARTED_8081
+      # The domain, named here rather than left for Coolify to generate, exactly
+      # as the sync server names its own: a generated sslip.io host is what you
+      # get by default, and it is not the address anybody has been given.
+      - SERVICE_FQDN_CHARTED_8081=https://charted.jevido.app
       - PORT=8081
       - DATABASE_URL=postgres://charted:${SERVICE_PASSWORD_CHARTEDPG}@charted-postgres:5432/charted?sslmode=disable
       # Without this the deployment is readable and nothing can publish to it.

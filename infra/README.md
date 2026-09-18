@@ -51,10 +51,14 @@ and publishes to the other, so both are up at once.
 
 Two Coolify resources, one per compose file:
 
-| Resource | Compose path | Wants |
-|---|---|---|
-| sync | `infra/sync/compose.yml` | `SERVICE_FQDN_SERVER_8080`, a generated Postgres password, `WORK_SIGNUP_TOKEN` |
-| charted | `infra/charted/compose.yml` | `SERVICE_FQDN_CHARTED_8081`, a generated Postgres password, `CHARTED_TOKEN` |
+| Resource | Domain | Compose path | Wants set in Coolify |
+|---|---|---|---|
+| sync | work.jevido.app | `infra/sync/compose.yml` | `SERVICE_PASSWORD_POSTGRES` (generated), `WORK_SIGNUP_TOKEN` (24 characters or more) |
+| charted | charted.jevido.app | `infra/charted/compose.yml` | `SERVICE_PASSWORD_CHARTEDPG` (generated), `CHARTED_TOKEN` |
+
+Both domains are named in their compose file rather than left to Coolify, which
+would otherwise generate an sslip.io host — correct, and not the address
+anybody has been given.
 
 No environment is named in either file. The domain, the database password and
 the tokens are per-application state that Coolify holds, which is what keeps
