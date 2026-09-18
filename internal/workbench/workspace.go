@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"dev.jevido/work/internal/board"
@@ -428,6 +429,176 @@ func (w *Workbench) Keys() (Keys, error) {
 	return Keys{WriteKey: w.ws.WriteKey, ReadKey: w.ws.ReadKey}, nil
 }
 
+// KnownWorkspace is a workspace this machine holds keys for, joined or not.
+//
+// The keys are on it, and that is the whole point: the server keeps hashes and
+// cannot show a key again, so the copy on this machine is the only one there
+// is. A panel that could not show it would be a panel that cannot answer the
+// one question anybody opens it with.
+type KnownWorkspace struct {
+	ID        string `json:"id"`
+	Name      string `json:"name,omitempty"`
+	ServerURL string `json:"serverUrl,omitempty"`
+	WriteKey  string `json:"writeKey,omitempty"`
+	ReadKey   string `json:"readKey,omitempty"`
+	// Joined marks the one this machine is syncing with, so the panel can say
+	// which of them is on screen behind it.
+	Joined bool `json:"joined"`
+}
+
+// KnownWorkspaces lists every workspace whose keys this machine has kept.
+//
+// Joined first, then by name, because the joined one is the one somebody is
+// most often looking for and a list that reorders itself as workspaces are
+// joined and left is a list nobody can point at.
+//
+// The joined workspace is in here even when the config has not caught up --
+// creating one writes it on the way out and there is a window before that --
+// so the list is built from the config and then corrected from what is
+// actually open.
+func (w *Workbench) KnownWorkspaces() ([]KnownWorkspace, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, fmt.Errorf("workbench: read config: %w", err)
+	}
+
+	w.wsMu.Lock()
+	var joined *config.Workspace
+	if w.ws != nil {
+		clone := *w.ws
+		joined = &clone
+	}
+	w.wsMu.Unlock()
+
+	out := make([]KnownWorkspace, 0, len(cfg.KnownWorkspaces)+1)
+	seen := false
+	for _, k := range cfg.KnownWorkspaces {
+		entry := KnownWorkspace{
+			ID:        k.ID,
+			Name:      k.Name,
+			ServerURL: k.ServerURL,
+			WriteKey:  k.WriteKey,
+			ReadKey:   k.ReadKey,
+		}
+		if joined != nil && joined.ID == k.ID {
+			entry.Joined = true
+			seen = true
+			// Whatever is open wins over what was written down: a read key
+			// minted a moment ago is on the workspace before it is in the
+			// config.
+			if joined.ReadKey != "" {
+				entry.ReadKey = joined.ReadKey
+			}
+			if joined.WriteKey != "" {
+				entry.WriteKey = joined.WriteKey
+			}
+			if joined.Name != "" {
+				entry.Name = joined.Name
+			}
+		}
+		out = append(out, entry)
+	}
+	if !seen && joined != nil && joined.ServerURL != "" && joined.WriteKey != "" {
+		out = append(out, KnownWorkspace{
+			ID:        joined.ID,
+			Name:      joined.Name,
+			ServerURL: joined.ServerURL,
+			WriteKey:  joined.WriteKey,
+			ReadKey:   joined.ReadKey,
+			Joined:    true,
+		})
+	}
+
+	slices.SortStableFunc(out, func(a, b KnownWorkspace) int {
+		if a.Joined != b.Joined {
+			if a.Joined {
+				return -1
+			}
+			return 1
+		}
+		return cmp.Compare(strings.ToLower(a.Name), strings.ToLower(b.Name))
+	})
+	return out, nil
+}
+
+// ForgetWorkspace takes a workspace's keys off this machine.
+//
+// The one this machine is joined to is refused: forgetting its key while still
+// syncing with it would leave a workspace open that nothing could ever rejoin,
+// and the call that means "stop being in this workspace" is LeaveWorkspace.
+func (w *Workbench) ForgetWorkspace(id string) error {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return errors.New("workbench: no workspace id")
+	}
+
+	w.wsMu.Lock()
+	joined := w.ws != nil && w.ws.ID == id
+	w.wsMu.Unlock()
+	if joined {
+		return errors.New("workbench: this is the workspace you are in — leave it first")
+	}
+
+	return config.Update(func(c *config.Config) { c.Forget(id) })
+}
+
+// MintKeyForWorkspace issues another key for any workspace whose write key
+// this machine holds, joined or not.
+//
+// Minting needs the workspace's write key and its server, and both are in the
+// remembered entry -- so "get me a read key to send somebody" works for a
+// workspace this machine has left, which is exactly when the read key is the
+// thing that was never written down. A read key is kept for the same reason
+// MintKey keeps one: the server will not show it again.
+func (w *Workbench) MintKeyForWorkspace(ctx context.Context, id, access string) (string, error) {
+	id = strings.TrimSpace(id)
+	access = strings.TrimSpace(access)
+	if access != "read" && access != "write" {
+		return "", fmt.Errorf("workbench: %q is not an access level", access)
+	}
+	if w.ops == nil {
+		return "", ErrNoTransport
+	}
+
+	w.wsMu.Lock()
+	joined := w.ws != nil && w.ws.ID == id
+	w.wsMu.Unlock()
+	if joined {
+		// One path for the workspace that is open, so what it mints is
+		// written to the workspace as well as to the remembered entry.
+		return w.MintKey(ctx, access)
+	}
+
+	cfg, err := config.Load()
+	if err != nil {
+		return "", fmt.Errorf("workbench: read config: %w", err)
+	}
+	known, ok := cfg.KnownWorkspace(id)
+	if !ok {
+		return "", errors.New("workbench: no keys for that workspace on this machine")
+	}
+	if known.ServerURL == "" || known.WriteKey == "" {
+		return "", errors.New("workbench: that workspace has no server and no key to ask with")
+	}
+
+	key, err := w.ops.Mint(ctx, known.ServerURL, known.WriteKey, access)
+	if err != nil {
+		return "", fmt.Errorf("workbench: mint %s key: %w", access, err)
+	}
+	if key == "" {
+		return "", errors.New("workbench: the server returned an empty key")
+	}
+	if access == "read" {
+		known.ReadKey = key
+		if err := config.Update(func(c *config.Config) { c.Remember(known) }); err != nil {
+			// The key is in the caller's hands and the server will not show it
+			// again, so this is worth less than what it would cost to fail.
+			return key, nil
+		}
+	}
+	return key, nil
+}
+
 // EnsureKeys returns the workspace's keys, minting the read key if this
 // machine has not got one.
 //
@@ -599,6 +770,37 @@ func (w *Workbench) SyncNow() {
 	if s := w.sync.Load(); s != nil {
 		s.nudge()
 	}
+}
+
+// ResetToServer discards everything this machine has not had accepted and
+// reads the workspace back from the server.
+//
+// The way out of a machine whose copy has gone wrong: ops the server will
+// never take, a document that disagrees with what everybody else is looking
+// at, or simply an afternoon's work somebody would rather drop than merge.
+// Nothing here is recoverable afterwards -- the unsent ops are deleted, not
+// parked -- so the caller asks first.
+//
+// A workspace that lives only on this machine is refused rather than emptied.
+// There is no other copy of it, so "take the server's" would mean "delete
+// everything", and a button that reads one way and does the other is the
+// worst kind of destructive.
+func (w *Workbench) ResetToServer(ctx context.Context) error {
+	s := w.sync.Load()
+	if s == nil {
+		return errors.New("workbench: no workspace joined")
+	}
+	if err := s.resetToServer(ctx); err != nil {
+		return err
+	}
+
+	// The document is a different document now: tabs a colleague retired are
+	// gone from it, and the plan behind the board is whatever the server's log
+	// says. absorb is what the sync loop runs after somebody else's ops land,
+	// and this is the same situation with a bigger page.
+	w.absorb(s)
+	w.publishWorkspace()
+	return nil
 }
 
 // WorkspaceDocument is the merged workspace: every tab and every card, from

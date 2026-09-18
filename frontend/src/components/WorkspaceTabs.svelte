@@ -213,12 +213,18 @@
          better place to find that out than a button that was never drawn. -->
     <button onclick={oncreate}>On a server…</button>
     <button onclick={onjoin}>Join</button>
-    {#if workspaces.cloud}
-      <!-- The keys, from the strip as well as from the badge. Inviting somebody
-           is a thing you do at the level of the workspace, which is what this
-           bar is, and it is not a sync status. -->
-      <button onclick={onkeys}>Keys…</button>
-    {/if}
+    <!-- The keys, from here and from nowhere else. Inviting somebody is a
+         thing you do at the level of the workspace, which is what this bar is,
+         and it is not a sync status -- so the badge no longer offers them too.
+         Two buttons onto one panel is how somebody ends up unsure whether they
+         are looking at the same keys.
+
+         Always drawn, including on a machine working locally. What the panel
+         lists is every workspace whose keys this machine kept, which is the
+         one place the key for a workspace somebody has left still exists --
+         and hiding the way to it behind being joined to a server meant the
+         only copy of a key was unreachable from the app that holds it. -->
+    <button onclick={onkeys}>Keys…</button>
   </div>
 </div>
 

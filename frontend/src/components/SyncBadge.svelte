@@ -124,10 +124,10 @@
     // well. Two buttons where one does strictly more is one too many.
     if (state === "unsaved") return { text: "Save", run: () => workspaces.sendNow() };
     if (state === "offline") return { text: "Retry now", run: () => workspaces.retry() };
-    // Nothing is wrong, and this is not a fix -- it is the way to the keys,
-    // which is the thing people want from a synced workspace most often and
-    // which used to be reachable only in the seconds after creating one.
-    if (workspaces.cloud) return { text: "Keys", run: () => onfix("keys") };
+    // Nothing else. The keys used to be here as well as in the tab strip, and
+    // two buttons onto one panel is how somebody ends up unsure whether they
+    // are looking at the same keys. They are in the strip, once, where the
+    // rest of what you do to a workspace rather than to a document already is.
     return null;
   });
 

@@ -1436,6 +1436,30 @@ export class Workspace {
     this.#settleAll();
   }
 
+  /**
+   * Drops everything this machine was holding that the workspace has not
+   * taken: drafts under the caret, edits waiting to cross, and the marks that
+   * compare the two.
+   *
+   * For `Workspaces.resetToServer`, and deliberately not flushing on the way
+   * out -- `dispose` settles what is being typed, which is the opposite of
+   * what this is for. The timers are dropped rather than run: a draft that
+   * settled here would become an op a second after the reset deleted the
+   * outbox it should have been in.
+   *
+   * The document itself is not touched. It is replaced wholesale by the
+   * `adopt` that follows, which is the only thing that can put this tab on the
+   * server's version -- see #emit for why an edit cannot.
+   */
+  discardLocal(): void {
+    for (const timer of this.#typing.values()) clearTimeout(timer);
+    this.#typing.clear();
+    this.#outbound = [];
+    this.drafts = {};
+    this.marks = {};
+    this.#baseline = {};
+  }
+
   /* ---------------------------------------------------------------------- */
 
   /**

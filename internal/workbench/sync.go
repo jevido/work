@@ -768,6 +768,61 @@ func (s *Sync) compact() error {
 	return writeCursor(filepath.Join(s.dir, cursorFile), 0)
 }
 
+// resetToServer throws this machine's copy away and reads the workspace back
+// from the server.
+//
+// What "discard my local changes" has to mean here. Ops are merged rather than
+// overwritten, so there is no version of this that edits the document back
+// into shape: a local op that lost a field is still in the log, and replaying
+// the log is what produces the document. The only way to a copy that is the
+// server's is to stop having a local one -- the outbox, the journal, the
+// cursor and the merged state all go, and the log comes down again from zero.
+//
+// The order matters and is the reverse of apply's. The outbox is emptied
+// first, because it holds exactly the work being discarded and an outbox that
+// survived this would push it all back up on the next cycle -- the reset would
+// undo itself in three seconds. The journal follows, then the cursor, and only
+// then is the merged state dropped: a crash part way through leaves a machine
+// with less history than it had and a cursor that says so, which the next pull
+// repairs.
+//
+// This is destructive and says so by being hard to reach: nothing calls it but
+// Workbench.ResetToServer, which is behind a confirmation.
+func (s *Sync) resetToServer(ctx context.Context) error {
+	if s.local() {
+		return errors.New("workbench: this workspace is only on this machine, so there is no server copy to take")
+	}
+
+	if err := s.q.clear(); err != nil {
+		return err
+	}
+	if err := s.compact(); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	s.state = ops.State{}
+	// Clocks start again with the log. Whatever this replica had issued was
+	// issued for ops that no longer exist here, and reserveClocks floors the
+	// next one at the state's clock anyway, so the pull below sets it.
+	s.issued = 0
+	// Nothing of ours is in the document any more, so there is nothing left
+	// for a remote write to displace. Keeping the old entries would report a
+	// conflict against a value this machine no longer claims.
+	s.writes = writeLog{}
+	s.mu.Unlock()
+
+	if err := s.pull(ctx); err != nil {
+		s.fail(err)
+		return err
+	}
+
+	s.setState(SyncOnline)
+	s.setErr(nil)
+	s.publish()
+	return nil
+}
+
 // bumpHead records the server's head, which only ever grows.
 func (s *Sync) bumpHead(head int64) {
 	for {

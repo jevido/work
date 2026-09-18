@@ -192,6 +192,23 @@ func (q *queue) append(batch ...ops.Op) error {
 	return nil
 }
 
+// clear drops every op the server has not taken.
+//
+// The one call in this file that throws away work on purpose, and the only
+// caller is the reset that asks the server for the workspace again -- see
+// Sync.resetToServer. Everything else here exists to make sure an op that was
+// written down survives, so a method that deletes them is worth being able to
+// find by name.
+func (q *queue) clear() error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.pending = nil
+	// The count is about ops this machine lost to a full outbox, and there is
+	// no outbox left for them to have been lost from.
+	q.dropped = 0
+	return q.rewriteLocked()
+}
+
 // head returns a copy of the oldest n ops, without removing them. They are
 // removed by ack, and only once the server has them.
 func (q *queue) head(n int) []ops.Op {

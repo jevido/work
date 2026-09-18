@@ -37,6 +37,13 @@ const maxTabNameBytes = 200
 // than a spinner that never resolves.
 const joinTimeout = 30 * time.Second
 
+// resetTimeout bounds taking the workspace back from the server.
+//
+// Longer than a join, because it is a join's round trips plus the whole log: a
+// workspace with a year of history behind it comes down a page at a time, and
+// the person who pressed the button is watching a dialog until it finishes.
+const resetTimeout = 5 * time.Minute
+
 // WorkbenchService exposes the agent workbench to the frontend.
 type WorkbenchService struct {
 	wb *workbench.Workbench
@@ -321,6 +328,43 @@ func (s *WorkbenchService) JoinWorkspace(serverURL, writeKey string) (*workbench
 	ctx, cancel := context.WithTimeout(context.Background(), joinTimeout)
 	defer cancel()
 	return s.wb.JoinWorkspace(ctx, serverURL, writeKey)
+}
+
+// KnownWorkspaces lists every workspace this machine holds keys for, the
+// joined one first.
+//
+// The keys are on it. They are handed out on purpose and the server keeps only
+// hashes, so the copy here is the only one anybody has -- which is the whole
+// reason it is worth keeping and worth showing. It is asked for by name, like
+// WorkspaceKeys, rather than riding along on a status payload.
+func (s *WorkbenchService) KnownWorkspaces() ([]workbench.KnownWorkspace, error) {
+	return s.wb.KnownWorkspaces()
+}
+
+// ForgetWorkspaceKeys takes a workspace's keys off this machine. The joined
+// workspace is refused: leaving it is LeaveWorkspace.
+func (s *WorkbenchService) ForgetWorkspaceKeys(id string) error {
+	return s.wb.ForgetWorkspace(id)
+}
+
+// MintKeyForWorkspace issues another key for any workspace this machine has
+// the write key for, joined or not. It is how a read key is got for a
+// workspace whose read key was never written down.
+func (s *WorkbenchService) MintKeyForWorkspace(id, access string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), joinTimeout)
+	defer cancel()
+	return s.wb.MintKeyForWorkspace(ctx, id, access)
+}
+
+// ResetToServer discards this machine's unsent work and reads the workspace
+// back from the server.
+//
+// Destructive and not undoable: the outbox is deleted rather than parked. The
+// frontend asks before calling it.
+func (s *WorkbenchService) ResetToServer() error {
+	ctx, cancel := context.WithTimeout(context.Background(), resetTimeout)
+	defer cancel()
+	return s.wb.ResetToServer(ctx)
 }
 
 // MintKey issues another key for the joined workspace: "read" for a link to

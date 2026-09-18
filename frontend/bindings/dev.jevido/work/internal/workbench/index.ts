@@ -18,6 +18,7 @@ export type {
     Document,
     Edit,
     Keys,
+    KnownWorkspace,
     PlanStep,
     PlanTask,
     RunEvent,

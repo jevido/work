@@ -357,6 +357,28 @@ export interface Keys {
 }
 
 /**
+ * KnownWorkspace is a workspace this machine holds keys for, joined or not.
+ * 
+ * The keys are on it, and that is the whole point: the server keeps hashes and
+ * cannot show a key again, so the copy on this machine is the only one there
+ * is. A panel that could not show it would be a panel that cannot answer the
+ * one question anybody opens it with.
+ */
+export interface KnownWorkspace {
+    "id": string;
+    "name"?: string;
+    "serverUrl"?: string;
+    "writeKey"?: string;
+    "readKey"?: string;
+
+    /**
+     * Joined marks the one this machine is syncing with, so the panel can say
+     * which of them is on screen behind it.
+     */
+    "joined": boolean;
+}
+
+/**
  * Phase says which part of a run a task belongs to. The console groups output
  * by phase so a delegated run reads as a sequence rather than an interleaved
  * mess.

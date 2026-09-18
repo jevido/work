@@ -20,6 +20,7 @@
  */
 import { Events } from "@wailsio/runtime";
 import type {
+  KnownWorkspace,
   Status,
   WorkspaceView,
 } from "../../../bindings/dev.jevido/work/internal/workbench/models.js";
@@ -237,7 +238,16 @@ export class Workspaces {
   async #refreshDocument(): Promise<void> {
     try {
       const doc = await Workbench.WorkspaceDocument();
-      for (const workspace of this.list) workspace.adopt(doc);
+      for (const workspace of this.list) {
+        // Only the tabs whose document Go actually holds. A tab with nowhere
+        // to send has never written a line into the workspace -- it is the
+        // local store and nothing else -- and adopting an empty merged
+        // document into it would replace somebody's outline with nothing,
+        // which is exactly what the unjoined machine has always been able to
+        // rely on not happening. See `send` in #adopt.
+        if (!workspace.send) continue;
+        workspace.adopt(doc);
+      }
     } catch {
       // No transport, or a backend that has not got this call. The local
       // documents stand, which is what an unjoined machine has always done.
@@ -256,6 +266,17 @@ export class Workspaces {
       this.status = null;
     }
     this.#painted = true;
+    // And what is actually in the workspace, which is the half this used to
+    // leave out.
+    //
+    // Each tab opens holding whatever this browser wrote down last time, and
+    // the merged document only arrived when a later `workspace:sync` showed
+    // the cursor had moved. On a launch where nothing else happens -- the
+    // ordinary one -- the cursor does not move, so the app sat there showing
+    // its own last snapshot of a workspace that had since been edited on
+    // another machine. Everything a colleague did between one launch and the
+    // next was invisible until they did something else.
+    await this.#refreshDocument();
   }
 
   /**
@@ -284,8 +305,11 @@ export class Workspaces {
         [{ id: LOCAL_TAB, name: "Workspace", bound: true, dir: "" }];
 
     const next: Workspace[] = [];
+    /** True when a tab in this list is one this window had not opened yet. */
+    let opened = false;
     for (const want of wanted) {
       const found = existing.get(want.id);
+      if (!found) opened = true;
       const workspace = found ?? Storage.open(want.id);
       workspace.name = want.name;
       workspace.bound = want.bound;
@@ -322,6 +346,11 @@ export class Workspaces {
     }
 
     this.list = next;
+    // A tab this window has not seen before opens on whatever localStorage
+    // had for it, which for a tab a colleague just made is nothing. The
+    // document is one call for every tab, so it is asked for once here rather
+    // than waiting for the next thing to happen in the workspace.
+    if (opened && this.#painted) void this.#refreshDocument();
     if (!next.some((w) => w.id === this.activeId)) {
       // The tab that was in front last time, then the one agents run in, then
       // the first. Never null while there is a tab: a panel with nothing
@@ -449,6 +478,15 @@ export class Workspaces {
   keys = $state<{ writeKey: string; readKey: string } | null>(null);
 
   /**
+   * Every workspace this machine holds keys for, the joined one first.
+   *
+   * Empty until somebody opens the panel. These are credentials and they ride
+   * on nothing that is fetched as a matter of course -- the same rule the
+   * workspace view follows.
+   */
+  known = $state<KnownWorkspace[]>([]);
+
+  /**
    * Reads this workspace's keys: both of them, and the same two every time.
    *
    * A machine that joined with a write key has no read key -- the server keeps
@@ -459,6 +497,72 @@ export class Workspaces {
   async loadKeys(): Promise<void> {
     const got = await this.#run(() => Workbench.WorkspaceKeys());
     this.keys = got ? { writeKey: got.writeKey ?? "", readKey: got.readKey ?? "" } : null;
+  }
+
+  /**
+   * Fills the keys panel: the joined workspace and every one this machine has
+   * kept a key for.
+   *
+   * The joined one is asked for first and separately, because that is the ask
+   * that mints a read key for a machine which joined with a write key -- see
+   * Workbench.EnsureKeys. Its failure is ignored: a machine with no workspace
+   * joined, or one that cannot reach its server, still has a list of keys
+   * worth showing, and that list is the whole point of the panel.
+   */
+  async loadKnown(): Promise<void> {
+    try {
+      await Workbench.WorkspaceKeys();
+    } catch {
+      // Nothing joined, or no connection to mint with. The list below is
+      // still worth having.
+    }
+    const got = await this.#run(() => Workbench.KnownWorkspaces());
+    this.known = got ?? [];
+  }
+
+  /**
+   * Asks for another key for any workspace in that list, joined or not.
+   *
+   * What "I need a read-only link for this" resolves to: the server keeps
+   * hashes, so there is no old key to read back and asking for one is asking
+   * for a new one. Every key already handed out keeps working.
+   */
+  async mintFor(id: string, access: "read" | "write"): Promise<string | null> {
+    const key = await this.#run(() => Workbench.MintKeyForWorkspace(id, access));
+    if (key === null) return null;
+    await this.loadKnown();
+    return key;
+  }
+
+  /**
+   * Takes a workspace's keys off this machine.
+   *
+   * Storing a credential has to be reversible or storing it was not a choice
+   * anybody made. Go refuses this for the workspace that is open -- that one
+   * is left rather than forgotten.
+   */
+  async forgetKeys(id: string): Promise<boolean> {
+    const done = await this.#run(() => Workbench.ForgetWorkspaceKeys(id));
+    if (done === null) return false;
+    await this.loadKnown();
+    return true;
+  }
+
+  /**
+   * Throws this machine's copy away and takes the server's.
+   *
+   * Both halves, and the second one is easy to forget: Go drops the outbox,
+   * the journal and the merged state and pulls the log again, and then every
+   * tab here has to stop showing what this browser wrote down. A tab that
+   * kept its drafts would put the discarded text straight back on screen --
+   * and the first keystroke after that would send it.
+   */
+  async resetToServer(): Promise<boolean> {
+    const done = await this.#run(() => Workbench.ResetToServer());
+    if (done === null) return false;
+    for (const workspace of this.list) workspace.discardLocal();
+    await this.#refreshDocument();
+    return true;
   }
 
   /**

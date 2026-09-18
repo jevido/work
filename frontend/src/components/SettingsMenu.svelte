@@ -46,6 +46,28 @@
     }
   }
 
+  /** True while the discard is waiting to be confirmed. */
+  let resetting = $state(false);
+  /** What the last discard did, or null. */
+  let resetNote = $state<string | null>(null);
+
+  /**
+   * Throws this machine's copy away and reads the workspace back.
+   *
+   * The menu stays open afterwards: this takes as long as the log does, and
+   * the line it leaves is the only evidence that anything happened -- a
+   * workspace that was already in step with the server looks identical before
+   * and after.
+   */
+  async function reset() {
+    resetting = false;
+    resetNote = null;
+    const done = await workspaces.resetToServer();
+    resetNote = done
+      ? "Taken from the server. What this machine had not sent is gone."
+      : (workspaces.error ?? "Could not fetch the workspace.");
+  }
+
   let open = $state(false);
   let root: HTMLDivElement | undefined = $state();
   let trigger: HTMLButtonElement | undefined = $state();
@@ -61,6 +83,8 @@
   function close(focusTrigger = true) {
     if (!open) return;
     open = false;
+    // A confirmation somebody walked away from is a no.
+    resetting = false;
     if (focusTrigger) trigger?.focus();
   }
 
@@ -167,6 +191,36 @@
         </p>
       {/if}
 
+      {#if workspaces.cloud}
+        <!-- The way back from a copy that has gone wrong.
+
+             Last in the menu and behind a confirmation, because it is the only
+             control in this app that deletes work on purpose: the ops this
+             machine never got accepted are discarded, not parked, and the
+             workspace is read back from the server. It is here rather than
+             next to Refresh because the two are opposites -- Refresh brings
+             everybody else's work in and keeps yours. -->
+        {#if resetting}
+          <p class="hint warn" role="alert">
+            Discard everything this machine has not sent and take the server's copy?
+            Anything held back or refused is gone for good.
+          </p>
+          <div class="confirm">
+            <button role="menuitem" onclick={() => (resetting = false)}>Keep mine</button>
+            <button role="menuitem" class="danger" onclick={reset} disabled={workspaces.busy}>
+              {workspaces.busy ? "Fetching…" : "Discard and fetch"}
+            </button>
+          </div>
+        {:else}
+          <button role="menuitem" onclick={() => (resetting = true)} disabled={workspaces.busy}>
+            Discard local changes, fetch from server…
+          </button>
+        {/if}
+        {#if resetNote}
+          <p class="hint" role="status">{resetNote}</p>
+        {/if}
+      {/if}
+
       {#if config.error}
         <p class="hint err" role="alert">{config.error}</p>
       {:else if config.note}
@@ -194,6 +248,23 @@
 <style>
   .settings {
     position: relative;
+  }
+
+  .confirm {
+    display: flex;
+    gap: 6px;
+  }
+
+  .confirm button {
+    flex: 1;
+  }
+
+  .danger {
+    color: var(--err);
+  }
+
+  .warn {
+    color: var(--accent);
   }
 
   .wrench {

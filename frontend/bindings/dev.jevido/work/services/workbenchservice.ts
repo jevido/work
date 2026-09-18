@@ -169,6 +169,14 @@ export function CreateWorkspace(serverURL: string, signupToken: string, name: st
 }
 
 /**
+ * ForgetWorkspaceKeys takes a workspace's keys off this machine. The joined
+ * workspace is refused: leaving it is LeaveWorkspace.
+ */
+export function ForgetWorkspaceKeys(id: string): $CancellablePromise<void> {
+    return $Call.ByID(3095841088, id);
+}
+
+/**
  * GetConfigPath returns the folder Work loads agents from, or an empty string
  * if the user has not picked one yet. An empty result is the first-run signal.
  */
@@ -182,6 +190,19 @@ export function GetConfigPath(): $CancellablePromise<string> {
  */
 export function JoinWorkspace(serverURL: string, writeKey: string): $CancellablePromise<workbench$0.WorkspaceView | null> {
     return $Call.ByID(1719684323, serverURL, writeKey);
+}
+
+/**
+ * KnownWorkspaces lists every workspace this machine holds keys for, the
+ * joined one first.
+ * 
+ * The keys are on it. They are handed out on purpose and the server keeps only
+ * hashes, so the copy here is the only one anybody has -- which is the whole
+ * reason it is worth keeping and worth showing. It is asked for by name, like
+ * WorkspaceKeys, rather than riding along on a status payload.
+ */
+export function KnownWorkspaces(): $CancellablePromise<workbench$0.KnownWorkspace[] | null> {
+    return $Call.ByID(390949271);
 }
 
 /**
@@ -202,6 +223,15 @@ export function LeaveWorkspace(): $CancellablePromise<void> {
  */
 export function MintKey(access: string): $CancellablePromise<string> {
     return $Call.ByID(255128169, access);
+}
+
+/**
+ * MintKeyForWorkspace issues another key for any workspace this machine has
+ * the write key for, joined or not. It is how a read key is got for a
+ * workspace whose read key was never written down.
+ */
+export function MintKeyForWorkspace(id: string, access: string): $CancellablePromise<string> {
+    return $Call.ByID(798165641, id, access);
 }
 
 /**
@@ -238,6 +268,17 @@ export function Permissions(): $CancellablePromise<$models.Permissions> {
  */
 export function ReloadAgents(): $CancellablePromise<workbench$0.AgentStatus[] | null> {
     return $Call.ByID(1153881361);
+}
+
+/**
+ * ResetToServer discards this machine's unsent work and reads the workspace
+ * back from the server.
+ * 
+ * Destructive and not undoable: the outbox is deleted rather than parked. The
+ * frontend asks before calling it.
+ */
+export function ResetToServer(): $CancellablePromise<void> {
+    return $Call.ByID(819709267);
 }
 
 /**

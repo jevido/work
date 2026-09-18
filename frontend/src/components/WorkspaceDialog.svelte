@@ -1,5 +1,6 @@
 <script lang="ts">
   import { looksLikeReadKey } from "../lib/workspace/invite";
+  import type { KnownWorkspace } from "../../bindings/dev.jevido/work/internal/workbench/models.js";
   import type { Workspaces } from "../lib/workspace/workspaces.svelte";
 
   /**
@@ -43,7 +44,7 @@
   let copied = $state<string | null>(null);
 
   /**
-   * The keys, whenever anybody asks.
+   * Every workspace this machine has keys for, whenever anybody asks.
    *
    * This used to be a read key shown once, at creation, with a line saying the
    * server would never show it again. The second half of that was true and the
@@ -52,23 +53,51 @@
    * who wants to send a colleague a read-only link an hour later should not
    * have to make a new workspace to get one.
    *
-   * The server genuinely cannot show an old key -- it keeps hashes -- so the
-   * button that gets you one mints a new one. The old ones keep working.
+   * And it showed one workspace: the one that is open. The keys of every
+   * workspace this machine has been in are on this machine -- the server keeps
+   * hashes and cannot show any of them again -- so the panel that would not
+   * list them was hiding the only copy that exists.
    */
   $effect(() => {
-    if (purpose !== "keys") return;
-    void workspaces.loadKeys();
+    if (!showingKeys) return;
+    void workspaces.loadKnown();
   });
 
-  const keys = $derived(workspaces.keys);
   const showingKeys = $derived(purpose === "keys" || made);
+
+  /** Which workspaces have their keys on screen. Closed until asked. */
+  let revealed = $state<Record<string, boolean>>({});
+
+  function reveal(id: string) {
+    revealed = { ...revealed, [id]: !revealed[id] };
+  }
+
+  /** The viewer link for a workspace, or "" when this machine has no read key. */
+  function viewerLinkFor(entry: KnownWorkspace): string {
+    const at = (entry.serverUrl || "").trim().replace(/\/+$/, "");
+    return entry.readKey && at ? `${at}/#k=${entry.readKey}` : "";
+  }
+
+  /** The same for somebody who is meant to be able to change things. */
+  function joinLinkFor(entry: KnownWorkspace): string {
+    const at = (entry.serverUrl || "").trim().replace(/\/+$/, "");
+    return entry.writeKey && at ? `${at}/#k=${entry.writeKey}` : "";
+  }
+
+  /** The workspace whose keys are being taken off this machine, or null. */
+  let forgetting = $state<KnownWorkspace | null>(null);
+
+  async function forget(entry: KnownWorkspace) {
+    forgetting = null;
+    await workspaces.forgetKeys(entry.id);
+  }
 
   const TITLES: Record<Purpose, string> = {
     create: "New workspace",
     join: "Join a workspace",
     rekey: "Use a different key",
     tab: "New tab",
-    keys: "Keys for this workspace",
+    keys: "Keys on this machine",
   };
 
   /**
@@ -111,7 +140,7 @@
         // The dialog stays open on success and turns into the keys panel: the
         // next thing anybody does after making a workspace is invite somebody
         // to it. Not because this is the last chance to see anything -- the
-        // same panel opens from the badge whenever you want it.
+        // same panel opens from the tab strip whenever you want it.
         if (await workspaces.createShared(server.trim(), signupToken.trim(), name)) made = true;
         return;
       }
@@ -153,15 +182,6 @@
     }
   }
 
-  /** The server the keys belong to: the joined one, else whatever was typed. */
-  const base = $derived((workspaces.view?.serverUrl || server).trim().replace(/\/+$/, ""));
-
-  /** What you actually send somebody: the viewer, with the read key in the fragment. */
-  const viewerLink = $derived(keys?.readKey ? `${base}/#k=${keys.readKey}` : "");
-
-  /** The same for somebody who is meant to be able to change things. */
-  const joinLink = $derived(keys?.writeKey ? `${base}/#k=${keys.writeKey}` : "");
-
   /**
    * Native <dialog>, opened modally.
    *
@@ -182,90 +202,143 @@
 
     {#if showingKeys}
       <!--
-        Both keys, whenever anybody asks.
+        Every workspace whose keys this machine kept, the one that is open
+        first.
 
         A key is a door, not a password: it is what somebody needs to be in the
-        workspace at all, and everyone who is already in it is holding one. The
-        version of this that showed a read key once and said the server would
-        never show it again was treating a share link like a recovery code --
-        and it left the only way to get one being to make a new workspace.
+        workspace at all, and everyone already in it is holding one. The server
+        keeps hashes, so what is on this machine is the only copy of any of
+        them -- which is why they are all listed here, and why this is the only
+        place in the app that offers them. It used to be two buttons in two
+        places, both showing one workspace.
       -->
       {#if made}
-        <p class="lede">Created. These are its keys — this panel opens again from the badge.</p>
+        <p class="lede">Created. Its keys are below — this panel opens again from the tab strip.</p>
       {/if}
 
-      <label>
-        <span>Read-only link</span>
-        <input
-          type="text"
-          value={viewerLink}
-          readonly
-          placeholder="none on this machine yet"
-          onfocus={(e) => e.currentTarget.select()}
-        />
-      </label>
-      <p class="note">
-        Anyone with this can read the map and the plan in a browser, and change nothing.
-        {#if !keys?.readKey}
-          This machine has no read key yet and could not reach the server to get one.
-          It will fill in the next time this panel opens with a connection.
-        {/if}
-      </p>
-      <div class="row">
-        <button
-          type="button"
-          class="ghost"
-          disabled={!viewerLink}
-          onclick={() => copy("read", viewerLink)}
-        >
-          {copied === "read" ? "Copied" : "Copy"}
-        </button>
-        <!--
-          A second read key, not a replacement, and the label says so. This
-          used to read "Make a fresh one", which on a panel that also had an
-          empty field made it look as though looking at your keys issued a new
-          one every time. It does not: the field above is filled in once and
-          stays, and this is here for somebody who wants a separate link to
-          hand out.
-        -->
-        <button
-          type="button"
-          class="ghost"
-          disabled={workspaces.busy}
-          onclick={() => workspaces.mint("read")}
-        >
-          Make another read key
-        </button>
-      </div>
+      {#if workspaces.known.length === 0}
+        <p class="note none">
+          No keys on this machine. A workspace made here or joined here keeps its keys,
+          and a workspace that lives only on this machine has none to keep.
+        </p>
+      {/if}
 
-      <label>
-        <span>Write key</span>
-        <input type="text" value={keys?.writeKey ?? ""} readonly onfocus={(e) => e.currentTarget.select()} />
-      </label>
+      {#each workspaces.known as entry (entry.id)}
+        {@const open = revealed[entry.id] === true}
+        {@const viewerLink = viewerLinkFor(entry)}
+        {@const joinLink = joinLinkFor(entry)}
+        <section class="known">
+          <div class="known-head">
+            <div class="known-name">
+              <strong>{entry.name || "Untitled workspace"}</strong>
+              {#if entry.joined}<span class="here">open here</span>{/if}
+              <span class="where">{entry.serverUrl}</span>
+            </div>
+            <button
+              type="button"
+              class="ghost"
+              aria-expanded={open}
+              onclick={() => reveal(entry.id)}
+            >
+              {open ? "Hide keys" : "Keys"}
+            </button>
+          </div>
+
+          {#if open}
+            <label>
+              <span>Read-only link</span>
+              <input
+                type="text"
+                value={viewerLink}
+                readonly
+                placeholder="no read key on this machine"
+                onfocus={(e) => e.currentTarget.select()}
+              />
+            </label>
+            <div class="row">
+              <button
+                type="button"
+                class="ghost"
+                disabled={!viewerLink}
+                onclick={() => copy(`read:${entry.id}`, viewerLink)}
+              >
+                {copied === `read:${entry.id}` ? "Copied" : "Copy"}
+              </button>
+              <!-- Only when there is nothing to copy. The server cannot show a
+                   key twice, so a machine that joined with a write key has no
+                   read key until it asks for one -- and asking for a second
+                   one when the first is right there in the field above is what
+                   made this panel look as though looking at keys issued
+                   them. -->
+              {#if !viewerLink}
+                <button
+                  type="button"
+                  class="ghost"
+                  disabled={workspaces.busy}
+                  onclick={() => workspaces.mintFor(entry.id, "read")}
+                >
+                  Get a read key
+                </button>
+              {/if}
+            </div>
+
+            <label>
+              <span>Write key</span>
+              <input
+                type="text"
+                value={entry.writeKey}
+                readonly
+                onfocus={(e) => e.currentTarget.select()}
+              />
+            </label>
+            <p class="note">
+              Anyone holding this can change the workspace. The link copies as an invitation
+              somebody can join with.
+            </p>
+            <div class="row">
+              <button
+                type="button"
+                class="ghost"
+                disabled={!joinLink}
+                onclick={() => copy(`write:${entry.id}`, joinLink)}
+              >
+                {copied === `write:${entry.id}` ? "Copied" : "Copy link"}
+              </button>
+              {#if !entry.joined}
+                <!-- A key off the machine, which has to be possible or keeping
+                     it was not a decision anybody could reverse. The joined
+                     workspace has no such button: leaving it is what that is,
+                     and it is in the badge. -->
+                <button
+                  type="button"
+                  class="ghost"
+                  disabled={workspaces.busy}
+                  onclick={() => (forgetting = entry)}
+                >
+                  Forget these keys
+                </button>
+              {/if}
+            </div>
+          {/if}
+        </section>
+      {/each}
+
+      {#if forgetting}
+        <p class="warn" role="alert">
+          Forget the keys for <strong>{forgetting.name || "that workspace"}</strong>? The
+          server cannot show them again, so this machine would need somebody to send them
+          before it could open that workspace.
+        </p>
+        <div class="row">
+          <button type="button" class="ghost" onclick={() => (forgetting = null)}>Keep them</button>
+          <button type="button" class="ghost danger" onclick={() => forgetting && forget(forgetting)}>
+            Forget them
+          </button>
+        </div>
+      {/if}
+
       <p class="note">
-        This is the one this machine syncs with. Anyone holding it can change the
-        workspace, so send it only to people who should be able to.
-      </p>
-      <div class="row">
-        <button
-          type="button"
-          class="ghost"
-          disabled={!joinLink}
-          onclick={() => copy("write", joinLink)}
-        >
-          {copied === "write" ? "Copied" : "Copy link"}
-        </button>
-        <button
-          type="button"
-          class="ghost"
-          disabled={workspaces.busy}
-          onclick={() => workspaces.mint("write")}
-        >
-          Make another write key
-        </button>
-      </div>
-      <p class="note">
-        Making a key never takes one away: every key already in use keeps working.
+        Asking for a key never takes one away: every key already in use keeps working.
       </p>
 
       {#if workspaces.error}
@@ -500,6 +573,68 @@
   .row button:disabled {
     opacity: 0.45;
     cursor: default;
+  }
+
+  .known {
+    display: grid;
+    gap: 10px;
+    padding: 10px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--panel-2);
+  }
+
+  .known-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .known-name {
+    display: grid;
+    min-width: 0;
+    gap: 2px;
+    margin-right: auto;
+  }
+
+  .known-name strong {
+    overflow-wrap: anywhere;
+  }
+
+  .here {
+    justify-self: start;
+    padding: 1px 6px;
+    border-radius: 999px;
+    background: var(--accent);
+    color: #1a1408;
+    font-size: 10px;
+  }
+
+  .where {
+    color: var(--muted);
+    font-size: 11px;
+    overflow-wrap: anywhere;
+  }
+
+  .known-head .ghost {
+    flex: none;
+    padding: 4px 10px;
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    background: var(--panel);
+    color: var(--muted);
+    font: inherit;
+    font-size: 11px;
+    cursor: pointer;
+  }
+
+  .none {
+    margin: 0;
+  }
+
+  .danger {
+    border-color: var(--err);
+    color: var(--err);
   }
 
   summary {
