@@ -2,7 +2,6 @@
   import { untrack } from "svelte";
   import ClaudeConsole from "./components/ClaudeConsole.svelte";
   import ConfigSetup from "./components/ConfigSetup.svelte";
-  import HintBar from "./components/HintBar.svelte";
   import IdeaOutline from "./components/IdeaOutline.svelte";
   import KanbanBoard from "./components/KanbanBoard.svelte";
   import NextTask from "./components/NextTask.svelte";
@@ -361,6 +360,26 @@
         event.preventDefault();
         active.mode = mode;
       }
+      return;
+    }
+
+    // Alt+1..9 switches workspace, the same way Ctrl switches mode.
+    //
+    // The tab strip has the ARIA tab keyboard already -- arrows, Home, End --
+    // and it has it once you are in the strip. Getting there from the map or
+    // the composer is the part that costs, and it costs exactly what switching
+    // modes used to before Ctrl+1 existed.
+    //
+    // Alt rather than Ctrl because Ctrl+1..3 is taken, and the number is a
+    // position in the strip rather than an id: "the second tab" is what
+    // somebody looking at it means.
+    if (event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey) {
+      const at = Number(event.key) - 1;
+      if (!Number.isInteger(at) || at < 0) return;
+      const workspace = workspaces.list[at];
+      if (!workspace) return;
+      event.preventDefault();
+      workspaces.select(workspace.id);
     }
   }
 </script>
@@ -662,19 +681,6 @@
         </ClaudeConsole>
       </aside>
     </div>
-
-    <!--
-      What the keyboard does here, along the bottom of the window.
-
-      Outside .body rather than inside a pane, and that is the whole reason it
-      works: it spans the map, the plan and the console alike, so it is in the
-      same place whichever of them you are looking at. Work mode has none --
-      the office is watched rather than typed into, and a strip of shortcuts
-      for a screen with no caret would be three lies in a row.
-    -->
-    {#if active && active.mode !== "work"}
-      <HintBar mode={active.mode} />
-    {/if}
   </main>
 {/if}
 
@@ -707,14 +713,12 @@
 
   main {
     display: grid;
-    /* Three rows, and the two `auto` ones are the point: the tab strip takes
-       its own height off the top and the hint strip takes its off the bottom,
-       so both are always there at their natural size and the middle gets
-       whatever is left. Declaring two rows for three children put the hint
-       strip in an implicit row the template had not budgeted for, which came
-       out of the tab strip -- the one part of this window that must never move
-       or shrink, because it is how you get to the other tabs. */
-    grid-template-rows: auto minmax(0, 1fr) auto;
+    /* The tab strip takes its own height off the top and the body gets
+       whatever is left. The strip is the one part of this window that must
+       never move or shrink, because it is how you get to the other tabs -- so
+       it has a row of its own rather than an implicit one. There used to be a
+       third for the shortcut strip along the bottom, which is gone. */
+    grid-template-rows: auto minmax(0, 1fr);
     height: 100%;
     overflow: hidden;
   }

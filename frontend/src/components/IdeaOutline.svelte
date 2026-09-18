@@ -170,10 +170,10 @@
 <section class="idea" tabindex="-1" aria-label="Idea outline" {@attach exitTarget} {@attach shortcuts}>
   <header>
     <h2>Outline</h2>
-    <!-- The keys used to be written out here. They are in the strip along the
-         bottom of the window now, where planning mode's are too: two lists of
-         shortcuts in two different places, each covering half of what the same
-         caret can do, is how you end up reading neither. See HintBar. -->
+    <!-- The keys used to be written out here, and then in a strip along the
+         bottom of the window. Neither is here now: a list of shortcuts that is
+         on screen for the life of the app is a thing you stop seeing after the
+         first day, and it was taking a row of the window to say so. -->
     {#if lastLine}
       <button class="ghost" onclick={() => (grouping = grouping === null ? "" : null)}>
         Group branch

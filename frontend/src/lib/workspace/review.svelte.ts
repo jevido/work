@@ -271,6 +271,18 @@ export class Review {
     this.said = "Suggestion discarded. Nothing was changed.";
   }
 
+  /**
+   * Takes the record of what was applied off the screen.
+   *
+   * Not an undo and deliberately not one: the changes stay, and this is
+   * somebody saying they have read the bar. It exists because the bar had no
+   * way out -- it sat above the composer until the next proposal arrived,
+   * which on a quiet afternoon is the rest of the day.
+   */
+  dismissApplied(): void {
+    this.applied = null;
+  }
+
   isApproved(at: number): boolean {
     return this.#approved[at] === true;
   }

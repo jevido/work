@@ -23,6 +23,18 @@
     outcome = review.undo(workspace);
   }
 
+  /**
+   * Closes the bar, leaving what it reported in place.
+   *
+   * Both halves go: the record in the store, so a remount does not bring the
+   * bar back, and the local outcome, which is this component's own note about
+   * an Undo that has already run.
+   */
+  function dismiss() {
+    outcome = null;
+    review.dismissApplied();
+  }
+
   // A new set of changes is a new bar, so whatever the last Undo said about
   // the last one stops being on screen with it.
   $effect(() => {
@@ -46,6 +58,9 @@
         <strong>{outcome.deleted} deleted {outcome.deleted === 1 ? "line is" : "lines are"} gone
         for good.</strong>{/if}
     </p>
+    <p class="close-row">
+      <button class="dismiss" title="Dismiss" onclick={dismiss}>✕</button>
+    </p>
     {#if outcome.kept.length > 0}
       <ul class="kept">
         {#each outcome.kept as row, at (at)}
@@ -68,6 +83,10 @@
         {showing ? "Hide" : "Details"}
       </button>
       <button class="undo" onclick={undo} disabled={!workspace}>Undo</button>
+      <!-- The way out. The bar is a record of something that already
+           happened, so closing it changes nothing and has nothing to warn
+           about -- which is why it is an × and not a confirm. -->
+      <button class="dismiss" title="Dismiss" onclick={dismiss}>✕</button>
     </p>
 
     {#if stuck > 0}
@@ -132,6 +151,31 @@
     font: inherit;
     font-size: 11px;
     cursor: pointer;
+  }
+
+  .dismiss {
+    padding: 2px 6px;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    background: none;
+    color: var(--muted);
+    font: inherit;
+    font-size: 11px;
+    line-height: 1;
+    cursor: pointer;
+  }
+
+  /* On the outcome bar there is no Undo to push it to the right, so the row
+     it sits in does it instead. */
+  .close-row {
+    display: flex;
+    justify-content: flex-end;
+    margin: 4px 0 0;
+  }
+
+  .dismiss:hover {
+    border-color: var(--line);
+    color: var(--text);
   }
 
   .undo:hover:not(:disabled) {
