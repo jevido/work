@@ -14,7 +14,7 @@ services:
     build:
       # The repository root, two levels up: one Go module, one go.mod, and it
       # is at the top. See the Dockerfile.
-      context: ../..
+      context: .
       dockerfile: infra/charted/Dockerfile
     restart: unless-stopped
     depends_on:

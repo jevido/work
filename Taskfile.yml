@@ -48,7 +48,12 @@ tasks:
       `task down` is also how you reset them, and both tokens are the word
       "dev" because nothing is reachable from outside this machine.
     cmds:
-      - docker compose -f infra/dev/compose.yml up -d --build server-dev charted-dev
+      # --project-directory, because every build context in that file is `.`
+      # meaning the repository root. Without it compose resolves relative paths
+      # against the compose file's own directory and the builds see infra/dev
+      # instead. Coolify resolves them from the root too, so this is the one
+      # spelling that means the same thing in both places.
+      - docker compose --project-directory . -f infra/dev/compose.yml up -d --build server-dev charted-dev
       # Waited for rather than assumed. `up -d` returns when the containers have
       # started, which is before Postgres has accepted a connection and before
       # the migrations have run -- so a board printed straight after it names
@@ -95,17 +100,17 @@ tasks:
   down:
     summary: Stops everything and discards both databases
     cmds:
-      - docker compose -f infra/dev/compose.yml down
+      - docker compose --project-directory . -f infra/dev/compose.yml down
 
   logs:
     summary: Follows both services at once
     cmds:
-      - docker compose -f infra/dev/compose.yml logs -f server-dev charted-dev
+      - docker compose --project-directory . -f infra/dev/compose.yml logs -f server-dev charted-dev
 
   status:
     summary: What is up, and on which port
     cmds:
-      - docker compose -f infra/dev/compose.yml ps
+      - docker compose --project-directory . -f infra/dev/compose.yml ps
 
   build:
     summary: Builds every program in the repository
@@ -149,7 +154,7 @@ tasks:
       # services Coolify deploys -- with nothing to substitute for their
       # password. Naming this one starts it and its depends_on and nothing
       # else. See the comment in infra/sync/compose.yml.
-      - docker compose -f infra/dev/compose.yml up -d --build server-dev
+      - docker compose --project-directory . -f infra/dev/compose.yml up -d --build server-dev
       # Quoted whole. Without the outer quotes YAML sees the ": " in
       # "(signup token: ...)" and reads the line as a mapping rather than a
       # string, and task then refuses the file with "invalid keys in command"
@@ -163,12 +168,12 @@ tasks:
       # By name for the same reason, and `down` is enough to discard the
       # database: it lives in tmpfs, not in the named volume the deployment
       # uses.
-      - docker compose -f infra/dev/compose.yml down
+      - docker compose --project-directory . -f infra/dev/compose.yml down
 
   sync:logs:
     summary: Follows the local sync server's log
     cmds:
-      - docker compose -f infra/dev/compose.yml logs -f server-dev
+      - docker compose --project-directory . -f infra/dev/compose.yml logs -f server-dev
 
   sync:test:
     summary: Runs the sync server's tests against the local Postgres
@@ -204,15 +209,15 @@ tasks:
       migrate separately. The data is in tmpfs, so `task charted:down` is also
       how you reset it.
     cmds:
-      - docker compose -f infra/dev/compose.yml up -d --build charted-dev
+      - docker compose --project-directory . -f infra/dev/compose.yml up -d --build charted-dev
       - 'echo "charted on http://localhost:8081 (write token: dev)"'
 
   charted:down:
     summary: Stops Charted and discards its database
     cmds:
-      - docker compose -f infra/dev/compose.yml down charted-dev charted-postgres-dev
+      - docker compose --project-directory . -f infra/dev/compose.yml down charted-dev charted-postgres-dev
 
   charted:logs:
     summary: Follows Charted's log
     cmds:
-      - docker compose -f infra/dev/compose.yml logs -f charted-dev
+      - docker compose --project-directory . -f infra/dev/compose.yml logs -f charted-dev

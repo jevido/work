@@ -23,7 +23,7 @@ services:
       # The repository root, two levels up: the monorepo is one Go module and
       # this binary reaches into packages/ops, so the context has to contain
       # both. See the Dockerfile.
-      context: ../..
+      context: .
       dockerfile: infra/sync/Dockerfile
     # Not just for crashes: this is also what recovers the ungated starts
     # described under depends_on.

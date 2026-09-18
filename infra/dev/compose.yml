@@ -62,10 +62,16 @@
   #     right default and a bad surprise; see .github/workflows/ci.yml.
   # ---------------------------------------------------------------------------
 
+# Pinned, rather than taken from whichever directory compose was invoked from.
+# The name decides the container names and therefore which stack `down` stops:
+# without it, running compose from the repository root and from infra/dev are
+# two different stacks fighting over the same published ports.
+name: work-dev
+
 services:
   server-dev:
     build:
-      context: ../..
+      context: .
       dockerfile: infra/sync/Dockerfile
     # Published, unlike the production service, which is reached through
     # Coolify's proxy and has no ports block at all. Bound to the loopback
@@ -154,7 +160,7 @@ services:
   # ---------------------------------------------------------------------------
   charted-dev:
     build:
-      context: ../..
+      context: .
       dockerfile: infra/charted/Dockerfile
     restart: unless-stopped
     depends_on:
