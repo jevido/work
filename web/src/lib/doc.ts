@@ -113,6 +113,8 @@ const FIELD_EXTRACTED_FROM = "extractedFrom";
 const FIELD_FROM = "from";
 const FIELD_TO = "to";
 const FIELD_REGION = "region";
+/** The paragraph that did not fit on the line. */
+const FIELD_DETAIL = "detail";
 /** What the workbench's own roots carry: a tab has kind "tab" and a name. */
 const FIELD_KIND = "kind";
 const FIELD_NAME = "name";
@@ -129,6 +131,21 @@ const KIND_TAB = "tab";
 const TYPE_TASK = "task";
 const TYPE_EDGE = "edge";
 const TYPE_REGION = "region";
+/**
+ * The two vocabularies a card can be tagged with, and the joins that attach
+ * them.
+ *
+ * A card is under guidelines and has people waiting on it; both are nodes with
+ * text, and both are attached by a join node carrying `from` (the card) and
+ * `to` (the term). Read here for the same reason links and regions are: a card
+ * opened in this viewer should say what the card says in the app, and a
+ * relationship nobody outside the desktop can see may as well not be in the
+ * document.
+ */
+const TYPE_GUIDELINE = "guideline";
+const TYPE_GUIDED = "guided";
+const TYPE_PARTY = "party";
+const TYPE_INTEREST = "interest";
 
 export function textOf(node: DocNode | null | undefined): string {
   const value = node?.fields[FIELD_TEXT];
@@ -185,6 +202,28 @@ export function endsOf(node: DocNode): { from: string; to: string } {
 
 export function isCollapsed(node: DocNode): boolean {
   return node.fields[FIELD_COLLAPSED] === true;
+}
+
+/** The body of a card: what it is, at length. Empty for most lines. */
+export function detailOf(node: DocNode | null | undefined): string {
+  const value = node?.fields[FIELD_DETAIL];
+  return typeof value === "string" ? value : "";
+}
+
+export function isGuideline(node: DocNode): boolean {
+  return node.fields[FIELD_TYPE] === TYPE_GUIDELINE;
+}
+
+export function isGuided(node: DocNode): boolean {
+  return node.fields[FIELD_TYPE] === TYPE_GUIDED;
+}
+
+export function isParty(node: DocNode): boolean {
+  return node.fields[FIELD_TYPE] === TYPE_PARTY;
+}
+
+export function isInterest(node: DocNode): boolean {
+  return node.fields[FIELD_TYPE] === TYPE_INTEREST;
 }
 
 /**

@@ -18,8 +18,13 @@
  */
 import {
   contentsOf,
+  detailOf,
   endsOf,
   isEdge,
+  isGuided,
+  isGuideline,
+  isInterest,
+  isParty,
   isRegion,
   outlineNodes,
   planTasks,
@@ -118,15 +123,33 @@ export class Viewer {
     const regionOf = new Map<string, string>();
     const links = new Map<string, { other: string; text: string; dangling: boolean }[]>();
     const edges: { from: string; to: string }[] = [];
+    // The two vocabularies, and the joins that attach them to cards. Indexed
+    // in the same pass as everything else, the way the desktop app does it: a
+    // card asking "which guidelines am I under" on its own would walk the
+    // whole tree, and a page with four cards open would walk it four times.
+    const nodes = new Map<string, DocNode>();
+    const guidelines = new Map<string, string>();
+    const parties = new Map<string, string>();
+    const guided: { from: string; to: string }[] = [];
+    const interests: { from: string; to: string }[] = [];
 
-    const walk = (nodes: readonly DocNode[]) => {
-      for (const node of nodes) {
+    const walk = (list: readonly DocNode[]) => {
+      for (const node of list) {
         alive.add(node.id);
+        nodes.set(node.id, node);
         text.set(node.id, textOf(node));
         if (isEdge(node)) {
           edges.push(endsOf(node));
         } else if (isRegion(node)) {
           regions.set(node.id, textOf(node));
+        } else if (isGuideline(node)) {
+          guidelines.set(node.id, textOf(node));
+        } else if (isParty(node)) {
+          parties.set(node.id, textOf(node));
+        } else if (isGuided(node)) {
+          guided.push(endsOf(node));
+        } else if (isInterest(node)) {
+          interests.push(endsOf(node));
         } else {
           const region = regionIdOf(node);
           if (region) regionOf.set(node.id, region);
@@ -149,8 +172,63 @@ export class Viewer {
       add(edge.to, edge.from);
     }
 
-    return { links, regions, regionOf };
+    /** The terms attached to each card, in the order they were attached. */
+    const tagsFor = (joins: readonly { from: string; to: string }[], terms: Map<string, string>) => {
+      const out = new Map<string, string[]>();
+      for (const join of joins) {
+        const name = terms.get(join.to);
+        // A join to a term that has been deleted is not a tag any more. The
+        // desktop app drops it the same way: the vocabulary is what says what
+        // the term means, and without it there is nothing to show.
+        if (name === undefined || !join.from) continue;
+        const list = out.get(join.from) ?? [];
+        list.push(name.trim() || "unnamed");
+        out.set(join.from, list);
+      }
+      return out;
+    };
+
+    return {
+      links,
+      regions,
+      regionOf,
+      nodes,
+      guided: tagsFor(guided, guidelines),
+      interests: tagsFor(interests, parties),
+    };
   });
+
+  /**
+   * One card, as a reader sees it: what it says, what it is for, who is
+   * waiting on it, and what it is joined to.
+   *
+   * Everything on it is already indexed, so opening a card is a handful of map
+   * lookups rather than a walk. Null for an id the document does not hold --
+   * a line deleted on another machine while somebody had its card open.
+   */
+  cardOf(id: string): {
+    id: string;
+    title: string;
+    detail: string;
+    region: string | null;
+    guidelines: string[];
+    parties: string[];
+    links: { other: string; text: string; dangling: boolean }[];
+    tasks: number;
+  } | null {
+    const node = this.graph.nodes.get(id);
+    if (!node) return null;
+    return {
+      id,
+      title: textOf(node),
+      detail: detailOf(node),
+      region: this.regionOf(id),
+      guidelines: this.graph.guided.get(id) ?? [],
+      parties: this.graph.interests.get(id) ?? [],
+      links: this.linksOf(id),
+      tasks: this.tasksOf(id),
+    };
+  }
 
   /** The links touching a node. */
   linksOf(id: string): { other: string; text: string; dangling: boolean }[] {

@@ -28,6 +28,12 @@ export default defineConfig({
   resolve: {
     alias: {
       "@mindmap": fileURLToPath(new URL("../frontend/src/lib/mindmap", import.meta.url)),
+      // And the one piece of panel behaviour the two apps share: dragging a
+      // floating panel by its header. It is the same trade as the map -- pure
+      // geometry with no document model in it, where a drift means a panel
+      // that clamps to its edges slightly differently in two apps rather than
+      // two people looking at different documents.
+      "@ui": fileURLToPath(new URL("../frontend/src/lib/ui", import.meta.url)),
     },
   },
 

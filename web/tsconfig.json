@@ -12,15 +12,21 @@
     "skipLibCheck": true,
     "noEmit": true,
     "strict": true,
-    /* Matches the one alias in vite.config.ts. The map is drawn from the
-       desktop app's geometry; see that file for why this one is safe where an
-       alias onto the merge was not. */
+    /* Matches the aliases in vite.config.ts. The map is drawn from the desktop
+       app's geometry and the cards are dragged by its panel helper; see that
+       file for why those are safe where an alias onto the merge was not. */
     "baseUrl": ".",
     "paths": {
-      "@mindmap/*": ["../frontend/src/lib/mindmap/*"]
+      "@mindmap/*": ["../frontend/src/lib/mindmap/*"],
+      "@ui/*": ["../frontend/src/lib/ui/*"]
     }
   },
   /* The Vite config is Node's, not the browser's, and typing it here would
      mean pulling @types/node into a project whose only job is a static page. */
-  "include": ["src/**/*.ts", "src/**/*.svelte", "../frontend/src/lib/mindmap/*.ts"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.svelte",
+    "../frontend/src/lib/mindmap/*.ts",
+    "../frontend/src/lib/ui/*.ts"
+  ]
 }

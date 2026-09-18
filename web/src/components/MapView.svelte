@@ -1,6 +1,7 @@
 <script lang="ts">
   import { MindmapRenderer } from "@mindmap/renderer";
   import { mapRows } from "../lib/doc";
+  import NoteCard from "./NoteCard.svelte";
   import type { Viewer } from "../lib/viewer.svelte";
 
   let { viewer }: { viewer: Viewer } = $props();
@@ -9,6 +10,29 @@
   let renderer: MindmapRenderer | null = null;
 
   let scale = $state(1);
+
+  /**
+   * The notes whose cards are open, oldest first.
+   *
+   * A list rather than one id, because the app's own card is one panel over a
+   * board and this page is for reading: somebody comparing two branches wants
+   * both on screen, and there is nothing to type into here that a second
+   * panel could take the caret away from.
+   */
+  let open = $state<string[]>([]);
+
+  /**
+   * Opens the card for a note, or brings the one that is already open to the
+   * front.
+   *
+   * Clicking the board behind the cards arrives here as null and is ignored.
+   * In the app that closes the editor, because there is one; here it would
+   * close every card somebody had just arranged, and each card has its own ×.
+   */
+  function pick(id: string | null) {
+    if (!id) return;
+    open = open.includes(id) ? [...open.filter((other) => other !== id), id] : [...open, id];
+  }
 
   const rows = $derived(mapRows(viewer.contents));
 
@@ -40,7 +64,7 @@
       scene,
       () => {},
       (view) => (scale = view.scale),
-      { readonly: true },
+      { readonly: true, onPick: pick },
     );
     renderer = made;
     made.start();
@@ -70,6 +94,10 @@
     any structure.
   -->
   <canvas bind:this={canvas} aria-hidden="true"></canvas>
+
+  {#each open as id, at (id)}
+    <NoteCard {viewer} {id} {at} onclose={() => (open = open.filter((other) => other !== id))} />
+  {/each}
 
   <div class="chips">
     <span class="chip">{rows.length} {rows.length === 1 ? "line" : "lines"}</span>
