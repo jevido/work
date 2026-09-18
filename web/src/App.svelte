@@ -1,5 +1,6 @@
 <script lang="ts">
   import { labelOf, textOf, type DocNode } from "./lib/doc";
+  import Install from "./components/Install.svelte";
   import MapView from "./components/MapView.svelte";
   import { forget, recall, remember, takeKey } from "./lib/key";
   import { Viewer } from "./lib/viewer.svelte";
@@ -270,6 +271,8 @@
       This link is saved in this browser so the address bar does not have to carry it.
     </p>
     <button class="link" onclick={forgetKey}>Forget it on this device</button>
+
+    <Install />
   </footer>
 {/if}
 

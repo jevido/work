@@ -96,6 +96,37 @@ The field names on top of that merge are conventions, not protocol. In full:
 One tree holds both views. Tasks sit at the top level and are told from outline
 lines by `type` alone.
 
+## The install block
+
+The footer, under a board, offers the desktop binary: `components/Install.svelte`.
+
+It is in the footer and nowhere else on purpose. Everybody who reaches this page
+was sent a link by somebody running Work, which makes them the only audience
+with a reason to want it — and a download button above a board somebody opened
+to read one line is an advert in front of the thing they came for. It is
+therefore also absent from the gate screen, which is the one place on this page
+somebody arrives with no board at all.
+
+No version number appears in the file. The links are
+`releases/latest/download/...`, which GitHub redirects to the newest release, so
+a push to main does not leave a stale number here that nothing on this page
+could know had gone stale.
+
+The architecture is a guess, and it says so by offering the other one beside it.
+`navigator.userAgent` gets the OS right and the architecture only when the
+string happens to carry it — Chrome on Linux reports `x86_64` whatever the
+machine is — so `getHighEntropyValues` refines it where it exists, which is
+Chromium only. Firefox keeps the guess.
+
+macOS and Windows get no button at all. Releases are Linux, and a button that
+hands somebody a binary their machine cannot run is worse than a sentence
+telling them to build from source.
+
+The install steps are open rather than folded behind a summary: the binary
+arrives unexecutable and draws into a webview it does not carry, so a download
+on its own does nothing. A page that knows the missing step and hides it sends
+people away.
+
 ## Running it
 
 ```sh
