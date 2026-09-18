@@ -41,6 +41,19 @@ export interface Scene {
 }
 
 /**
+ * Where the view is: how far in, and how far across.
+ *
+ * Reported on every frame that painted, so that a panel drawn over the canvas
+ * can follow the note it belongs to. Pan is in CSS pixels and scale multiplies
+ * map space, which is the same pair the renderer's own transform uses.
+ */
+export interface View {
+  scale: number;
+  panX: number;
+  panY: number;
+}
+
+/**
  * Where a drag left things, for the caller to write down.
  *
  * Every card that moved, with the place it ended up in map space: the one in
@@ -141,7 +154,7 @@ export class MindmapRenderer {
   #ctx: CanvasRenderingContext2D;
   #scene: () => Scene;
   #onDrop: (drop: Drop) => void;
-  #onView: (view: { scale: number }) => void;
+  #onView: (view: View) => void;
 
   #raf = 0;
   #running = false;
@@ -308,7 +321,7 @@ export class MindmapRenderer {
     canvas: HTMLCanvasElement,
     scene: () => Scene,
     onDrop: (drop: Drop) => void,
-    onView: (view: { scale: number }) => void = () => {},
+    onView: (view: View) => void = () => {},
     options: { readonly?: boolean; onPick?: (id: string | null) => void } = {},
   ) {
     this.#readonly = options.readonly === true;
@@ -451,7 +464,7 @@ export class MindmapRenderer {
     this.#scale = 1;
     this.#home();
     this.#dirty = true;
-    this.#onView({ scale: this.#scale });
+    this.#report();
   }
 
   /**
@@ -576,6 +589,38 @@ export class MindmapRenderer {
 
     ctx.restore();
     this.painted++;
+    // Every frame that moved, so anything drawn over the canvas can keep up
+    // with it. A pan is sixty of these a second and each one is three numbers;
+    // a caller that only wants the zoom reads `scale` and assigns it, which is
+    // a write of the same primitive and changes nothing.
+    this.#report();
+  }
+
+  /** Tells the caller where the view is now. See View. */
+  #report(): void {
+    this.#onView({ scale: this.#scale, panX: this.#panX, panY: this.#panY });
+  }
+
+  /**
+   * Where a note is on screen, in CSS pixels from the canvas's top left, or
+   * null for a note that is not on the map.
+   *
+   * What lets a panel be drawn over a note rather than beside it: the board is
+   * a canvas, so anything in the DOM that wants to sit on a note has to be
+   * told where the note is, and told again on every pan and zoom.
+   *
+   * The dragged offset is included -- a note being carried is where the hand
+   * is, not where the layout left it.
+   */
+  placeOf(id: string): { x: number; y: number; width: number; height: number } | null {
+    const box = this.#shifted(id);
+    if (!box) return null;
+    return {
+      x: box.x * this.#scale + this.#panX,
+      y: box.y * this.#scale + this.#panY,
+      width: box.width * this.#scale,
+      height: box.height * this.#scale,
+    };
   }
 
   /**
@@ -1206,7 +1251,7 @@ export class MindmapRenderer {
     this.#panY = py - ((py - this.#panY) / this.#scale) * next;
     this.#scale = next;
     this.#dirty = true;
-    this.#onView({ scale: next });
+    this.#report();
   };
 }
 

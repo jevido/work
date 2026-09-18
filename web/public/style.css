@@ -21,6 +21,24 @@
    */
   --edge: #626a7c;
 
+  /*
+   * A card opened on the board.
+   *
+   * Its own surface rather than --panel, because of where it is drawn: the
+   * board is the darkest thing in the window, and a card two shades off it
+   * reads as a slightly different patch of dark with writing on it. This is
+   * several shades up, with an edge that is meant to be seen -- --line is a
+   * hairline between things in a list and disappears here.
+   *
+   * --card-label is what the small capitals and the asides are set in. It is
+   * lighter than --muted, which was chosen against --panel and is 3.7:1
+   * against this; this one clears 4.5.
+   */
+  --card: #212732;
+  --card-2: #2a313d;
+  --card-line: #454e5e;
+  --card-label: #a7aebd;
+
   /* Text on an accent fill. Not a fixed value: what reads on gold at 90%
      lightness does not read on gold at 40%. */
   --on-accent: #1a1408;
@@ -48,6 +66,13 @@
     --ok: #1f7a5c;
     --err: #b3261e;
     --edge: #6e7684;
+
+    /* In daylight the board is near-white, so a card lifts by being plain
+       white with a firmer edge and its shadow. */
+    --card: #ffffff;
+    --card-2: #f1f3f7;
+    --card-line: #b9c0cc;
+    --card-label: #4a5260;
     /* White on this gold is 5.6:1; the dark ink that works on the light gold
        of the app's own theme is 3.9 here, which is not enough for a button
        label. */

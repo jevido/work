@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { MindmapRenderer } from "@mindmap/renderer";
+  import { MindmapRenderer, type View } from "@mindmap/renderer";
   import { mapRows } from "../lib/doc";
   import NoteCard from "./NoteCard.svelte";
   import type { Viewer } from "../lib/viewer.svelte";
@@ -7,9 +7,21 @@
   let { viewer }: { viewer: Viewer } = $props();
 
   let canvas = $state<HTMLCanvasElement | null>(null);
-  let renderer: MindmapRenderer | null = null;
+  /**
+   * Reactive, because the cards are positioned by asking it where their note
+   * is. A plain variable would give them the answer once and never again.
+   */
+  let renderer = $state<MindmapRenderer | null>(null);
 
-  let scale = $state(1);
+  /**
+   * Where the view is, as the renderer last painted it.
+   *
+   * Replaced whole on every painted frame, which is what makes a card follow
+   * the note under a pan: the cards read this, so a new object is a new
+   * position for every one of them.
+   */
+  let view = $state<View>({ scale: 1, panX: 0, panY: 0 });
+  const scale = $derived(view.scale);
 
   /**
    * The notes whose cards are open, oldest first.
@@ -32,6 +44,44 @@
   function pick(id: string | null) {
     if (!id) return;
     open = open.includes(id) ? [...open.filter((other) => other !== id), id] : [...open, id];
+  }
+
+  /**
+   * Where each open card sits, in the canvas's own pixels.
+   *
+   * A card belongs to a note, so it is drawn on the note: the board is what
+   * says which branch a note is in and what it sits next to, and a panel
+   * parked in the corner of the window makes the reader hold the connection in
+   * their head. It follows the note through a pan and a zoom, and goes off the
+   * edge with it -- the map clips them, the same as it clips the notes.
+   *
+   * The last known place is kept for a note that has left the document while
+   * its card is open. The card says so; moving it to the corner first would
+   * make that read as a bug rather than as news.
+   */
+  const lastSeen = new Map<string, { x: number; y: number }>();
+
+  const places = $derived.by(() => {
+    // Both are read so this recomputes when the view moves and when the
+    // document does -- the second because a note's place is the layout's.
+    void view;
+    void rows;
+    return open.map((id) => {
+      const at = renderer?.placeOf(id) ?? null;
+      if (at) lastSeen.set(id, { x: at.x, y: at.y });
+      return lastSeen.get(id) ?? { x: 0, y: 0 };
+    });
+  });
+
+  /** Brings a card to the front, which is where the newest one already is. */
+  function raise(id: string) {
+    if (open[open.length - 1] === id) return;
+    open = [...open.filter((other) => other !== id), id];
+  }
+
+  function close(id: string) {
+    open = open.filter((other) => other !== id);
+    lastSeen.delete(id);
   }
 
   const rows = $derived(mapRows(viewer.contents));
@@ -63,7 +113,7 @@
       canvas,
       scene,
       () => {},
-      (view) => (scale = view.scale),
+      (now) => (view = now),
       { readonly: true, onPick: pick },
     );
     renderer = made;
@@ -96,7 +146,15 @@
   <canvas bind:this={canvas} aria-hidden="true"></canvas>
 
   {#each open as id, at (id)}
-    <NoteCard {viewer} {id} {at} onclose={() => (open = open.filter((other) => other !== id))} />
+    <NoteCard
+      {viewer}
+      {id}
+      x={places[at].x}
+      y={places[at].y}
+      stack={at}
+      onraise={() => raise(id)}
+      onclose={() => close(id)}
+    />
   {/each}
 
   <div class="chips">

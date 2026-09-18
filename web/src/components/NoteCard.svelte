@@ -5,10 +5,23 @@
   let {
     viewer,
     id,
-    /** How many cards were already open when this one was, for the stagger. */
-    at = 0,
+    /** Where the note is on the canvas, in its pixels. See MapView.places. */
+    x,
+    y,
+    /** How many cards were open before this one, so the newest is on top. */
+    stack = 0,
+    onraise,
     onclose,
-  }: { viewer: Viewer; id: string; at?: number; onclose: () => void } = $props();
+  }: {
+    viewer: Viewer;
+    id: string;
+    x: number;
+    y: number;
+    stack?: number;
+    /** Pressed anywhere on the card: bring it in front of the others. */
+    onraise?: () => void;
+    onclose: () => void;
+  } = $props();
 
   /**
    * The card, read fresh.
@@ -22,9 +35,15 @@
 
   const drag = new PanelDrag();
 
-  /** Where an unmoved card opens, stepping down and right per card. */
-  const STEP = 28;
-  const offset = $derived(Math.min(at, 8) * STEP);
+  /**
+   * Sat on its note rather than beside it.
+   *
+   * A few pixels up and left of the note's own corner, so the paper shows
+   * around two edges of the card and the card reads as that note opened rather
+   * than as a panel that happens to be there. It moves with the board and goes
+   * off the edge with it; the map clips both.
+   */
+  const LIFT = 6;
 
   function onKeydown(event: KeyboardEvent) {
     if (event.key !== "Escape") return;
@@ -44,11 +63,13 @@
   class="card"
   role="dialog"
   aria-label="Note: {card?.title || 'an empty line'}"
-  style:top="{offset}px"
-  style:left="{offset}px"
+  style:left="{x - LIFT}px"
+  style:top="{y - LIFT}px"
+  style:z-index={2 + stack}
   style:transform={drag.transform}
   class:dragging={drag.dragging}
   onkeydown={onKeydown}
+  onpointerdown={() => onraise?.()}
   tabindex="-1"
   {@attach (node: HTMLElement) => void node.focus()}
 >
@@ -120,17 +141,21 @@
 <style>
   .card {
     position: absolute;
-    z-index: 2;
     display: grid;
     gap: 10px;
     width: min(320px, calc(100% - 24px));
     max-height: calc(100% - 24px);
     padding: 0 12px 12px;
     overflow: auto;
-    border: 1px solid var(--line);
+    /* A surface of its own rather than the page's panel colour. The board is
+       the darkest thing in the window and the panel colour is two shades off
+       it, so a card drawn in it read as a slightly different patch of dark
+       with writing on it. This lifts, and the edge is the one meant to be
+       seen -- --line is a hairline between things. */
+    border: 1px solid var(--card-line);
     border-radius: 8px;
-    background: var(--panel);
-    box-shadow: 0 10px 28px rgb(0 0 0 / 0.35);
+    background: var(--card);
+    box-shadow: 0 14px 36px rgb(0 0 0 / 0.5);
   }
 
   /* Lifted while it is being moved, so two overlapping cards cannot leave the
@@ -142,20 +167,21 @@
   header {
     position: sticky;
     top: 0;
+    z-index: 1;
     display: flex;
     align-items: center;
     gap: 8px;
     margin: 0 -12px;
     padding: 8px 12px;
-    border-bottom: 1px solid var(--line);
-    background: var(--panel);
+    border-bottom: 1px solid var(--card-line);
+    background: var(--card);
   }
 
   .chip {
     padding: 1px 8px;
-    border: 1px solid var(--line);
+    border: 1px solid var(--card-line);
     border-radius: 999px;
-    color: var(--muted);
+    color: var(--text);
     font-size: 10.5px;
   }
 
@@ -171,9 +197,13 @@
     cursor: pointer;
   }
 
-  .close:hover {
-    border-color: var(--line);
+  .close {
     color: var(--text);
+  }
+
+  .close:hover {
+    border-color: var(--card-line);
+    background: var(--card-2);
   }
 
   h3 {
@@ -185,7 +215,7 @@
 
   h4 {
     margin: 0 0 4px;
-    color: var(--muted);
+    color: var(--card-label);
     font-size: 10.5px;
     font-weight: 600;
     text-transform: uppercase;
@@ -198,7 +228,10 @@
 
   .detail {
     margin: 0;
-    color: var(--muted);
+    /* The body of the card, in the colour the title is in. It was --muted,
+       which is a label colour: a paragraph somebody opened the card to read
+       should not be the faintest thing on it. */
+    color: var(--text);
     font-size: 12.5px;
     line-height: 1.5;
     white-space: pre-wrap;
@@ -216,8 +249,9 @@
 
   .tags li {
     padding: 2px 8px;
-    border: 1px solid var(--line);
+    border: 1px solid var(--card-line);
     border-radius: 999px;
+    background: var(--card-2);
     font-size: 11px;
   }
 
@@ -228,18 +262,18 @@
   }
 
   .links .dangling {
-    color: var(--muted);
+    color: var(--card-label);
   }
 
   .why {
-    color: var(--muted);
+    color: var(--card-label);
     font-size: 11px;
   }
 
   .tasks,
   .gone {
     margin: 0;
-    color: var(--muted);
+    color: var(--card-label);
     font-size: 12px;
   }
 
