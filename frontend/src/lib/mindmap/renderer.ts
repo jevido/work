@@ -148,6 +148,18 @@ export class MindmapRenderer {
   #shown = true;
   /** Set when something changed and the next frame must actually paint. */
   #dirty = true;
+  /**
+   * Set when the document changed and the arrangement has to be worked out
+   * again.
+   *
+   * Separate from `#dirty` because most repaints are not re-layouts: panning,
+   * zooming, dragging and lifting a note all draw the same boxes in the same
+   * places. See #paint.
+   */
+  #stale = true;
+  /** The rows the current layout was built from, to notice a scene swapped
+      under the renderer without an invalidate. */
+  #rows: readonly unknown[] | null = null;
 
   /** Pan, in device-independent pixels, and the zoom it is applied under. */
   #panX = 0;
@@ -240,6 +252,10 @@ export class MindmapRenderer {
     /** Paints since the drop, so a write that never lands still lets go. */
     frames: number;
   } | null = null;
+  /** What the canvas is showing, in map space. Set at the top of every paint
+      and read by everything that culls; see #view. */
+  #visible = { left: 0, top: 0, right: 0, bottom: 0 };
+
   /** Panning the background rather than moving a node. */
   #panning: { x: number; y: number } | null = null;
 
@@ -417,9 +433,10 @@ export class MindmapRenderer {
     this.#dirty = true;
   }
 
-  /** The document moved. Repaint on the next frame. */
+  /** The document moved. Lay it out again and repaint on the next frame. */
   invalidate(): void {
     this.#dirty = true;
+    this.#stale = true;
   }
 
   /**
@@ -514,8 +531,23 @@ export class MindmapRenderer {
 
   #paint(): void {
     const scene = this.#scene();
-    this.#map = layout(scene.rows, this.#measure);
-    this.#headDepth = shallowest(this.#map.boxes);
+    // Laid out again only when the document moved. A pan, a zoom and every
+    // frame of a drag redraw the same arrangement: rebuilding it per frame
+    // wraps every note's text, clusters the whole tree and relaxes it, which
+    // on a board of a few hundred notes is milliseconds thrown away sixty
+    // times a second.
+    //
+    // Two things say it moved: invalidate(), which is what the document's
+    // owner calls, and a different `rows` array, which catches a caller that
+    // changed the scene without saying so. The second is cheap enough to keep
+    // as the backstop it is -- a stale board is a bug nobody can see the
+    // cause of.
+    if (this.#stale || this.#rows !== scene.rows) {
+      this.#rows = scene.rows;
+      this.#stale = false;
+      this.#map = layout(scene.rows, this.#measure);
+      this.#headDepth = shallowest(this.#map.boxes);
+    }
     this.#land();
     // The first frame that has something to show is the one that decides where
     // the view starts. Before that there is nothing to centre on.
@@ -535,6 +567,8 @@ export class MindmapRenderer {
     ctx.translate(this.#panX, this.#panY);
     ctx.scale(this.#scale, this.#scale);
 
+    this.#visible = this.#view();
+
     this.#paintBoard(ctx);
     this.#paintRegions(ctx, scene);
     this.#paintBranches(ctx);
@@ -542,6 +576,29 @@ export class MindmapRenderer {
 
     ctx.restore();
     this.painted++;
+  }
+
+  /**
+   * The part of map space the canvas is showing.
+   *
+   * What everything below culls against. A board spreads out as soon as
+   * anybody drags a note, so most of it is off screen most of the time, and
+   * paper, a shadow, a tilt and four lines of text drawn outside the window
+   * cost exactly as much as one drawn inside it.
+   *
+   * Worked out once per paint and held in `#visible`: pan, zoom and canvas
+   * size do not move while a frame is being drawn.
+   */
+  #view(): { left: number; top: number; right: number; bottom: number } {
+    const ratio = window.devicePixelRatio || 1;
+    const left = -this.#panX / this.#scale;
+    const top = -this.#panY / this.#scale;
+    return {
+      left,
+      top,
+      right: left + this.#canvas.width / ratio / this.#scale,
+      bottom: top + this.#canvas.height / ratio / this.#scale,
+    };
   }
 
   /**
@@ -647,6 +704,7 @@ export class MindmapRenderer {
    */
   #paintBranches(ctx: CanvasRenderingContext2D): void {
     ctx.lineWidth = 1;
+    const view = this.#visible;
     for (const branch of this.#map.branches) {
       const from = this.#shifted(branch.from);
       const to = this.#shifted(branch.to);
@@ -665,16 +723,27 @@ export class MindmapRenderer {
       const enter = faceOf(to, from);
       const span = Math.hypot(enter.x - exit.x, enter.y - exit.y);
       const reach = Math.max(16, span / 2.4);
+
+      // A cubic stays inside the box around its four control points, so that
+      // box is what decides whether the curve is worth drawing. Two notes on
+      // opposite sides of the window still get their branch drawn, which is
+      // right: the line crosses what is on screen even though neither end is.
+      const ax = exit.x + exit.ux * reach;
+      const ay = exit.y + exit.uy * reach;
+      const bx = enter.x + enter.ux * reach;
+      const by = enter.y + enter.uy * reach;
+      if (
+        Math.max(exit.x, enter.x, ax, bx) < view.left ||
+        Math.min(exit.x, enter.x, ax, bx) > view.right ||
+        Math.max(exit.y, enter.y, ay, by) < view.top ||
+        Math.min(exit.y, enter.y, ay, by) > view.bottom
+      ) {
+        continue;
+      }
+
       ctx.beginPath();
       ctx.moveTo(exit.x, exit.y);
-      ctx.bezierCurveTo(
-        exit.x + exit.ux * reach,
-        exit.y + exit.uy * reach,
-        enter.x + enter.ux * reach,
-        enter.y + enter.uy * reach,
-        enter.x,
-        enter.y,
-      );
+      ctx.bezierCurveTo(ax, ay, bx, by, enter.x, enter.y);
       ctx.stroke();
       // Pointing the way the curve arrived, which is the way the tree runs.
       arrow(ctx, enter.x, enter.y, -enter.ux, -enter.uy, ctx.strokeStyle as string);
@@ -710,6 +779,21 @@ export class MindmapRenderer {
     const at = this.#offsetOf(box.id);
     const x = box.x + at.x;
     const y = box.y + at.y;
+
+    // Off the window, so nothing about it is worth drawing. The margin is the
+    // room the shadow, the lift and the focus ring take outside the box
+    // itself, so a note just past the edge still throws its shadow into view.
+    const view = this.#visible;
+    const margin = LIFT_BLUR;
+    if (
+      x + box.width < view.left - margin ||
+      x > view.right + margin ||
+      y + box.height < view.top - margin ||
+      y > view.bottom + margin
+    ) {
+      return;
+    }
+
     this.#paintNote(ctx, scene, box, x, y, box.id === focused);
   }
 
