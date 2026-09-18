@@ -87,6 +87,12 @@ COPY web/ ./
 # that has no document model at all.
 COPY frontend/src/lib/mindmap /frontend/src/lib/mindmap
 
+# And the panel behaviour the cards are dragged by, which is the second alias
+# and lands the same way: `@ui/*` is ../frontend/src/lib/ui, so from /web it is
+# /frontend/src/lib/ui. Same rule as the map — it imports nothing outside
+# itself, because it is a pointer and two numbers.
+COPY frontend/src/lib/ui /frontend/src/lib/ui
+
 # Typechecked here as well as in CI, for the same reason the stage above runs
 # go test: the check that gates an artifact belongs beside the artifact, not in
 # a job that could be skipped or reordered.
