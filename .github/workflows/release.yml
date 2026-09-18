@@ -23,16 +23,26 @@ name: release
 on:
   push:
     branches: [main]
-    # Changes that cannot end up inside the binary. Frontend sources, Go
-    # sources, the build files and the workflow itself are all absent from
-    # this list on purpose: each of them changes what ships.
+    # Changes that cannot end up inside the desktop binary. The app's own
+    # sources -- apps/studio, the packages it imports, its build files and this
+    # workflow -- are all absent from this list on purpose: each of them changes
+    # what ships.
+    #
+    # The services and the other two apps are here because they are deployed
+    # from their own images and nothing in them is compiled into this binary. A
+    # change to the sync server used to cut a desktop release that was byte-for-
+    # byte the previous one.
     paths-ignore:
       - "**/*.md"
       - "LICENSE"
       - ".gitignore"
+      - ".gitattributes"
       - ".editorconfig"
-      - ".claude/**"
-      - "docs/**"
+      - ".dockerignore"
+      - "services/**"
+      - "infra/**"
+      - "apps/website/**"
+      - "apps/charted/**"
       - ".github/ISSUE_TEMPLATE/**"
 
 # Only what publishing needs: the tag, the release and its assets.
@@ -176,7 +186,7 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          cache-dependency-path: apps/studio/frontend/package-lock.json
 
       - name: Install wails3
         # Pinned to the version in go.mod: the CLI generates the bindings the
@@ -191,6 +201,9 @@ jobs:
         # No GOARCH here: each runner builds for itself, and build:release sets
         # GOARCH from the host architecture, which would override this anyway.
         # matrix.goarch names the artifact; the runner decides the target.
+        # In the app's own directory: wails3 reads the Taskfile beside
+        # build/config.yml, and the repository root's Taskfile only delegates.
+        working-directory: apps/studio
         run: wails3 task build:release OUTPUT=bin/work-linux-${{ matrix.goarch }}
 
       - name: Check the version went in
@@ -199,7 +212,7 @@ jobs:
         # notices.
         run: |
           set -euo pipefail
-          bin=bin/work-linux-${{ matrix.goarch }}
+          bin=apps/studio/bin/work-linux-${{ matrix.goarch }}
           test -x "$bin"
           if ! grep -qF "${{ needs.version.outputs.version }}" "$bin"; then
             echo "::error::$bin does not contain ${{ needs.version.outputs.version }}; the -X main.version stamp did not take"
@@ -209,7 +222,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: work-linux-${{ matrix.goarch }}
-          path: bin/work-linux-${{ matrix.goarch }}
+          path: apps/studio/bin/work-linux-${{ matrix.goarch }}
           if-no-files-found: error
           # Already a compressed-as-it-gets stripped binary.
           compression-level: 0

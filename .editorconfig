@@ -1,0 +1,25 @@
+# Every editor that reads this, and the markdown hook in .claude/hooks, agree on
+# one thing: prose is hard-wrapped at 80 and files end with a newline.
+
+root = true
+
+[*]
+end_of_line = lf
+charset = utf-8
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+[*.go]
+indent_style = tab
+indent_size = 4
+
+[*.md]
+max_line_length = 80
+# Two trailing spaces are a hard line break in markdown, and the only place in
+# the repository where trailing whitespace means something.
+trim_trailing_whitespace = false
+
+[Makefile]
+indent_style = tab

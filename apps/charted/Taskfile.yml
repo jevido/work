@@ -1,0 +1,43 @@
+version: '3'
+
+vars:
+  PACKAGE_MANAGER: '{{.PACKAGE_MANAGER | default "npm"}}'
+
+tasks:
+  dev:
+    summary: Runs the reader on :5176, proxying /v1 to a Charted server
+    desc: |
+      The page needs a server to read from. `task charted:up` from the
+      repository root starts one on :8081, which is where the proxy points by
+      default; CHARTED_SERVER overrides it.
+
+      In production this bundle is served by the Charted binary itself, which
+      has a dist/ built into its image. In development it has none, so this is
+      the port to open.
+    deps:
+      - install
+    cmds:
+      - '{{.PACKAGE_MANAGER}} --prefix . run dev'
+
+  install:
+    internal: true
+    sources:
+      - package-lock.json
+    cmds:
+      - '{{.PACKAGE_MANAGER}} ci'
+    status:
+      - test -d node_modules
+
+  build:
+    summary: Builds the static reader into dist/
+    deps:
+      - install
+    cmds:
+      - '{{.PACKAGE_MANAGER}} run build'
+
+  check:
+    summary: Typechecks the reader
+    deps:
+      - install
+    cmds:
+      - '{{.PACKAGE_MANAGER}} run check'

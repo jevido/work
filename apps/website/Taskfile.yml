@@ -1,0 +1,39 @@
+version: '3'
+
+vars:
+  PACKAGE_MANAGER: '{{.PACKAGE_MANAGER | default "npm"}}'
+
+tasks:
+  dev:
+    summary: Runs the viewer on :5175, proxying /v1 to a sync server
+    desc: |
+      The page needs a server to read from. `task sync:up` from the repository
+      root starts one on :8080, which is where the proxy points by default;
+      WORK_SERVER overrides it.
+    deps:
+      - install
+    cmds:
+      - '{{.PACKAGE_MANAGER}} --prefix . run dev'
+
+  install:
+    internal: true
+    sources:
+      - package-lock.json
+    cmds:
+      - '{{.PACKAGE_MANAGER}} ci'
+    status:
+      - test -d node_modules
+
+  build:
+    summary: Builds the static viewer into dist/
+    deps:
+      - install
+    cmds:
+      - '{{.PACKAGE_MANAGER}} run build'
+
+  check:
+    summary: Typechecks the viewer
+    deps:
+      - install
+    cmds:
+      - '{{.PACKAGE_MANAGER}} run check'

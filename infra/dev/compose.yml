@@ -1,0 +1,192 @@
+# The local development stack: a sync server and a Postgres, on this machine.
+#
+# Its own file, and that is not tidiness. These services used to live in
+# infra/sync/compose.yml behind a `dev` profile, which compose handles correctly and
+# Coolify does not: Coolify parses the file it deploys to work out what the
+# application is, and three more services in it was enough for it to re-derive
+# the domain -- work.jevido.app came off the proxy and was replaced by a
+# generated sslip.io host, with the container still running and healthy behind
+# it. A 503 with nothing wrong in the logs.
+#
+# So the file Coolify deploys describes only what is deployed. Anything for a
+# laptop goes here.
+#
+#     docker compose -f infra/dev/compose.yml up -d --build server-dev
+#
+# The server lands on http://localhost:8080. Its signup token is the word "dev"
+# repeated: the server refuses anything under 24 characters, so "dev" on its own
+# is a container that dies on boot with the reason in its log.
+# Postgres is in tmpfs, so bringing it down is also how you reset it.
+
+    # Deliberately no ports. The database is reachable from the server over
+    # Coolify's internal network and from nowhere else; publishing it would
+    # put a password-only Postgres on the public internet.
+
+  # ---------------------------------------------------------------------------
+  # The local dev stack.
+  #
+  # Everything above is what Coolify deploys, and it deploys it because those
+  # services have no `profiles:` key -- compose runs an unprofiled service
+  # always and a profiled one only when its profile is asked for. So the three
+  # services below are invisible to a deploy and are brought up by hand:
+  #
+  #     docker compose --profile dev up -d --build server-dev
+  #
+  # Named, rather than a bare `up`: an unprofiled service is *always* active,
+  # so a bare `up --profile dev` would also start the two Coolify owns -- with
+  # no SERVICE_PASSWORD_POSTGRES to substitute, which is a Postgres with a
+  # blank password and a server that cannot reach it. Naming one service
+  # starts it and its depends_on, which is exactly the three below.
+  #
+  # They are separate services rather than an override of the two above, which
+  # is the only shape that keeps one file honest for both. An override would
+  # mean the file Coolify reads and the file a laptop reads differ by whatever
+  # somebody remembered to guard, and the guard that gets forgotten is the one
+  # that publishes a port or reuses production's volume.
+  #
+  # What this gives you:
+  #
+  #   - the server on http://localhost:8080, which is what to type into the
+  #     desktop app's "join a workspace" field. http:// is deliberate and
+  #     allowed for exactly this; see cleanServerURL in
+  #     apps/studio/internal/workbench/workspace.go.
+  #   - WORK_SIGNUP_TOKEN set to a long, obviously fake word, so creating the
+  #     first workspace needs no secret read out of anywhere.
+  #   - Postgres on 127.0.0.1:5432 with a `work_test` database beside the dev
+  #     one, which is what TEST_DATABASE_URL points at:
+  #
+  #       export TEST_DATABASE_URL=postgres://work:work@127.0.0.1:5432/work_test?sslmode=disable
+  #       cd services/sync && go test ./...
+  #
+  #     Without that variable the store's tests skip themselves, which is the
+  #     right default and a bad surprise; see .github/workflows/ci.yml.
+  # ---------------------------------------------------------------------------
+
+services:
+  server-dev:
+    build:
+      context: ../..
+      dockerfile: infra/sync/Dockerfile
+    # Published, unlike the production service, which is reached through
+    # Coolify's proxy and has no ports block at all. Bound to the loopback
+    # address on purpose: a dev server with an open signup token has no
+    # business being reachable from the coffee shop's network.
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      - DATABASE_URL=postgres://work:work@postgres-dev:5432/work?sslmode=disable
+      # Not a secret and not pretending to be one. Production reads a 64-byte
+      # value Coolify generated; this is a word you can type, repeated until it
+      # clears the 24-character minimum the server enforces. Under that, the
+      # server refuses to start at all -- see config.go.
+      - WORK_SIGNUP_TOKEN=devdevdevdevdevdevdevdevdev
+      # debug, unlike production: locally the successful requests are the
+      # interesting ones -- they are how you see the desktop app polling.
+      - WORK_LOG_LEVEL=debug
+      - PORT=8080
+    depends_on:
+      postgres-dev:
+        condition: service_healthy
+      postgres-dev-init:
+        # The test database has to exist before anything runs the tests, and
+        # this is the only ordering that says so. The server itself does not
+        # need it -- it migrates its own schema into `work`.
+        condition: service_completed_successfully
+
+  postgres-dev:
+    image: postgres:17-alpine
+    ports:
+      - "127.0.0.1:5432:5432"
+    environment:
+      - POSTGRES_USER=work
+      - POSTGRES_PASSWORD=work
+      - POSTGRES_DB=work
+      - POSTGRES_INITDB_ARGS=--encoding=UTF8 --locale=C
+    # tmpfs rather than the named volume above, and rather than a volume of
+    # its own. A dev database is meant to be thrown away -- the schema comes
+    # from the server's migrations every start -- and keeping it in memory
+    # makes the test suite's round trips noticeably quicker than they are
+    # against a disk-backed one. It also removes any chance of a dev stack
+    # and a production stack ever sharing the volume that holds the op log.
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U work -d work"]
+      interval: 5s
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+
+  postgres-dev-init:
+    image: postgres:17-alpine
+    restart: "no"
+    depends_on:
+      postgres-dev:
+        condition: service_healthy
+    environment:
+      - PGPASSWORD=work
+    # services/sync/store's tests want a database of their own, and the official
+    # image creates exactly one. Idempotent rather than conditional on a
+    # volume that no longer exists: with tmpfs above this runs from empty
+    # every time, and the check costs one query if somebody restarts the
+    # container without recreating it.
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        psql -h postgres-dev -U work -d work -tAc
+        "select 1 from pg_database where datname = 'work_test'" | grep -q 1
+        || createdb -h postgres-dev -U work work_test
+
+  # ---------------------------------------------------------------------------
+  # Charted, and a Postgres of its own.
+  #
+  # A second database rather than a second schema in the first: the two services
+  # are deployed separately and migrate independently, and a shared database is
+  # a shared outage the first time one of them locks a table on start.
+  #
+  #     docker compose -f infra/dev/compose.yml up -d --build charted-dev
+  #
+  # The reader is served by the binary here, built into the image, so
+  # http://localhost:8081 is the whole site. `task charted:dev` is the other way
+  # to run it: the Go server on the host with vite in front of it, which is what
+  # to use while changing the reader.
+  # ---------------------------------------------------------------------------
+  charted-dev:
+    build:
+      context: ../..
+      dockerfile: infra/charted/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      charted-postgres-dev:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgres://charted:charted@charted-postgres-dev:5432/charted?sslmode=disable
+      # The token documentation mode publishes with. A word, because nothing
+      # here is reachable from outside this machine.
+      - CHARTED_TOKEN=dev
+      - PORT=8081
+    ports:
+      - "127.0.0.1:8081:8081"
+
+  charted-postgres-dev:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=charted
+      - POSTGRES_PASSWORD=charted
+      - POSTGRES_DB=charted
+      - POSTGRES_INITDB_ARGS=--encoding=UTF8 --locale=C
+    # Published on a different port from the sync server's, so both dev stacks
+    # can be up at once -- which they will be, because documentation mode reads
+    # one and writes the other.
+    ports:
+      - "127.0.0.1:5433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U charted -d charted"]
+      interval: 5s
+      timeout: 5s
+      start_period: 30s
+      retries: 10

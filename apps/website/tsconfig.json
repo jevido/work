@@ -1,0 +1,32 @@
+{
+  "extends": "@tsconfig/svelte/tsconfig.json",
+  "compilerOptions": {
+    "target": "ESNext",
+    "useDefineForClassFields": true,
+    "module": "ESNext",
+    "resolveJsonModule": true,
+    "allowJs": true,
+    "checkJs": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "skipLibCheck": true,
+    "noEmit": true,
+    "strict": true,
+    /* Matches the aliases in vite.config.ts. The map is drawn from the desktop
+       app's geometry and the cards are dragged by its panel helper; see that
+       file for why those are safe where an alias onto the merge was not. */
+    "baseUrl": ".",
+    "paths": {
+      "@mindmap/*": ["../../packages/mindmap/*"],
+      "@ui/*": ["../../packages/ui/*"]
+    }
+  },
+  /* The Vite config is Node's, not the browser's, and typing it here would
+     mean pulling @types/node into a project whose only job is a static page. */
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.svelte",
+    "../frontend/src/lib/mindmap/*.ts",
+    "../frontend/src/lib/ui/*.ts"
+  ]
+}

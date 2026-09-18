@@ -9,9 +9,9 @@
 # somewhere else.
 #
 # There are two Go modules, and that is the whole reason this file exists.
-# `server/` is a nested module, so the root module's `./...` does not see it:
-# every server test — including the ones behind work.jevido.app — had never run
-# in CI at all. One job per module, each with its own working-directory, is the
+# The repository is one Go module, so the root's `./...` covers the desktop app
+# and the services together. The sync server still gets its own job, because it
+# is the only thing here that needs a Postgres beside it, and that is the
 # only shape that covers both.
 #
 # The `frontend` job is here for the seam rather than for the TypeScript. The
@@ -28,7 +28,7 @@
 # deployed. Three things stop that, and they are deliberately redundant:
 #
 #   1. WORK_REQUIRE_POSTGRES turns the skip into a failure (see
-#      server/internal/pgtest). A missing database is red, not quiet.
+#      services/sync/internal/pgtest). A missing database is red, not quiet.
 #   2. A step connects to TEST_DATABASE_URL with psql and prints the server
 #      version, so the run shows the database was reachable at the exact string
 #      the tests are handed — not merely that a service block exists.
@@ -63,7 +63,7 @@ concurrency:
 
 jobs:
   desktop:
-    name: desktop module
+    name: go module
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -85,20 +85,20 @@ jobs:
           cache: true
 
       - name: Stand in for the embedded frontend
-        # main.go has `//go:embed all:frontend/dist`, and frontend/dist is
+        # main.go has `//go:embed all:frontend/dist`, and that directory is
         # gitignored, so the root package does not compile from a clean
         # checkout. This job is about the Go code; release.yml is what builds
         # the real frontend and proves the two fit together. A placeholder is
         # enough to let the embed resolve.
         run: |
           set -euo pipefail
-          mkdir -p frontend/dist
-          echo '<!-- placeholder: ci does not build the frontend -->' > frontend/dist/index.html
+          mkdir -p apps/studio/frontend/dist
+          echo '<!-- placeholder: ci does not build the frontend -->' > apps/studio/frontend/dist/index.html
 
       - name: gofmt
         # The module's own package directories, listed rather than `gofmt -l .`:
-        # a bare dot would walk into server/, which is a different module with
-        # its own job.
+        # a bare dot would walk into node_modules and every other directory that
+        # is not Go.
         run: |
           set -euo pipefail
           unformatted=$(gofmt -l $(go list -f '{{.Dir}}' ./...))
@@ -113,7 +113,7 @@ jobs:
         run: go vet ./...
 
       - name: go test
-        # -race because internal/ops is reached from more than one goroutine in
+        # -race because packages/ops is reached from more than one goroutine in
         # the app, and -count=1 because a cached PASS proves nothing about this
         # commit.
         run: |
@@ -122,9 +122,9 @@ jobs:
             | tee "$RUNNER_TEMP/desktop.json" \
             | jq -j 'select(.Action=="output") | .Output'
 
-      - name: Check internal/ops actually ran
-        # The merge is shared with the server and is the one package in this
-        # module the sync layer depends on, so "the job was green" has to mean
+      - name: Check packages/ops actually ran
+        # The merge is shared with the sync server and is the one package both
+        # sides run, so "the job was green" has to mean
         # "these tests ran", not "these tests were skipped or dropped from the
         # build".
         if: always()
@@ -133,12 +133,12 @@ jobs:
           results="$RUNNER_TEMP/desktop.json"
           test -s "$results" || { echo "::error::no test output to check"; exit 1; }
 
-          pkg=dev.jevido/work/internal/ops
+          pkg=dev.jevido/work/packages/ops
           passed=$(jq -r --arg p "$pkg" 'select(.Action=="pass" and .Package==$p and has("Test")) | .Test' "$results" | wc -l)
           skipped=$(jq -r --arg p "$pkg" 'select(.Action=="skip" and .Package==$p and has("Test")) | .Test' "$results")
 
           {
-            echo "### desktop module"
+            echo "### go module"
             echo
             echo "- \`$pkg\`: **$passed** tests passed"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -153,8 +153,8 @@ jobs:
           fi
           echo "$pkg: $passed passed, none skipped."
 
-  server:
-    name: server module
+  sync:
+    name: sync service
     runs-on: ubuntu-24.04
 
     services:
@@ -181,26 +181,25 @@ jobs:
       # and a resolver that answers ::1 first turns this into a connection
       # refused that looks like a broken test.
       TEST_DATABASE_URL: postgres://work:work@127.0.0.1:5432/work_test?sslmode=disable
-      # The promise that the line above is real. server/internal/pgtest fails
+      # The promise that the line above is real. services/sync/internal/pgtest fails
       # instead of skipping when this is set, so a database that is configured
       # but unreachable cannot pass as "nothing to run".
       WORK_REQUIRE_POSTGRES: "1"
 
     defaults:
       run:
-        working-directory: server
+        working-directory: services/sync
 
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-go@v5
         with:
-          # The server module's own go.mod. It has a `replace` back up to the
-          # root module for internal/ops, which is why the whole repository is
-          # checked out and not just this directory.
-          go-version-file: server/go.mod
+          # The repository's one go.mod. It covers this service as well as the
+          # desktop app, and packages/ops sits outside this directory, which is
+          # why the whole repository is checked out and not just this one.
+          go-version-file: go.mod
           cache: true
-          cache-dependency-path: server/go.sum
+          cache-dependency-path: go.sum
 
       - name: Prove the database is reachable
         # Not a formality. This connects with the exact TEST_DATABASE_URL the
@@ -215,7 +214,7 @@ jobs:
             *) echo "::error::expected PostgreSQL 17, got: $version"; exit 1 ;;
           esac
           {
-            echo "### server module"
+            echo "### sync service"
             echo
             echo "- database: \`$version\`"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -257,7 +256,7 @@ jobs:
           # Both packages that need the database: the store against Postgres,
           # and the end-to-end tests in package main that put the real handlers
           # in front of it.
-          backed="dev.jevido/work/server/store dev.jevido/work/server"
+          backed="dev.jevido/work/services/sync/store dev.jevido/work/services/sync"
 
           failed=0
           {
@@ -310,12 +309,13 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          # Both frontends. web/ is the read-only viewer and has its own
+          # Both front ends. apps/website is the read-only viewer and has its own
           # lockfile; caching one and not the other would leave half the job
           # installing from the registry every run.
           cache-dependency-path: |
-            frontend/package-lock.json
-            web/package-lock.json
+            apps/studio/frontend/package-lock.json
+            apps/website/package-lock.json
+            apps/charted/package-lock.json
 
       - name: Install wails3
         # Pinned to the version in go.mod, exactly as release.yml pins it: the
@@ -325,23 +325,24 @@ jobs:
         run: go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.18
 
       - name: Stand in for the embedded frontend
-        # For the same reason the desktop job does it: main.go has
+        # For the same reason the Go job does it: main.go has
         # `//go:embed all:frontend/dist`, the directory is gitignored, and
         # generating bindings typechecks the package that embeds it. The real
         # dist is built further down, over the top of this.
         run: |
           set -euo pipefail
-          mkdir -p frontend/dist
-          echo '<!-- placeholder: replaced by the build below -->' > frontend/dist/index.html
+          mkdir -p apps/studio/frontend/dist
+          echo '<!-- placeholder: replaced by the build below -->' > apps/studio/frontend/dist/index.html
 
       - name: Generate the bindings
         # -clean, so a binding for something that no longer exists cannot
         # survive into the typecheck below and make a deleted method look
         # callable.
+        working-directory: apps/studio
         run: wails3 generate bindings -clean=true -ts -i
 
       - name: Check the committed bindings are current
-        # frontend/bindings is generated *and* committed -- the frontend
+        # apps/studio/frontend/bindings is generated *and* committed -- the frontend
         # imports it, so a checkout has to be able to build without a Go
         # toolchain. That makes staleness possible, and staleness here is a
         # frontend typechecking against a backend that no longer exists. This
@@ -349,9 +350,9 @@ jobs:
         # trusted to whoever last changed a service.
         run: |
           set -euo pipefail
-          if ! git diff --quiet --exit-code -- frontend/bindings; then
-            echo "::error::the committed bindings are out of date; run 'wails3 generate bindings -clean=true -ts -i' and commit frontend/bindings"
-            git diff --stat -- frontend/bindings
+          if ! git diff --quiet --exit-code -- apps/studio/frontend/bindings; then
+            echo "::error::the committed bindings are out of date; run 'wails3 generate bindings -clean=true -ts -i' in apps/studio and commit apps/studio/frontend/bindings"
+            git diff --stat -- apps/studio/frontend/bindings
             exit 1
           fi
           echo "the committed bindings match the Go source."
@@ -364,7 +365,7 @@ jobs:
         # fails no typecheck until something calls it.
         run: |
           set -euo pipefail
-          bindings=frontend/bindings/dev.jevido/work/services/workbenchservice.ts
+          bindings=apps/studio/frontend/bindings/dev.jevido/work/apps/studio/internal/bridge/workbenchservice.ts
           test -f "$bindings" || {
             echo "::error::$bindings was not generated"
             exit 1
@@ -386,25 +387,25 @@ jobs:
         # `npm ci`, not `npm install`: the lockfile is the version set that was
         # tested, and a CI run that resolves its own is testing something else.
         run: npm ci
-        working-directory: frontend
+        working-directory: apps/studio/frontend
 
       - name: Typecheck the desktop frontend
         # svelte-check against the generated bindings, which is the whole
         # point of the job: this is where a Go type that changed shape shows
         # up as a compile error on the Svelte side.
         run: npm run check
-        working-directory: frontend
+        working-directory: apps/studio/frontend
 
       - name: Build the desktop frontend
-        # main.go embeds frontend/dist, so a frontend that typechecks and does
+        # main.go embeds its frontend/dist, so a front end that typechecks and does
         # not bundle is a release that cannot be built. Cheaper to find out
         # here than in release.yml.
         run: npm run build
-        working-directory: frontend
+        working-directory: apps/studio/frontend
 
       - name: Install viewer dependencies
         run: npm ci
-        working-directory: web
+        working-directory: apps/website
 
       - name: Typecheck and build the viewer
         # No bindings here, deliberately: the viewer talks to the server over
@@ -414,4 +415,18 @@ jobs:
           set -euo pipefail
           npm run check
           npm run build
-        working-directory: web
+        working-directory: apps/website
+
+      - name: Install reader dependencies
+        run: npm ci
+        working-directory: apps/charted
+
+      - name: Typecheck and build the reader
+        # Charted's reader, for the same reason and on the same terms as the
+        # viewer above: it reads its server over HTTP and imports nothing from
+        # Go, so all it needs is Node.
+        run: |
+          set -euo pipefail
+          npm run check
+          npm run build
+        working-directory: apps/charted

@@ -1,0 +1,21 @@
+# Line endings are LF in the repository, on every platform.
+#
+# Without this a checkout on Windows can commit CRLF back, and a markdown file
+# that round-trips through one shows up as a whole-file diff with nothing
+# changed in it.
+* text=auto eol=lf
+
+# Binary, so git never tries to translate anything inside them.
+*.png binary
+*.jpg binary
+*.webp binary
+*.ico binary
+*.icon binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+
+# Generated and committed. Collapsed in diffs, because reviewing them is
+# reviewing the generator's output rather than anybody's change.
+apps/studio/frontend/bindings/** linguist-generated=true
+**/package-lock.json linguist-generated=true

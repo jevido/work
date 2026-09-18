@@ -1,0 +1,166 @@
+/*
+ * Charted's whole stylesheet outside the components.
+ *
+ * Two themes, one set of tokens. Every colour a component uses is named here,
+ * so a component never picks a hex value and dark mode is not a second
+ * stylesheet to keep in step -- it is this block, redefined.
+ */
+
+:root,
+:root[data-theme="light"] {
+  --bg: #fdfdfc;
+  --panel: #ffffff;
+  --text: #1c1b1a;
+  --muted: #6b6864;
+  --line: #e6e3df;
+  --hover: #f3f1ee;
+  --accent: #b4551d;
+  --accent-soft: #fbf0e7;
+  --code-bg: #f6f4f1;
+  --ink: #1c1b1a;
+}
+
+:root[data-theme="dark"] {
+  --bg: #16151a;
+  --panel: #1c1b21;
+  --text: #ece9e4;
+  --muted: #9a958e;
+  --line: #2c2a32;
+  --hover: #23222a;
+  --accent: #e08a4c;
+  --accent-soft: #2a2119;
+  --code-bg: #1a1920;
+  --ink: #000000;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Inter, Roboto, Helvetica, Arial,
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/*
+ * Code, highlighted by Chroma at write time.
+ *
+ * Class-based, which is why these exist at all: the server emits <span class="k">
+ * and nothing else, so the colour is decided here and follows the theme. A
+ * token with no rule falls back to --text, which is why this list is short --
+ * it names the eight things worth telling apart, not the sixty Chroma can emit.
+ */
+.chroma {
+  color: var(--text);
+}
+
+.chroma .c,
+.chroma .c1,
+.chroma .cm,
+.chroma .cs {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.chroma .k,
+.chroma .kd,
+.chroma .kn,
+.chroma .kc,
+.chroma .kr,
+.chroma .kt {
+  color: #a24ba8;
+}
+
+.chroma .s,
+.chroma .s1,
+.chroma .s2,
+.chroma .sb,
+.chroma .sc {
+  color: #3f7f4f;
+}
+
+.chroma .m,
+.chroma .mi,
+.chroma .mf,
+.chroma .mh {
+  color: #b4551d;
+}
+
+.chroma .nf,
+.chroma .nd {
+  color: #2d6ea8;
+}
+
+.chroma .nt {
+  color: #2d6ea8;
+}
+
+.chroma .na {
+  color: #8a6d1f;
+}
+
+.chroma .err {
+  color: #c2452f;
+}
+
+.chroma .line {
+  display: block;
+}
+
+:root[data-theme="dark"] .chroma .k,
+:root[data-theme="dark"] .chroma .kd,
+:root[data-theme="dark"] .chroma .kn,
+:root[data-theme="dark"] .chroma .kc,
+:root[data-theme="dark"] .chroma .kr,
+:root[data-theme="dark"] .chroma .kt {
+  color: #cd8ad4;
+}
+
+:root[data-theme="dark"] .chroma .s,
+:root[data-theme="dark"] .chroma .s1,
+:root[data-theme="dark"] .chroma .s2,
+:root[data-theme="dark"] .chroma .sb,
+:root[data-theme="dark"] .chroma .sc {
+  color: #86c99a;
+}
+
+:root[data-theme="dark"] .chroma .m,
+:root[data-theme="dark"] .chroma .mi,
+:root[data-theme="dark"] .chroma .mf,
+:root[data-theme="dark"] .chroma .mh {
+  color: #e2a06a;
+}
+
+:root[data-theme="dark"] .chroma .nf,
+:root[data-theme="dark"] .chroma .nd,
+:root[data-theme="dark"] .chroma .nt {
+  color: #7fb3e8;
+}
+
+:root[data-theme="dark"] .chroma .na {
+  color: #d6c07a;
+}
+
+:root[data-theme="dark"] .chroma .err {
+  color: #e8735c;
+}

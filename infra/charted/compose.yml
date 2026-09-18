@@ -1,0 +1,61 @@
+# Deploys Charted on Coolify.
+#
+# Its own file, beside the sync server's rather than inside it. Coolify parses
+# the file it deploys to work out what the application is, and a second web
+# service in the sync server's file was enough, once, for it to re-derive the
+# domain and drop work.jevido.app off the proxy. One file per deployed thing is
+# what keeps that from being a question.
+#
+# Point a second Coolify "Docker Compose" resource at this repository with
+# infra/charted/compose.yml as its compose path.
+
+services:
+  charted:
+    build:
+      # The repository root, two levels up: one Go module, one go.mod, and it
+      # is at the top. See the Dockerfile.
+      context: ../..
+      dockerfile: infra/charted/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      charted-postgres:
+        condition: service_healthy
+    environment:
+      # Coolify substitutes these before compose sees them: SERVICE_FQDN_*
+      # claims a domain and wires the proxy and its certificate,
+      # SERVICE_PASSWORD_* generates a secret once and keeps it for the life of
+      # the resource. That is what keeps every credential out of this file.
+      - SERVICE_FQDN_CHARTED_8081
+      - PORT=8081
+      - DATABASE_URL=postgres://charted:${SERVICE_PASSWORD_CHARTEDPG}@charted-postgres:5432/charted?sslmode=disable
+      # Without this the deployment is readable and nothing can publish to it.
+      # Set it in Coolify; documentation mode sends it as a bearer token.
+      - CHARTED_TOKEN=${CHARTED_TOKEN}
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --spider --tries=1 http://127.0.0.1:8081/v1/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      start_period: 40s
+      retries: 3
+
+  charted-postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=charted
+      - POSTGRES_PASSWORD=${SERVICE_PASSWORD_CHARTEDPG}
+      - POSTGRES_DB=charted
+      - POSTGRES_INITDB_ARGS=--encoding=UTF8 --locale=C
+    # Deliberately no ports. The database is reachable from Charted over
+    # Coolify's internal network and from nowhere else.
+    volumes:
+      - charted-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U charted -d charted"]
+      interval: 5s
+      timeout: 5s
+      start_period: 30s
+      retries: 10
+
+volumes:
+  charted-pgdata:

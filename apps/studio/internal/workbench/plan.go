@@ -1,0 +1,665 @@
+package workbench
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+
+	"dev.jevido/work/apps/studio/internal/agents"
+	"dev.jevido/work/apps/studio/internal/board"
+)
+
+// PlanMode is Anton's decision about how to approach a task.
+type PlanMode string
+
+const (
+	// ModeSelf means Anton handles the task himself.
+	ModeSelf PlanMode = "self"
+	// ModeTeam means Anton splits the task between specialists.
+	ModeTeam PlanMode = "team"
+)
+
+// PlanStep is one specialist's share of the work.
+type PlanStep struct {
+	AgentID string `json:"agentId"`
+	Task    string `json:"task"`
+	// TaskID names an existing board card to run instead of opening a new one,
+	// so "put the renderer work back on T4" continues that task rather than
+	// duplicating it.
+	TaskID string `json:"taskId,omitempty"`
+	// Files are the paths this step owns for as long as it runs. Steps run at
+	// the same time in one working tree, so this is what stops two agents
+	// editing the same file: a step whose files are taken waits for them. A
+	// directory or a glob claims everything under it. Empty means the step
+	// needs nothing of its own, which is right for reading and answering.
+	Files []string `json:"files,omitempty"`
+}
+
+// BoardUpdate is Anton editing a card without running anything: closing a task
+// you say is finished, renaming one, moving it to someone else.
+type BoardUpdate struct {
+	TaskID  string       `json:"taskId"`
+	Status  board.Status `json:"status,omitempty"`
+	Title   string       `json:"title,omitempty"`
+	AgentID string       `json:"agentId,omitempty"`
+}
+
+// Plan is Anton's answer to "who should do this?", plus any bookkeeping he
+// wants to do on the board while he is there.
+type Plan struct {
+	Mode    PlanMode      `json:"mode"`
+	Reason  string        `json:"reason"`
+	Steps   []PlanStep    `json:"steps"`
+	Updates []BoardUpdate `json:"updates"`
+}
+
+// maxSteps caps how many specialists one task can occupy. Every step is a
+// Claude process, so this is a spend and concurrency limit as much as a
+// design one.
+const maxSteps = 4
+
+// normalise makes a model-authored plan safe to execute: it drops unknown or
+// repeated agents, drops empty tasks, caps the step count, and falls back to
+// ModeSelf when nothing usable is left. The frontend and the runner can then
+// trust the plan without re-checking it.
+func (p *Plan) normalise(reg Registry, known func(taskID string) bool) {
+	seen := make(map[string]bool, len(p.Steps))
+	kept := p.Steps[:0]
+
+	for _, step := range p.Steps {
+		id := strings.TrimSpace(step.AgentID)
+		task := strings.TrimSpace(step.Task)
+		if id == "" || task == "" || seen[id] {
+			continue
+		}
+		agent, ok := reg.Get(id)
+		if !ok || agent.Role == agents.RoleCoordinator {
+			continue
+		}
+		// An adviser is not in the schema's enum, so a plan naming one did not
+		// come from this build -- a resumed session, a hand-written plan, a
+		// newer model ignoring the enum. Dropped rather than reassigned: who
+		// should have had it is a judgement, and quietly handing somebody
+		// else's work to a specialist who was not chosen for it is worse than
+		// a step that is visibly missing.
+		if agent.Advisory {
+			continue
+		}
+		taskID := strings.TrimSpace(step.TaskID)
+		// A card Anton invented does not exist, so drop the reference and let
+		// the step open a fresh card instead of silently writing nowhere.
+		if taskID != "" && (known == nil || !known(taskID)) {
+			taskID = ""
+		}
+		seen[id] = true
+		kept = append(kept, PlanStep{
+			AgentID: id,
+			Task:    task,
+			TaskID:  taskID,
+			// Overlapping claims are not dropped here. Two steps that both
+			// want a file are still both wanted work; delegate runs them one
+			// after the other instead of throwing one away.
+			Files: cleanPaths(step.Files),
+		})
+		if len(kept) == maxSteps {
+			break
+		}
+	}
+	p.Steps = kept
+
+	updates := p.Updates[:0]
+	for _, u := range p.Updates {
+		u.TaskID = strings.TrimSpace(u.TaskID)
+		u.Title = strings.TrimSpace(u.Title)
+		u.AgentID = strings.TrimSpace(u.AgentID)
+		if u.TaskID == "" || known == nil || !known(u.TaskID) {
+			continue
+		}
+		if u.AgentID != "" {
+			// Reassigning a card is giving somebody the work on it, which is
+			// the same act as a step and gets the same answer. Cleared rather
+			// than dropping the whole update: the status and the title in it
+			// are still worth applying.
+			if a, ok := reg.Get(u.AgentID); !ok || a.Advisory {
+				u.AgentID = ""
+			}
+		}
+		if u.Status != "" && !u.Status.Valid() {
+			u.Status = ""
+		}
+		// An update that changes nothing is not worth carrying.
+		if u.Status == "" && u.Title == "" && u.AgentID == "" {
+			continue
+		}
+		updates = append(updates, u)
+	}
+	p.Updates = updates
+
+	if len(p.Steps) == 0 {
+		p.Mode = ModeSelf
+		return
+	}
+	p.Mode = ModeTeam
+}
+
+// Registry is the subset of the agent registry a plan needs. Declaring it here
+// keeps plan handling testable without constructing a whole workbench.
+type Registry interface {
+	Get(id string) (agents.Agent, bool)
+	All() []agents.Agent
+}
+
+// planSchema builds the JSON schema Anton's planning turn must satisfy. The
+// agent IDs are an enum drawn from the registry, so the model cannot name a
+// specialist that does not exist.
+//
+// The empty case is an error rather than a schema with an empty enum, and the
+// caller is expected to have checked: see Workbench.plan, which does not ask
+// for a schema it has nothing to put in. A team of a coordinator and an
+// adviser is the *default* team, so "nobody to delegate to" is an ordinary
+// state of the app and not a failure -- it means Anton answers the task
+// himself, which is what he would have decided anyway.
+func planSchema(reg Registry) (string, error) {
+	ids := specialistIDs(reg)
+	if len(ids) == 0 {
+		return "", fmt.Errorf("workbench: no specialists to delegate to")
+	}
+
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"mode": map[string]any{
+				"type": "string",
+				"enum": []string{string(ModeSelf), string(ModeTeam)},
+			},
+			"reason": map[string]any{
+				"type":        "string",
+				"description": "One or two sentences on why this split.",
+			},
+			"steps": map[string]any{
+				"type":     "array",
+				"maxItems": maxSteps,
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"agentId": map[string]any{"type": "string", "enum": ids},
+						"task": map[string]any{
+							"type":        "string",
+							"description": "The self-contained task for this specialist.",
+						},
+						"taskId": map[string]any{
+							"type": "string",
+							"description": "An existing board task this continues, " +
+								"e.g. T3. Omit to open a new task.",
+						},
+						"files": map[string]any{
+							"type":  "array",
+							"items": map[string]any{"type": "string"},
+							"description": "Repo-relative paths this step will edit, " +
+								"which it owns while it runs. A directory or a glob " +
+								"claims everything under it. No two steps may name " +
+								"the same file. Empty only if the step edits nothing.",
+						},
+					},
+					"required": []string{"agentId", "task", "files"},
+				},
+			},
+			"updates": map[string]any{
+				"type": "array",
+				"description": "Edits to existing board tasks that need no work " +
+					"run: closing one, renaming one, reassigning one.",
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"taskId": map[string]any{
+							"type":        "string",
+							"description": "The task to change, e.g. T3.",
+						},
+						"status": map[string]any{
+							"type": "string",
+							"enum": []string{
+								string(board.StatusTodo), string(board.StatusDoing),
+								string(board.StatusDone), string(board.StatusBlocked),
+							},
+						},
+						"title":   map[string]any{"type": "string"},
+						"agentId": map[string]any{"type": "string", "enum": ids},
+					},
+					"required": []string{"taskId"},
+				},
+			},
+		},
+		"required": []string{"mode", "reason", "steps", "updates"},
+	}
+
+	out, err := json.Marshal(schema)
+	if err != nil {
+		return "", fmt.Errorf("workbench: build plan schema: %w", err)
+	}
+	return string(out), nil
+}
+
+// rosterBlock describes the team, one line per specialist: name, id, and the
+// blurb work is routed on. It is generated from the registry, so adding an
+// agent changes what the coordinator knows without anyone editing prose.
+//
+// This is the only description of the team any prompt carries, and it belongs
+// in the coordinator's system prompt rather than in one turn's text. He is
+// asked who works here on every kind of turn -- routing, answering a task
+// himself, synthesising, and on the side channel -- and only the routing turn
+// used to be told. The other three answered from nothing, which is how he came
+// to contradict the office the user was looking at. One block, read from the
+// same registry the office is drawn from, is what keeps the two agreeing.
+func rosterBlock(reg Registry) string {
+	var b strings.Builder
+	b.WriteString("Your specialists, as they exist right now:\n")
+	n := 0
+	for _, a := range reg.All() {
+		if a.Role == agents.RoleCoordinator {
+			continue
+		}
+		// Advisers are listed and marked, not hidden. Anton is asked who works
+		// here on every kind of turn, and an answer that leaves somebody out
+		// is a wrong answer about the team the user is looking at -- the
+		// office draws them at a desk. What he must not do is give them work,
+		// and he cannot: they are not in the enum he routes with.
+		if a.Advisory {
+			fmt.Fprintf(&b, "- %s (id: %s) — %s. Advises and organises; never takes a step, and cannot be given one.\n",
+				a.Name, a.ID, a.Blurb())
+			n++
+			continue
+		}
+		fmt.Fprintf(&b, "- %s (id: %s) — %s\n", a.Name, a.ID, a.Blurb())
+		n++
+	}
+	if n == 0 {
+		return "You have no specialists right now: the agents folder holds " +
+			"nobody but you. Answer tasks yourself, and if you are asked who " +
+			"is on the team, say that you are the only one.\n"
+	}
+	b.WriteString("That is the whole team. Nobody else works here, and if you ")
+	b.WriteString("are asked who does, this list is the answer.\n")
+	return b.String()
+}
+
+// planPrompt asks Anton to route the task. The team is not repeated here: it
+// is in his system prompt for this turn and for every other one, so a prompt
+// carries one roster rather than two that can disagree.
+//
+// followUp marks a request that arrives mid-conversation. The routing turn
+// itself is stateless, so it is told this much rather than being handed the
+// history: it changes how a terse "and now the other half" should be read.
+func planPrompt(task string, followUp bool, cards []board.Card) string {
+	var b strings.Builder
+	b.WriteString("Route this task among the specialists listed for you.\n\n")
+	b.WriteString("Choose \"self\" with no steps when the task is small, ")
+	b.WriteString("general, or outside every specialty, and you should simply answer it. ")
+	b.WriteString("Choose \"team\" when the task genuinely splits along their specialties, ")
+	b.WriteString("and give each one a self-contained task that does not depend on ")
+	b.WriteString("another specialist's answer, since they work at the same time. ")
+	b.WriteString("Do not delegate for the sake of it.\n")
+
+	b.WriteString("\nThey share one working tree and they work at the same time, ")
+	b.WriteString("so split the task by file, not only by topic. Give every step a ")
+	b.WriteString("\"files\" list naming the paths it will edit, and do not let two ")
+	b.WriteString("steps name the same file, the same directory, or overlapping ")
+	b.WriteString("globs. Prefer whole files or whole directories over guesses at ")
+	b.WriteString("which lines somebody needs.\n")
+	b.WriteString("When the work cannot be cut along file lines -- two halves of one ")
+	b.WriteString("file, or a rename that reaches everywhere -- give the whole of it ")
+	b.WriteString("to one specialist rather than splitting it. Two agents in one ")
+	b.WriteString("file is worse than one agent doing more.\n")
+	b.WriteString("A step that only reads or only answers can leave \"files\" empty. ")
+	b.WriteString("A step whose files are taken waits for them and its card shows ")
+	b.WriteString("as blocked until they are free, so an overlap you leave in costs ")
+	b.WriteString("the run wall-clock time rather than losing an edit.\n")
+
+	b.WriteString("\nYou own the task board. It is the user's window into what ")
+	b.WriteString("you have assigned, and they refer to tasks by ID.\n")
+	if len(cards) == 0 {
+		b.WriteString("The board is empty.\n")
+	} else {
+		b.WriteString("The board:\n")
+		for _, c := range cards {
+			fmt.Fprintf(&b, "- %s [%s] %s: %s\n", c.ID, c.Status, c.AgentID, c.Title)
+		}
+		b.WriteString("\nUse \"updates\" to close, rename or reassign a task the ")
+		b.WriteString("user mentions, and give a step a \"taskId\" when it ")
+		b.WriteString("continues one of these rather than starting something new. ")
+		b.WriteString("Only touch a task that already exists above.\n")
+	}
+
+	if followUp {
+		b.WriteString("\nThis is a follow-up in an ongoing conversation, so the ")
+		b.WriteString("task may lean on what was already discussed. The agent who ")
+		b.WriteString("answers it can see that history; you cannot.\n")
+	}
+	b.WriteString("\nThe task:\n")
+	b.WriteString(task)
+	return b.String()
+}
+
+// synthesisPrompt asks Anton to turn the specialists' separate answers into one.
+func synthesisPrompt(task string, results []stepResult) string {
+	var b strings.Builder
+	b.WriteString("You delegated a task and the specialists have reported back. ")
+	b.WriteString("Give the user one answer: resolve any disagreement, say what to do, ")
+	b.WriteString("and do not merely summarise who said what.\n\nThe original task:\n")
+	b.WriteString(task)
+	b.WriteString("\n")
+
+	for _, r := range results {
+		fmt.Fprintf(&b, "\n--- %s was asked: %s\n", r.AgentName, r.Task)
+		if r.Waited != "" {
+			fmt.Fprintf(&b,
+				"%s had to queue behind %s for the files, so they ran one after "+
+					"the other rather than at the same time.\n",
+				r.AgentName, r.Waited)
+		}
+		if r.BlockedBy != "" {
+			fmt.Fprintf(&b,
+				"%s reported being blocked by %s on %s.\n",
+				r.AgentName, r.BlockedBy, strings.Join(r.BlockedOn, ", "))
+			if r.Retried {
+				fmt.Fprintf(&b,
+					"The files came free and %s was given the work again; "+
+						"what follows is that second attempt.\n", r.AgentName)
+			} else {
+				fmt.Fprintf(&b,
+					"%s did not get another run at it, so this share of the "+
+						"task is unfinished and you should say so.\n", r.AgentName)
+			}
+		}
+		if r.Err != "" {
+			fmt.Fprintf(&b, "%s failed: %s\n", r.AgentName, r.Err)
+			continue
+		}
+		if strings.TrimSpace(r.Output) == "" {
+			fmt.Fprintf(&b, "%s returned nothing.\n", r.AgentName)
+			continue
+		}
+		fmt.Fprintf(&b, "%s replied:\n%s\n", r.AgentName, r.Output)
+		if len(r.Discoveries) > 0 {
+			// Already written into the outline, so the instruction is not to
+			// repeat them as news but to let them change the answer: a dead
+			// end one specialist hit is usually the reason another's advice
+			// has to change.
+			fmt.Fprintf(&b,
+				"\n%s also reported these, which are already recorded in the "+
+					"mindmap -- weigh them in your answer rather than listing "+
+					"them again:\n", r.AgentName)
+			for _, d := range r.Discoveries {
+				fmt.Fprintf(&b, "- %s: %s\n", d.Kind, d.Text)
+			}
+		}
+	}
+	return b.String()
+}
+
+// stepResult is what one specialist produced, ready for synthesis.
+type stepResult struct {
+	AgentID   string
+	AgentName string
+	Task      string
+	Output    string
+	Err       string
+	// Waited names the agent this step queued behind before it could start,
+	// because its files were already taken.
+	Waited string
+	// BlockedBy names the agent this step stopped for after it had started:
+	// the specialist reported it could not finish because somebody else was
+	// in a file it needed. BlockedOn are the files it named.
+	BlockedBy string
+	BlockedOn []string
+	// Retried marks a step that was blocked, waited, and ran again. Its Output
+	// is the second attempt.
+	Retried bool
+	// Discoveries are the findings this step marked in its reply, already
+	// written into the outline by the time synthesis reads them.
+	Discoveries []Discovery
+}
+
+func specialistIDs(reg Registry) []string {
+	all := reg.All()
+	ids := make([]string, 0, len(all))
+	for _, a := range all {
+		// The coordinator does not delegate to himself, and an adviser is not
+		// delegated to at all. Leaving an adviser out of the enum is the
+		// strongest of the four guardrails in agents.Agent.Advisory: it is not
+		// a rule the model is asked to follow, it is an id it cannot produce.
+		if a.Role == agents.RoleCoordinator || a.Advisory {
+			continue
+		}
+		ids = append(ids, a.ID)
+	}
+	return ids
+}
+
+// blockedMarker is the line a specialist ends its reply with when it cannot
+// finish because somebody else is in a file it needs.
+//
+// A specialist's turn is prose, not schema-constrained like Anton's, so a
+// sentinel line is the only channel it has. It is read from the end of the
+// reply and only the paths are trusted: who holds them is answered by the
+// claims table, which knows, rather than by the agent, which is guessing.
+const blockedMarker = "BLOCKED:"
+
+// discoveryMarker is the line a specialist writes when it finds something the
+// plan did not know: a task that is really two, a line of attack that does not
+// work, or something worth doing that came up on the way.
+//
+// Same channel as blockedMarker and for the same reason -- a specialist's turn
+// is prose -- but read differently. A block is a control signal, so only the
+// last line counts; a discovery is a note, so every marked line counts and
+// they can appear anywhere in the reply. Costing nothing is the point: no
+// extra turn, no schema, and a run that finds nothing writes nothing.
+const discoveryMarker = "DISCOVERY:"
+
+// DiscoveryKind is what sort of finding a discovery is. The three are the
+// three things that actually come back from a run and change the thinking
+// behind it.
+type DiscoveryKind string
+
+const (
+	// DiscoverySplit means the task is bigger than one task.
+	DiscoverySplit DiscoveryKind = "split"
+	// DiscoveryDeadEnd means an approach will not work, and why is worth
+	// keeping so nobody tries it again.
+	DiscoveryDeadEnd DiscoveryKind = "dead-end"
+	// DiscoveryIdea means something worth doing turned up on the way. It is
+	// the default for an unlabelled marker.
+	DiscoveryIdea DiscoveryKind = "idea"
+)
+
+// Valid reports whether a kind is one of the three. Discoveries are parsed out
+// of model-authored prose, so the label is never trusted.
+func (k DiscoveryKind) Valid() bool {
+	switch k {
+	case DiscoverySplit, DiscoveryDeadEnd, DiscoveryIdea:
+		return true
+	}
+	return false
+}
+
+// Discovery is one thing a run found, on its way into the mindmap. See
+// Workbench.shareDiscoveries.
+type Discovery struct {
+	Kind DiscoveryKind `json:"kind"`
+	Text string        `json:"text"`
+}
+
+// discoveries reads a specialist's reply for marked findings.
+//
+// A reply with no marker -- the ordinary case -- walks the lines once and
+// allocates nothing. The label is optional and unknown labels read as
+// DiscoveryIdea rather than being dropped: the sentence a specialist wrote is
+// worth more than its guess at which of three boxes it goes in.
+func discoveries(output string) []Discovery {
+	if !strings.Contains(strings.ToUpper(output), discoveryMarker) {
+		return nil
+	}
+
+	var out []Discovery
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		// Markdown gets in the way: an agent asked for a bare line will
+		// sometimes give a bullet, or bold it.
+		line = strings.TrimLeft(line, "-*# ")
+		line = strings.Trim(line, "`*_ ")
+		if !strings.HasPrefix(strings.ToUpper(line), discoveryMarker) {
+			continue
+		}
+		// The emphasis can close after the marker as easily as before it:
+		// "**DISCOVERY:** split: ...". Trimmed from both ends of what is
+		// left, which also takes a trailing bold off the sentence.
+		rest := strings.Trim(line[len(discoveryMarker):], "`*_ ")
+		if rest == "" {
+			continue
+		}
+
+		kind := DiscoveryIdea
+		// "DISCOVERY: dead-end: sharing one queue cannot work". The label is
+		// only taken when it is one of the three, so a colon inside an
+		// ordinary sentence is not mistaken for one.
+		if label, text, ok := strings.Cut(rest, ":"); ok {
+			if candidate := DiscoveryKind(strings.ToLower(strings.TrimSpace(label))); candidate.Valid() {
+				kind = candidate
+				rest = strings.TrimSpace(text)
+			}
+		}
+		if rest == "" {
+			continue
+		}
+
+		out = append(out, Discovery{Kind: kind, Text: rest})
+		if len(out) == maxDiscoveries {
+			return out
+		}
+	}
+	return out
+}
+
+// maxBlockedRetries is how many times one step may report itself blocked,
+// wait, and run again. One is enough for the case this exists for -- a file
+// held by a colleague who is about to finish -- and it bounds a pair of agents
+// who would otherwise take turns blocking each other for the whole run.
+const maxBlockedRetries = 1
+
+// stepPrompt is the task as the specialist receives it: their share of the
+// work, the files that are theirs while they run, and the way out if they find
+// somebody else in one.
+//
+// held lists what other agents are holding right now. It is a snapshot taken
+// as the step starts, so it is advice rather than a guarantee -- which is
+// exactly why the marker exists as well.
+func stepPrompt(task string, files, held []string) string {
+	var b strings.Builder
+	b.WriteString(task)
+
+	if len(files) > 0 {
+		b.WriteString("\n\nThese files are yours for this task, and nobody else ")
+		b.WriteString("is in them:\n")
+		for _, f := range files {
+			fmt.Fprintf(&b, "- %s\n", f)
+		}
+		b.WriteString("\nOther specialists are working in this tree at the same ")
+		b.WriteString("time, so do not edit anything outside that list. If the ")
+		b.WriteString("task turns out to need a file that is not yours, say so ")
+		b.WriteString("rather than taking it.\n")
+	} else {
+		b.WriteString("\n\nNo files are reserved for you on this task. Other ")
+		b.WriteString("specialists are editing this tree right now, so read ")
+		b.WriteString("freely but do not write without saying which file you need.\n")
+	}
+
+	if len(held) > 0 {
+		b.WriteString("\nHeld by other specialists right now:\n")
+		for _, f := range held {
+			fmt.Fprintf(&b, "- %s\n", f)
+		}
+	}
+
+	b.WriteString("\nIf you cannot finish because a file you need is held by ")
+	b.WriteString("someone else, stop there. Report what you did get done, then ")
+	b.WriteString("end your reply with one final line naming only the paths you ")
+	b.WriteString("are waiting on:\n\n    ")
+	b.WriteString(blockedMarker)
+	b.WriteString(" path/one.go path/two.ts\n\n")
+	b.WriteString("Anton watches for that line. He will hold your task until the ")
+	b.WriteString("files are free and then hand it back to you, so stopping is ")
+	b.WriteString("cheaper than working around it. Do not use that line for ")
+	b.WriteString("anything else: not for a question, not for a missing file, ")
+	b.WriteString("not for work you simply chose not to do.\n")
+
+	b.WriteString(discoveryBlock())
+	return b.String()
+}
+
+// discoveryBlock explains the discovery marker.
+//
+// It is on every step prompt rather than only on some, because what a run
+// finds out is not predictable from the task it was given -- that is what
+// makes it a discovery. The instruction is deliberately narrow about what
+// counts: an outline somebody has to read afterwards is worth less the more
+// lines it has that only restate the task.
+func discoveryBlock() string {
+	var b strings.Builder
+	b.WriteString("\nIf the work changes what anyone should think about the ")
+	b.WriteString("plan, say so on its own line and it goes back into the ")
+	b.WriteString("mindmap next to the idea this task came from:\n\n")
+	b.WriteString("    " + discoveryMarker + " split: the renderer needs its own pass\n")
+	b.WriteString("    " + discoveryMarker + " dead-end: one queue cannot serve both, the locks invert\n")
+	b.WriteString("    " + discoveryMarker + " idea: the encode cost is worth measuring on its own\n\n")
+	b.WriteString("Use \"split\" when the task is really two or more, ")
+	b.WriteString("\"dead-end\" when an approach does not work and nobody should ")
+	b.WriteString("try it again, and \"idea\" for something worth doing that came ")
+	b.WriteString("up on the way. One sentence each, at most a few per task, and ")
+	b.WriteString("only for things that outlive this run -- not for progress, not ")
+	b.WriteString("for what you did, and not for restating the task you were given.\n")
+	return b.String()
+}
+
+// retryPrompt hands a blocked step back once its files are free.
+func retryPrompt(task string, files, freed []string) string {
+	var b strings.Builder
+	b.WriteString("You stopped this task because these files were held by ")
+	b.WriteString("another specialist:\n")
+	for _, f := range freed {
+		fmt.Fprintf(&b, "- %s\n", f)
+	}
+	b.WriteString("\nThey are free now and they are yours. Pick the task back up ")
+	b.WriteString("from where you stopped and finish it. Re-read the files before ")
+	b.WriteString("you edit them: somebody else has been in them since you looked, ")
+	b.WriteString("so what you remember of them is out of date.\n\n")
+	b.WriteString("The task, again:\n")
+	b.WriteString(stepPrompt(task, files, nil))
+	return b.String()
+}
+
+// blockedPaths reads a specialist's reply for the blocked marker and returns
+// the paths it named. Nothing found means the step ran to a normal end.
+//
+// Only the last marker in the reply counts, and only when it is the last
+// non-empty line: an agent explaining the convention mid-answer, or quoting a
+// previous turn, is not reporting itself blocked.
+func blockedPaths(output string) []string {
+	lines := strings.Split(output, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		line = strings.Trim(line, "`*_ ")
+		if line == "" {
+			continue
+		}
+		if !strings.HasPrefix(strings.ToUpper(line), blockedMarker) {
+			return nil
+		}
+		rest := strings.TrimSpace(line[len(blockedMarker):])
+		if rest == "" {
+			return nil
+		}
+		// Written as a list as often as a space-separated line.
+		rest = strings.NewReplacer(",", " ", ";", " ").Replace(rest)
+		return cleanPaths(strings.Fields(rest))
+	}
+	return nil
+}

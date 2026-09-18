@@ -1,8 +1,25 @@
-.task
-bin
-frontend/dist
-frontend/node_modules
-web/dist
-web/node_modules
-build/linux/appimage/build
-.tmp-verify
+# Anchored, all of it. An unanchored pattern matches a path *segment* anywhere
+# in the tree, and this repository has a directory called `work` inside the
+# generated bindings -- `dev.jevido/work/...` -- so a bare `work` line silently
+# stopped every binding from being committed.
+
+# Built binaries.
+/work
+/bin/
+apps/*/bin/
+
+# Task's own state, and vite's dependency cache, wherever they are created.
+.task/
+.vite/
+.tmp-verify/
+
+# Front-end installs and builds.
+apps/studio/frontend/dist/
+apps/studio/frontend/node_modules/
+apps/studio/build/linux/appimage/build/
+
+apps/website/dist/
+apps/website/node_modules/
+
+apps/charted/dist/
+apps/charted/node_modules/

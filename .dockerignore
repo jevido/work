@@ -1,9 +1,9 @@
 # What never belongs in the build context.
 #
-# There was no such file until the image started building the viewer, and that
-# is what made one necessary: the site stage copies web/ wholesale, and without
-# these lines it would copy web/node_modules and a web/dist left behind by a
-# local `npm run build` -- the second of which would then shadow the fresh
+# There was no such file until the image started building the website, and that
+# is what made one necessary: the site stage copies apps/website wholesale, and
+# without these lines it would copy its node_modules and a dist left behind by
+# a local `npm run build` -- the second of which would then shadow the fresh
 # build with whatever happened to be on the machine.
 #
 # Everything here is either generated or irrelevant to a server image. The Go
@@ -11,14 +11,15 @@
 # to be sent to the daemon before it starts.
 
 **/node_modules
-web/dist
-frontend/dist
-frontend/bindings
+apps/website/dist
+apps/studio/frontend/dist
+apps/studio/frontend/bindings
+apps/charted/dist
 
 bin
 .task
 .tmp-verify
-build/linux/appimage/build
+apps/studio/build/linux/appimage/build
 
 .git
 .github
