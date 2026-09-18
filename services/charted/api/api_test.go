@@ -75,6 +75,21 @@ func TestPageReadsANestedSlug(t *testing.T) {
 	}
 }
 
+// A site with nothing published is the first thing anybody sees, and the reader
+// loops over this the moment it loads. null would be a page that throws before
+// it draws anything.
+func TestAnEmptySiteHasAnEmptyNav(t *testing.T) {
+	h := New(newFake(), token, nil, quiet())
+
+	rec := ask(t, h, http.MethodGet, "/v1/nav", "", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200", rec.Code)
+	}
+	if body := strings.TrimSpace(rec.Body.String()); body != `{"spaces":[]}` {
+		t.Errorf("body = %s, want an empty array", body)
+	}
+}
+
 func TestMissingPageIs404(t *testing.T) {
 	h := New(newFake(), token, nil, quiet())
 

@@ -267,7 +267,11 @@ func (s *Store) Nav(ctx context.Context) ([]NavSpace, error) {
 	}
 	defer rows.Close()
 
-	var out []NavSpace
+	// An empty array rather than null, the same rule the search and link
+	// endpoints follow: a site with nothing published yet is the first thing
+	// anybody sees, and the reader loops over this without asking whether it is
+	// there.
+	out := []NavSpace{}
 	for rows.Next() {
 		var space NavSpace
 		var page NavPage

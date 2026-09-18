@@ -106,6 +106,11 @@ func (a *API) nav(w http.ResponseWriter, r *http.Request) {
 		a.oops(w, err)
 		return
 	}
+	// Belt as well as braces: the store returns an empty slice, and a Store
+	// that did not would put a null in front of the reader's first render.
+	if spaces == nil {
+		spaces = []store.NavSpace{}
+	}
 	a.ok(w, map[string]any{"spaces": spaces})
 }
 
